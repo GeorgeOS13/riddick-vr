@@ -1,4 +1,5 @@
 #include "opengl_proxy.h"
+#include "opengl_forwarders.h"
 #include "stereo_renderer.h"
 #include "logging.h"
 #include <string>
@@ -40,6 +41,16 @@ static PFN_wglGetProcAddress real_wglGetProcAddress = nullptr;
 static PFN_glViewport       real_glViewport = nullptr;
 static PFN_glScissor        real_glScissor = nullptr;
 
+static void RawProxyLog(const char* msg) {
+    HANDLE hFile = CreateFileA("C:\\Users\\GigelCastel\\riddick-vr\\hook_debug.txt", FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile != INVALID_HANDLE_VALUE) {
+        DWORD written = 0;
+        WriteFile(hFile, msg, (DWORD)strlen(msg), &written, NULL);
+        WriteFile(hFile, "\r\n", 2, &written, NULL);
+        CloseHandle(hFile);
+    }
+}
+
 bool OpenGLProxy::Initialize() {
     if (s_initialized) return true;
 
@@ -47,12 +58,21 @@ bool OpenGLProxy::Initialize() {
     GetSystemDirectoryA(sysPath, MAX_PATH);
     std::string realDllPath = std::string(sysPath) + "\\opengl32.dll";
 
-    VR_LOG_INFO("Loading real OpenGL from: %s", realDllPath.c_str());
+    char logBuf[512];
+    sprintf_s(logBuf, "OpenGLProxy: sysPath='%s', realDllPath='%s'", sysPath, realDllPath.c_str());
+    RawProxyLog(logBuf);
+
     s_hRealOpenGL = LoadLibraryA(realDllPath.c_str());
     if (!s_hRealOpenGL) {
-        VR_LOG_ERROR("Failed to load real system opengl32.dll! Error: %lu", GetLastError());
+        DWORD err = GetLastError();
+        sprintf_s(logBuf, "OpenGLProxy: LoadLibraryA failed with error %lu!", err);
+        RawProxyLog(logBuf);
+        VR_LOG_ERROR("Failed to load real system opengl32.dll! Error: %lu", err);
         return false;
     }
+    char buf[128];
+    sprintf_s(buf, "OpenGLProxy: real opengl32 loaded at %p", (void*)s_hRealOpenGL);
+    RawProxyLog(buf);
 
     real_wglCreateContext = (PFN_wglCreateContext)GetProcAddress(s_hRealOpenGL, "wglCreateContext");
     real_wglDeleteContext = (PFN_wglDeleteContext)GetProcAddress(s_hRealOpenGL, "wglDeleteContext");
@@ -67,6 +87,8 @@ bool OpenGLProxy::Initialize() {
     glDeleteTextures      = (PFN_glDeleteTextures)GetProcAddress(s_hRealOpenGL, "glDeleteTextures");
     glTexImage2D          = (PFN_glTexImage2D)GetProcAddress(s_hRealOpenGL, "glTexImage2D");
     glTexParameteri       = (PFN_glTexParameteri)GetProcAddress(s_hRealOpenGL, "glTexParameteri");
+
+    InitializeForwarders(s_hRealOpenGL);
 
     s_initialized = true;
     VR_LOG_INFO("OpenGLProxy initialized successfully.");

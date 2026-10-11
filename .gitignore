@@ -27,3 +27,8 @@ vcpkg_installed/
 Thumbs.db
 .vscode/
 .idea/
+
+# Logs & temp debug
+*.log
+hook_debug.txt
+all_exports.txt

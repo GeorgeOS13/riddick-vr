@@ -1,0 +1,740 @@
+typedef void* HMODULE;
+typedef void* FARPROC;
+__declspec(dllimport) FARPROC __stdcall GetProcAddress(HMODULE hModule, const char* lpProcName);
+#define NULL ((void*)0)
+
+#define DEFINE_FORWARDER(func) \
+    static void* pReal_##func = NULL; \
+    __declspec(naked) void __stdcall func(void) { \
+        __asm { jmp dword ptr [pReal_##func] } \
+    }
+
+#define LOAD_FORWARDER(func) \
+    pReal_##func = (void*)GetProcAddress(hRealDll, #func)
+DEFINE_FORWARDER(GlmfBeginGlsBlock)
+DEFINE_FORWARDER(GlmfCloseMetaFile)
+DEFINE_FORWARDER(GlmfEndGlsBlock)
+DEFINE_FORWARDER(GlmfEndPlayback)
+DEFINE_FORWARDER(GlmfInitPlayback)
+DEFINE_FORWARDER(GlmfPlayGlsRecord)
+DEFINE_FORWARDER(glAccum)
+DEFINE_FORWARDER(glAlphaFunc)
+DEFINE_FORWARDER(glAreTexturesResident)
+DEFINE_FORWARDER(glArrayElement)
+DEFINE_FORWARDER(glBegin)
+DEFINE_FORWARDER(glBindTexture)
+DEFINE_FORWARDER(glBitmap)
+DEFINE_FORWARDER(glBlendFunc)
+DEFINE_FORWARDER(glCallList)
+DEFINE_FORWARDER(glCallLists)
+DEFINE_FORWARDER(glClear)
+DEFINE_FORWARDER(glClearAccum)
+DEFINE_FORWARDER(glClearColor)
+DEFINE_FORWARDER(glClearDepth)
+DEFINE_FORWARDER(glClearIndex)
+DEFINE_FORWARDER(glClearStencil)
+DEFINE_FORWARDER(glClipPlane)
+DEFINE_FORWARDER(glColor3b)
+DEFINE_FORWARDER(glColor3bv)
+DEFINE_FORWARDER(glColor3d)
+DEFINE_FORWARDER(glColor3dv)
+DEFINE_FORWARDER(glColor3f)
+DEFINE_FORWARDER(glColor3fv)
+DEFINE_FORWARDER(glColor3i)
+DEFINE_FORWARDER(glColor3iv)
+DEFINE_FORWARDER(glColor3s)
+DEFINE_FORWARDER(glColor3sv)
+DEFINE_FORWARDER(glColor3ub)
+DEFINE_FORWARDER(glColor3ubv)
+DEFINE_FORWARDER(glColor3ui)
+DEFINE_FORWARDER(glColor3uiv)
+DEFINE_FORWARDER(glColor3us)
+DEFINE_FORWARDER(glColor3usv)
+DEFINE_FORWARDER(glColor4b)
+DEFINE_FORWARDER(glColor4bv)
+DEFINE_FORWARDER(glColor4d)
+DEFINE_FORWARDER(glColor4dv)
+DEFINE_FORWARDER(glColor4f)
+DEFINE_FORWARDER(glColor4fv)
+DEFINE_FORWARDER(glColor4i)
+DEFINE_FORWARDER(glColor4iv)
+DEFINE_FORWARDER(glColor4s)
+DEFINE_FORWARDER(glColor4sv)
+DEFINE_FORWARDER(glColor4ub)
+DEFINE_FORWARDER(glColor4ubv)
+DEFINE_FORWARDER(glColor4ui)
+DEFINE_FORWARDER(glColor4uiv)
+DEFINE_FORWARDER(glColor4us)
+DEFINE_FORWARDER(glColor4usv)
+DEFINE_FORWARDER(glColorMask)
+DEFINE_FORWARDER(glColorMaterial)
+DEFINE_FORWARDER(glColorPointer)
+DEFINE_FORWARDER(glCopyPixels)
+DEFINE_FORWARDER(glCopyTexImage1D)
+DEFINE_FORWARDER(glCopyTexImage2D)
+DEFINE_FORWARDER(glCopyTexSubImage1D)
+DEFINE_FORWARDER(glCopyTexSubImage2D)
+DEFINE_FORWARDER(glCullFace)
+DEFINE_FORWARDER(glDebugEntry)
+DEFINE_FORWARDER(glDeleteLists)
+DEFINE_FORWARDER(glDeleteTextures)
+DEFINE_FORWARDER(glDepthFunc)
+DEFINE_FORWARDER(glDepthMask)
+DEFINE_FORWARDER(glDepthRange)
+DEFINE_FORWARDER(glDisable)
+DEFINE_FORWARDER(glDisableClientState)
+DEFINE_FORWARDER(glDrawArrays)
+DEFINE_FORWARDER(glDrawBuffer)
+DEFINE_FORWARDER(glDrawElements)
+DEFINE_FORWARDER(glDrawPixels)
+DEFINE_FORWARDER(glEdgeFlag)
+DEFINE_FORWARDER(glEdgeFlagPointer)
+DEFINE_FORWARDER(glEdgeFlagv)
+DEFINE_FORWARDER(glEnable)
+DEFINE_FORWARDER(glEnableClientState)
+DEFINE_FORWARDER(glEnd)
+DEFINE_FORWARDER(glEndList)
+DEFINE_FORWARDER(glEvalCoord1d)
+DEFINE_FORWARDER(glEvalCoord1dv)
+DEFINE_FORWARDER(glEvalCoord1f)
+DEFINE_FORWARDER(glEvalCoord1fv)
+DEFINE_FORWARDER(glEvalCoord2d)
+DEFINE_FORWARDER(glEvalCoord2dv)
+DEFINE_FORWARDER(glEvalCoord2f)
+DEFINE_FORWARDER(glEvalCoord2fv)
+DEFINE_FORWARDER(glEvalMesh1)
+DEFINE_FORWARDER(glEvalMesh2)
+DEFINE_FORWARDER(glEvalPoint1)
+DEFINE_FORWARDER(glEvalPoint2)
+DEFINE_FORWARDER(glFeedbackBuffer)
+DEFINE_FORWARDER(glFinish)
+DEFINE_FORWARDER(glFlush)
+DEFINE_FORWARDER(glFogf)
+DEFINE_FORWARDER(glFogfv)
+DEFINE_FORWARDER(glFogi)
+DEFINE_FORWARDER(glFogiv)
+DEFINE_FORWARDER(glFrontFace)
+DEFINE_FORWARDER(glFrustum)
+DEFINE_FORWARDER(glGenLists)
+DEFINE_FORWARDER(glGenTextures)
+DEFINE_FORWARDER(glGetBooleanv)
+DEFINE_FORWARDER(glGetClipPlane)
+DEFINE_FORWARDER(glGetDoublev)
+DEFINE_FORWARDER(glGetError)
+DEFINE_FORWARDER(glGetFloatv)
+DEFINE_FORWARDER(glGetIntegerv)
+DEFINE_FORWARDER(glGetLightfv)
+DEFINE_FORWARDER(glGetLightiv)
+DEFINE_FORWARDER(glGetMapdv)
+DEFINE_FORWARDER(glGetMapfv)
+DEFINE_FORWARDER(glGetMapiv)
+DEFINE_FORWARDER(glGetMaterialfv)
+DEFINE_FORWARDER(glGetMaterialiv)
+DEFINE_FORWARDER(glGetPixelMapfv)
+DEFINE_FORWARDER(glGetPixelMapuiv)
+DEFINE_FORWARDER(glGetPixelMapusv)
+DEFINE_FORWARDER(glGetPointerv)
+DEFINE_FORWARDER(glGetPolygonStipple)
+DEFINE_FORWARDER(glGetString)
+DEFINE_FORWARDER(glGetTexEnvfv)
+DEFINE_FORWARDER(glGetTexEnviv)
+DEFINE_FORWARDER(glGetTexGendv)
+DEFINE_FORWARDER(glGetTexGenfv)
+DEFINE_FORWARDER(glGetTexGeniv)
+DEFINE_FORWARDER(glGetTexImage)
+DEFINE_FORWARDER(glGetTexLevelParameterfv)
+DEFINE_FORWARDER(glGetTexLevelParameteriv)
+DEFINE_FORWARDER(glGetTexParameterfv)
+DEFINE_FORWARDER(glGetTexParameteriv)
+DEFINE_FORWARDER(glHint)
+DEFINE_FORWARDER(glIndexMask)
+DEFINE_FORWARDER(glIndexPointer)
+DEFINE_FORWARDER(glIndexd)
+DEFINE_FORWARDER(glIndexdv)
+DEFINE_FORWARDER(glIndexf)
+DEFINE_FORWARDER(glIndexfv)
+DEFINE_FORWARDER(glIndexi)
+DEFINE_FORWARDER(glIndexiv)
+DEFINE_FORWARDER(glIndexs)
+DEFINE_FORWARDER(glIndexsv)
+DEFINE_FORWARDER(glIndexub)
+DEFINE_FORWARDER(glIndexubv)
+DEFINE_FORWARDER(glInitNames)
+DEFINE_FORWARDER(glInterleavedArrays)
+DEFINE_FORWARDER(glIsEnabled)
+DEFINE_FORWARDER(glIsList)
+DEFINE_FORWARDER(glIsTexture)
+DEFINE_FORWARDER(glLightModelf)
+DEFINE_FORWARDER(glLightModelfv)
+DEFINE_FORWARDER(glLightModeli)
+DEFINE_FORWARDER(glLightModeliv)
+DEFINE_FORWARDER(glLightf)
+DEFINE_FORWARDER(glLightfv)
+DEFINE_FORWARDER(glLighti)
+DEFINE_FORWARDER(glLightiv)
+DEFINE_FORWARDER(glLineStipple)
+DEFINE_FORWARDER(glLineWidth)
+DEFINE_FORWARDER(glListBase)
+DEFINE_FORWARDER(glLoadIdentity)
+DEFINE_FORWARDER(glLoadMatrixd)
+DEFINE_FORWARDER(glLoadMatrixf)
+DEFINE_FORWARDER(glLoadName)
+DEFINE_FORWARDER(glLogicOp)
+DEFINE_FORWARDER(glMap1d)
+DEFINE_FORWARDER(glMap1f)
+DEFINE_FORWARDER(glMap2d)
+DEFINE_FORWARDER(glMap2f)
+DEFINE_FORWARDER(glMapGrid1d)
+DEFINE_FORWARDER(glMapGrid1f)
+DEFINE_FORWARDER(glMapGrid2d)
+DEFINE_FORWARDER(glMapGrid2f)
+DEFINE_FORWARDER(glMaterialf)
+DEFINE_FORWARDER(glMaterialfv)
+DEFINE_FORWARDER(glMateriali)
+DEFINE_FORWARDER(glMaterialiv)
+DEFINE_FORWARDER(glMatrixMode)
+DEFINE_FORWARDER(glMultMatrixd)
+DEFINE_FORWARDER(glMultMatrixf)
+DEFINE_FORWARDER(glNewList)
+DEFINE_FORWARDER(glNormal3b)
+DEFINE_FORWARDER(glNormal3bv)
+DEFINE_FORWARDER(glNormal3d)
+DEFINE_FORWARDER(glNormal3dv)
+DEFINE_FORWARDER(glNormal3f)
+DEFINE_FORWARDER(glNormal3fv)
+DEFINE_FORWARDER(glNormal3i)
+DEFINE_FORWARDER(glNormal3iv)
+DEFINE_FORWARDER(glNormal3s)
+DEFINE_FORWARDER(glNormal3sv)
+DEFINE_FORWARDER(glNormalPointer)
+DEFINE_FORWARDER(glOrtho)
+DEFINE_FORWARDER(glPassThrough)
+DEFINE_FORWARDER(glPixelMapfv)
+DEFINE_FORWARDER(glPixelMapuiv)
+DEFINE_FORWARDER(glPixelMapusv)
+DEFINE_FORWARDER(glPixelStoref)
+DEFINE_FORWARDER(glPixelStorei)
+DEFINE_FORWARDER(glPixelTransferf)
+DEFINE_FORWARDER(glPixelTransferi)
+DEFINE_FORWARDER(glPixelZoom)
+DEFINE_FORWARDER(glPointSize)
+DEFINE_FORWARDER(glPolygonMode)
+DEFINE_FORWARDER(glPolygonOffset)
+DEFINE_FORWARDER(glPolygonStipple)
+DEFINE_FORWARDER(glPopAttrib)
+DEFINE_FORWARDER(glPopClientAttrib)
+DEFINE_FORWARDER(glPopMatrix)
+DEFINE_FORWARDER(glPopName)
+DEFINE_FORWARDER(glPrioritizeTextures)
+DEFINE_FORWARDER(glPushAttrib)
+DEFINE_FORWARDER(glPushClientAttrib)
+DEFINE_FORWARDER(glPushMatrix)
+DEFINE_FORWARDER(glPushName)
+DEFINE_FORWARDER(glRasterPos2d)
+DEFINE_FORWARDER(glRasterPos2dv)
+DEFINE_FORWARDER(glRasterPos2f)
+DEFINE_FORWARDER(glRasterPos2fv)
+DEFINE_FORWARDER(glRasterPos2i)
+DEFINE_FORWARDER(glRasterPos2iv)
+DEFINE_FORWARDER(glRasterPos2s)
+DEFINE_FORWARDER(glRasterPos2sv)
+DEFINE_FORWARDER(glRasterPos3d)
+DEFINE_FORWARDER(glRasterPos3dv)
+DEFINE_FORWARDER(glRasterPos3f)
+DEFINE_FORWARDER(glRasterPos3fv)
+DEFINE_FORWARDER(glRasterPos3i)
+DEFINE_FORWARDER(glRasterPos3iv)
+DEFINE_FORWARDER(glRasterPos3s)
+DEFINE_FORWARDER(glRasterPos3sv)
+DEFINE_FORWARDER(glRasterPos4d)
+DEFINE_FORWARDER(glRasterPos4dv)
+DEFINE_FORWARDER(glRasterPos4f)
+DEFINE_FORWARDER(glRasterPos4fv)
+DEFINE_FORWARDER(glRasterPos4i)
+DEFINE_FORWARDER(glRasterPos4iv)
+DEFINE_FORWARDER(glRasterPos4s)
+DEFINE_FORWARDER(glRasterPos4sv)
+DEFINE_FORWARDER(glReadBuffer)
+DEFINE_FORWARDER(glReadPixels)
+DEFINE_FORWARDER(glRectd)
+DEFINE_FORWARDER(glRectdv)
+DEFINE_FORWARDER(glRectf)
+DEFINE_FORWARDER(glRectfv)
+DEFINE_FORWARDER(glRecti)
+DEFINE_FORWARDER(glRectiv)
+DEFINE_FORWARDER(glRects)
+DEFINE_FORWARDER(glRectsv)
+DEFINE_FORWARDER(glRenderMode)
+DEFINE_FORWARDER(glRotated)
+DEFINE_FORWARDER(glRotatef)
+DEFINE_FORWARDER(glScaled)
+DEFINE_FORWARDER(glScalef)
+DEFINE_FORWARDER(glSelectBuffer)
+DEFINE_FORWARDER(glShadeModel)
+DEFINE_FORWARDER(glStencilFunc)
+DEFINE_FORWARDER(glStencilMask)
+DEFINE_FORWARDER(glStencilOp)
+DEFINE_FORWARDER(glTexCoord1d)
+DEFINE_FORWARDER(glTexCoord1dv)
+DEFINE_FORWARDER(glTexCoord1f)
+DEFINE_FORWARDER(glTexCoord1fv)
+DEFINE_FORWARDER(glTexCoord1i)
+DEFINE_FORWARDER(glTexCoord1iv)
+DEFINE_FORWARDER(glTexCoord1s)
+DEFINE_FORWARDER(glTexCoord1sv)
+DEFINE_FORWARDER(glTexCoord2d)
+DEFINE_FORWARDER(glTexCoord2dv)
+DEFINE_FORWARDER(glTexCoord2f)
+DEFINE_FORWARDER(glTexCoord2fv)
+DEFINE_FORWARDER(glTexCoord2i)
+DEFINE_FORWARDER(glTexCoord2iv)
+DEFINE_FORWARDER(glTexCoord2s)
+DEFINE_FORWARDER(glTexCoord2sv)
+DEFINE_FORWARDER(glTexCoord3d)
+DEFINE_FORWARDER(glTexCoord3dv)
+DEFINE_FORWARDER(glTexCoord3f)
+DEFINE_FORWARDER(glTexCoord3fv)
+DEFINE_FORWARDER(glTexCoord3i)
+DEFINE_FORWARDER(glTexCoord3iv)
+DEFINE_FORWARDER(glTexCoord3s)
+DEFINE_FORWARDER(glTexCoord3sv)
+DEFINE_FORWARDER(glTexCoord4d)
+DEFINE_FORWARDER(glTexCoord4dv)
+DEFINE_FORWARDER(glTexCoord4f)
+DEFINE_FORWARDER(glTexCoord4fv)
+DEFINE_FORWARDER(glTexCoord4i)
+DEFINE_FORWARDER(glTexCoord4iv)
+DEFINE_FORWARDER(glTexCoord4s)
+DEFINE_FORWARDER(glTexCoord4sv)
+DEFINE_FORWARDER(glTexCoordPointer)
+DEFINE_FORWARDER(glTexEnvf)
+DEFINE_FORWARDER(glTexEnvfv)
+DEFINE_FORWARDER(glTexEnvi)
+DEFINE_FORWARDER(glTexEnviv)
+DEFINE_FORWARDER(glTexGend)
+DEFINE_FORWARDER(glTexGendv)
+DEFINE_FORWARDER(glTexGenf)
+DEFINE_FORWARDER(glTexGenfv)
+DEFINE_FORWARDER(glTexGeni)
+DEFINE_FORWARDER(glTexGeniv)
+DEFINE_FORWARDER(glTexImage1D)
+DEFINE_FORWARDER(glTexImage2D)
+DEFINE_FORWARDER(glTexParameterf)
+DEFINE_FORWARDER(glTexParameterfv)
+DEFINE_FORWARDER(glTexParameteri)
+DEFINE_FORWARDER(glTexParameteriv)
+DEFINE_FORWARDER(glTexSubImage1D)
+DEFINE_FORWARDER(glTexSubImage2D)
+DEFINE_FORWARDER(glTranslated)
+DEFINE_FORWARDER(glTranslatef)
+DEFINE_FORWARDER(glVertex2d)
+DEFINE_FORWARDER(glVertex2dv)
+DEFINE_FORWARDER(glVertex2f)
+DEFINE_FORWARDER(glVertex2fv)
+DEFINE_FORWARDER(glVertex2i)
+DEFINE_FORWARDER(glVertex2iv)
+DEFINE_FORWARDER(glVertex2s)
+DEFINE_FORWARDER(glVertex2sv)
+DEFINE_FORWARDER(glVertex3d)
+DEFINE_FORWARDER(glVertex3dv)
+DEFINE_FORWARDER(glVertex3f)
+DEFINE_FORWARDER(glVertex3fv)
+DEFINE_FORWARDER(glVertex3i)
+DEFINE_FORWARDER(glVertex3iv)
+DEFINE_FORWARDER(glVertex3s)
+DEFINE_FORWARDER(glVertex3sv)
+DEFINE_FORWARDER(glVertex4d)
+DEFINE_FORWARDER(glVertex4dv)
+DEFINE_FORWARDER(glVertex4f)
+DEFINE_FORWARDER(glVertex4fv)
+DEFINE_FORWARDER(glVertex4i)
+DEFINE_FORWARDER(glVertex4iv)
+DEFINE_FORWARDER(glVertex4s)
+DEFINE_FORWARDER(glVertex4sv)
+DEFINE_FORWARDER(glVertexPointer)
+DEFINE_FORWARDER(wglChoosePixelFormat)
+DEFINE_FORWARDER(wglCopyContext)
+DEFINE_FORWARDER(wglCreateLayerContext)
+DEFINE_FORWARDER(wglDescribeLayerPlane)
+DEFINE_FORWARDER(wglDescribePixelFormat)
+DEFINE_FORWARDER(wglGetCurrentContext)
+DEFINE_FORWARDER(wglGetCurrentDC)
+DEFINE_FORWARDER(wglGetDefaultProcAddress)
+DEFINE_FORWARDER(wglGetLayerPaletteEntries)
+DEFINE_FORWARDER(wglGetPixelFormat)
+DEFINE_FORWARDER(wglRealizeLayerPalette)
+DEFINE_FORWARDER(wglSetLayerPaletteEntries)
+DEFINE_FORWARDER(wglSetPixelFormat)
+DEFINE_FORWARDER(wglShareLists)
+DEFINE_FORWARDER(wglSwapLayerBuffers)
+DEFINE_FORWARDER(wglSwapMultipleBuffers)
+DEFINE_FORWARDER(wglUseFontBitmapsA)
+DEFINE_FORWARDER(wglUseFontBitmapsW)
+DEFINE_FORWARDER(wglUseFontOutlinesA)
+DEFINE_FORWARDER(wglUseFontOutlinesW)
+
+void InitializeForwarders(HMODULE hRealDll) {
+    if (!hRealDll) return;
+
+    LOAD_FORWARDER(GlmfBeginGlsBlock);
+    LOAD_FORWARDER(GlmfCloseMetaFile);
+    LOAD_FORWARDER(GlmfEndGlsBlock);
+    LOAD_FORWARDER(GlmfEndPlayback);
+    LOAD_FORWARDER(GlmfInitPlayback);
+    LOAD_FORWARDER(GlmfPlayGlsRecord);
+    LOAD_FORWARDER(glAccum);
+    LOAD_FORWARDER(glAlphaFunc);
+    LOAD_FORWARDER(glAreTexturesResident);
+    LOAD_FORWARDER(glArrayElement);
+    LOAD_FORWARDER(glBegin);
+    LOAD_FORWARDER(glBindTexture);
+    LOAD_FORWARDER(glBitmap);
+    LOAD_FORWARDER(glBlendFunc);
+    LOAD_FORWARDER(glCallList);
+    LOAD_FORWARDER(glCallLists);
+    LOAD_FORWARDER(glClear);
+    LOAD_FORWARDER(glClearAccum);
+    LOAD_FORWARDER(glClearColor);
+    LOAD_FORWARDER(glClearDepth);
+    LOAD_FORWARDER(glClearIndex);
+    LOAD_FORWARDER(glClearStencil);
+    LOAD_FORWARDER(glClipPlane);
+    LOAD_FORWARDER(glColor3b);
+    LOAD_FORWARDER(glColor3bv);
+    LOAD_FORWARDER(glColor3d);
+    LOAD_FORWARDER(glColor3dv);
+    LOAD_FORWARDER(glColor3f);
+    LOAD_FORWARDER(glColor3fv);
+    LOAD_FORWARDER(glColor3i);
+    LOAD_FORWARDER(glColor3iv);
+    LOAD_FORWARDER(glColor3s);
+    LOAD_FORWARDER(glColor3sv);
+    LOAD_FORWARDER(glColor3ub);
+    LOAD_FORWARDER(glColor3ubv);
+    LOAD_FORWARDER(glColor3ui);
+    LOAD_FORWARDER(glColor3uiv);
+    LOAD_FORWARDER(glColor3us);
+    LOAD_FORWARDER(glColor3usv);
+    LOAD_FORWARDER(glColor4b);
+    LOAD_FORWARDER(glColor4bv);
+    LOAD_FORWARDER(glColor4d);
+    LOAD_FORWARDER(glColor4dv);
+    LOAD_FORWARDER(glColor4f);
+    LOAD_FORWARDER(glColor4fv);
+    LOAD_FORWARDER(glColor4i);
+    LOAD_FORWARDER(glColor4iv);
+    LOAD_FORWARDER(glColor4s);
+    LOAD_FORWARDER(glColor4sv);
+    LOAD_FORWARDER(glColor4ub);
+    LOAD_FORWARDER(glColor4ubv);
+    LOAD_FORWARDER(glColor4ui);
+    LOAD_FORWARDER(glColor4uiv);
+    LOAD_FORWARDER(glColor4us);
+    LOAD_FORWARDER(glColor4usv);
+    LOAD_FORWARDER(glColorMask);
+    LOAD_FORWARDER(glColorMaterial);
+    LOAD_FORWARDER(glColorPointer);
+    LOAD_FORWARDER(glCopyPixels);
+    LOAD_FORWARDER(glCopyTexImage1D);
+    LOAD_FORWARDER(glCopyTexImage2D);
+    LOAD_FORWARDER(glCopyTexSubImage1D);
+    LOAD_FORWARDER(glCopyTexSubImage2D);
+    LOAD_FORWARDER(glCullFace);
+    LOAD_FORWARDER(glDebugEntry);
+    LOAD_FORWARDER(glDeleteLists);
+    LOAD_FORWARDER(glDeleteTextures);
+    LOAD_FORWARDER(glDepthFunc);
+    LOAD_FORWARDER(glDepthMask);
+    LOAD_FORWARDER(glDepthRange);
+    LOAD_FORWARDER(glDisable);
+    LOAD_FORWARDER(glDisableClientState);
+    LOAD_FORWARDER(glDrawArrays);
+    LOAD_FORWARDER(glDrawBuffer);
+    LOAD_FORWARDER(glDrawElements);
+    LOAD_FORWARDER(glDrawPixels);
+    LOAD_FORWARDER(glEdgeFlag);
+    LOAD_FORWARDER(glEdgeFlagPointer);
+    LOAD_FORWARDER(glEdgeFlagv);
+    LOAD_FORWARDER(glEnable);
+    LOAD_FORWARDER(glEnableClientState);
+    LOAD_FORWARDER(glEnd);
+    LOAD_FORWARDER(glEndList);
+    LOAD_FORWARDER(glEvalCoord1d);
+    LOAD_FORWARDER(glEvalCoord1dv);
+    LOAD_FORWARDER(glEvalCoord1f);
+    LOAD_FORWARDER(glEvalCoord1fv);
+    LOAD_FORWARDER(glEvalCoord2d);
+    LOAD_FORWARDER(glEvalCoord2dv);
+    LOAD_FORWARDER(glEvalCoord2f);
+    LOAD_FORWARDER(glEvalCoord2fv);
+    LOAD_FORWARDER(glEvalMesh1);
+    LOAD_FORWARDER(glEvalMesh2);
+    LOAD_FORWARDER(glEvalPoint1);
+    LOAD_FORWARDER(glEvalPoint2);
+    LOAD_FORWARDER(glFeedbackBuffer);
+    LOAD_FORWARDER(glFinish);
+    LOAD_FORWARDER(glFlush);
+    LOAD_FORWARDER(glFogf);
+    LOAD_FORWARDER(glFogfv);
+    LOAD_FORWARDER(glFogi);
+    LOAD_FORWARDER(glFogiv);
+    LOAD_FORWARDER(glFrontFace);
+    LOAD_FORWARDER(glFrustum);
+    LOAD_FORWARDER(glGenLists);
+    LOAD_FORWARDER(glGenTextures);
+    LOAD_FORWARDER(glGetBooleanv);
+    LOAD_FORWARDER(glGetClipPlane);
+    LOAD_FORWARDER(glGetDoublev);
+    LOAD_FORWARDER(glGetError);
+    LOAD_FORWARDER(glGetFloatv);
+    LOAD_FORWARDER(glGetIntegerv);
+    LOAD_FORWARDER(glGetLightfv);
+    LOAD_FORWARDER(glGetLightiv);
+    LOAD_FORWARDER(glGetMapdv);
+    LOAD_FORWARDER(glGetMapfv);
+    LOAD_FORWARDER(glGetMapiv);
+    LOAD_FORWARDER(glGetMaterialfv);
+    LOAD_FORWARDER(glGetMaterialiv);
+    LOAD_FORWARDER(glGetPixelMapfv);
+    LOAD_FORWARDER(glGetPixelMapuiv);
+    LOAD_FORWARDER(glGetPixelMapusv);
+    LOAD_FORWARDER(glGetPointerv);
+    LOAD_FORWARDER(glGetPolygonStipple);
+    LOAD_FORWARDER(glGetString);
+    LOAD_FORWARDER(glGetTexEnvfv);
+    LOAD_FORWARDER(glGetTexEnviv);
+    LOAD_FORWARDER(glGetTexGendv);
+    LOAD_FORWARDER(glGetTexGenfv);
+    LOAD_FORWARDER(glGetTexGeniv);
+    LOAD_FORWARDER(glGetTexImage);
+    LOAD_FORWARDER(glGetTexLevelParameterfv);
+    LOAD_FORWARDER(glGetTexLevelParameteriv);
+    LOAD_FORWARDER(glGetTexParameterfv);
+    LOAD_FORWARDER(glGetTexParameteriv);
+    LOAD_FORWARDER(glHint);
+    LOAD_FORWARDER(glIndexMask);
+    LOAD_FORWARDER(glIndexPointer);
+    LOAD_FORWARDER(glIndexd);
+    LOAD_FORWARDER(glIndexdv);
+    LOAD_FORWARDER(glIndexf);
+    LOAD_FORWARDER(glIndexfv);
+    LOAD_FORWARDER(glIndexi);
+    LOAD_FORWARDER(glIndexiv);
+    LOAD_FORWARDER(glIndexs);
+    LOAD_FORWARDER(glIndexsv);
+    LOAD_FORWARDER(glIndexub);
+    LOAD_FORWARDER(glIndexubv);
+    LOAD_FORWARDER(glInitNames);
+    LOAD_FORWARDER(glInterleavedArrays);
+    LOAD_FORWARDER(glIsEnabled);
+    LOAD_FORWARDER(glIsList);
+    LOAD_FORWARDER(glIsTexture);
+    LOAD_FORWARDER(glLightModelf);
+    LOAD_FORWARDER(glLightModelfv);
+    LOAD_FORWARDER(glLightModeli);
+    LOAD_FORWARDER(glLightModeliv);
+    LOAD_FORWARDER(glLightf);
+    LOAD_FORWARDER(glLightfv);
+    LOAD_FORWARDER(glLighti);
+    LOAD_FORWARDER(glLightiv);
+    LOAD_FORWARDER(glLineStipple);
+    LOAD_FORWARDER(glLineWidth);
+    LOAD_FORWARDER(glListBase);
+    LOAD_FORWARDER(glLoadIdentity);
+    LOAD_FORWARDER(glLoadMatrixd);
+    LOAD_FORWARDER(glLoadMatrixf);
+    LOAD_FORWARDER(glLoadName);
+    LOAD_FORWARDER(glLogicOp);
+    LOAD_FORWARDER(glMap1d);
+    LOAD_FORWARDER(glMap1f);
+    LOAD_FORWARDER(glMap2d);
+    LOAD_FORWARDER(glMap2f);
+    LOAD_FORWARDER(glMapGrid1d);
+    LOAD_FORWARDER(glMapGrid1f);
+    LOAD_FORWARDER(glMapGrid2d);
+    LOAD_FORWARDER(glMapGrid2f);
+    LOAD_FORWARDER(glMaterialf);
+    LOAD_FORWARDER(glMaterialfv);
+    LOAD_FORWARDER(glMateriali);
+    LOAD_FORWARDER(glMaterialiv);
+    LOAD_FORWARDER(glMatrixMode);
+    LOAD_FORWARDER(glMultMatrixd);
+    LOAD_FORWARDER(glMultMatrixf);
+    LOAD_FORWARDER(glNewList);
+    LOAD_FORWARDER(glNormal3b);
+    LOAD_FORWARDER(glNormal3bv);
+    LOAD_FORWARDER(glNormal3d);
+    LOAD_FORWARDER(glNormal3dv);
+    LOAD_FORWARDER(glNormal3f);
+    LOAD_FORWARDER(glNormal3fv);
+    LOAD_FORWARDER(glNormal3i);
+    LOAD_FORWARDER(glNormal3iv);
+    LOAD_FORWARDER(glNormal3s);
+    LOAD_FORWARDER(glNormal3sv);
+    LOAD_FORWARDER(glNormalPointer);
+    LOAD_FORWARDER(glOrtho);
+    LOAD_FORWARDER(glPassThrough);
+    LOAD_FORWARDER(glPixelMapfv);
+    LOAD_FORWARDER(glPixelMapuiv);
+    LOAD_FORWARDER(glPixelMapusv);
+    LOAD_FORWARDER(glPixelStoref);
+    LOAD_FORWARDER(glPixelStorei);
+    LOAD_FORWARDER(glPixelTransferf);
+    LOAD_FORWARDER(glPixelTransferi);
+    LOAD_FORWARDER(glPixelZoom);
+    LOAD_FORWARDER(glPointSize);
+    LOAD_FORWARDER(glPolygonMode);
+    LOAD_FORWARDER(glPolygonOffset);
+    LOAD_FORWARDER(glPolygonStipple);
+    LOAD_FORWARDER(glPopAttrib);
+    LOAD_FORWARDER(glPopClientAttrib);
+    LOAD_FORWARDER(glPopMatrix);
+    LOAD_FORWARDER(glPopName);
+    LOAD_FORWARDER(glPrioritizeTextures);
+    LOAD_FORWARDER(glPushAttrib);
+    LOAD_FORWARDER(glPushClientAttrib);
+    LOAD_FORWARDER(glPushMatrix);
+    LOAD_FORWARDER(glPushName);
+    LOAD_FORWARDER(glRasterPos2d);
+    LOAD_FORWARDER(glRasterPos2dv);
+    LOAD_FORWARDER(glRasterPos2f);
+    LOAD_FORWARDER(glRasterPos2fv);
+    LOAD_FORWARDER(glRasterPos2i);
+    LOAD_FORWARDER(glRasterPos2iv);
+    LOAD_FORWARDER(glRasterPos2s);
+    LOAD_FORWARDER(glRasterPos2sv);
+    LOAD_FORWARDER(glRasterPos3d);
+    LOAD_FORWARDER(glRasterPos3dv);
+    LOAD_FORWARDER(glRasterPos3f);
+    LOAD_FORWARDER(glRasterPos3fv);
+    LOAD_FORWARDER(glRasterPos3i);
+    LOAD_FORWARDER(glRasterPos3iv);
+    LOAD_FORWARDER(glRasterPos3s);
+    LOAD_FORWARDER(glRasterPos3sv);
+    LOAD_FORWARDER(glRasterPos4d);
+    LOAD_FORWARDER(glRasterPos4dv);
+    LOAD_FORWARDER(glRasterPos4f);
+    LOAD_FORWARDER(glRasterPos4fv);
+    LOAD_FORWARDER(glRasterPos4i);
+    LOAD_FORWARDER(glRasterPos4iv);
+    LOAD_FORWARDER(glRasterPos4s);
+    LOAD_FORWARDER(glRasterPos4sv);
+    LOAD_FORWARDER(glReadBuffer);
+    LOAD_FORWARDER(glReadPixels);
+    LOAD_FORWARDER(glRectd);
+    LOAD_FORWARDER(glRectdv);
+    LOAD_FORWARDER(glRectf);
+    LOAD_FORWARDER(glRectfv);
+    LOAD_FORWARDER(glRecti);
+    LOAD_FORWARDER(glRectiv);
+    LOAD_FORWARDER(glRects);
+    LOAD_FORWARDER(glRectsv);
+    LOAD_FORWARDER(glRenderMode);
+    LOAD_FORWARDER(glRotated);
+    LOAD_FORWARDER(glRotatef);
+    LOAD_FORWARDER(glScaled);
+    LOAD_FORWARDER(glScalef);
+    LOAD_FORWARDER(glSelectBuffer);
+    LOAD_FORWARDER(glShadeModel);
+    LOAD_FORWARDER(glStencilFunc);
+    LOAD_FORWARDER(glStencilMask);
+    LOAD_FORWARDER(glStencilOp);
+    LOAD_FORWARDER(glTexCoord1d);
+    LOAD_FORWARDER(glTexCoord1dv);
+    LOAD_FORWARDER(glTexCoord1f);
+    LOAD_FORWARDER(glTexCoord1fv);
+    LOAD_FORWARDER(glTexCoord1i);
+    LOAD_FORWARDER(glTexCoord1iv);
+    LOAD_FORWARDER(glTexCoord1s);
+    LOAD_FORWARDER(glTexCoord1sv);
+    LOAD_FORWARDER(glTexCoord2d);
+    LOAD_FORWARDER(glTexCoord2dv);
+    LOAD_FORWARDER(glTexCoord2f);
+    LOAD_FORWARDER(glTexCoord2fv);
+    LOAD_FORWARDER(glTexCoord2i);
+    LOAD_FORWARDER(glTexCoord2iv);
+    LOAD_FORWARDER(glTexCoord2s);
+    LOAD_FORWARDER(glTexCoord2sv);
+    LOAD_FORWARDER(glTexCoord3d);
+    LOAD_FORWARDER(glTexCoord3dv);
+    LOAD_FORWARDER(glTexCoord3f);
+    LOAD_FORWARDER(glTexCoord3fv);
+    LOAD_FORWARDER(glTexCoord3i);
+    LOAD_FORWARDER(glTexCoord3iv);
+    LOAD_FORWARDER(glTexCoord3s);
+    LOAD_FORWARDER(glTexCoord3sv);
+    LOAD_FORWARDER(glTexCoord4d);
+    LOAD_FORWARDER(glTexCoord4dv);
+    LOAD_FORWARDER(glTexCoord4f);
+    LOAD_FORWARDER(glTexCoord4fv);
+    LOAD_FORWARDER(glTexCoord4i);
+    LOAD_FORWARDER(glTexCoord4iv);
+    LOAD_FORWARDER(glTexCoord4s);
+    LOAD_FORWARDER(glTexCoord4sv);
+    LOAD_FORWARDER(glTexCoordPointer);
+    LOAD_FORWARDER(glTexEnvf);
+    LOAD_FORWARDER(glTexEnvfv);
+    LOAD_FORWARDER(glTexEnvi);
+    LOAD_FORWARDER(glTexEnviv);
+    LOAD_FORWARDER(glTexGend);
+    LOAD_FORWARDER(glTexGendv);
+    LOAD_FORWARDER(glTexGenf);
+    LOAD_FORWARDER(glTexGenfv);
+    LOAD_FORWARDER(glTexGeni);
+    LOAD_FORWARDER(glTexGeniv);
+    LOAD_FORWARDER(glTexImage1D);
+    LOAD_FORWARDER(glTexImage2D);
+    LOAD_FORWARDER(glTexParameterf);
+    LOAD_FORWARDER(glTexParameterfv);
+    LOAD_FORWARDER(glTexParameteri);
+    LOAD_FORWARDER(glTexParameteriv);
+    LOAD_FORWARDER(glTexSubImage1D);
+    LOAD_FORWARDER(glTexSubImage2D);
+    LOAD_FORWARDER(glTranslated);
+    LOAD_FORWARDER(glTranslatef);
+    LOAD_FORWARDER(glVertex2d);
+    LOAD_FORWARDER(glVertex2dv);
+    LOAD_FORWARDER(glVertex2f);
+    LOAD_FORWARDER(glVertex2fv);
+    LOAD_FORWARDER(glVertex2i);
+    LOAD_FORWARDER(glVertex2iv);
+    LOAD_FORWARDER(glVertex2s);
+    LOAD_FORWARDER(glVertex2sv);
+    LOAD_FORWARDER(glVertex3d);
+    LOAD_FORWARDER(glVertex3dv);
+    LOAD_FORWARDER(glVertex3f);
+    LOAD_FORWARDER(glVertex3fv);
+    LOAD_FORWARDER(glVertex3i);
+    LOAD_FORWARDER(glVertex3iv);
+    LOAD_FORWARDER(glVertex3s);
+    LOAD_FORWARDER(glVertex3sv);
+    LOAD_FORWARDER(glVertex4d);
+    LOAD_FORWARDER(glVertex4dv);
+    LOAD_FORWARDER(glVertex4f);
+    LOAD_FORWARDER(glVertex4fv);
+    LOAD_FORWARDER(glVertex4i);
+    LOAD_FORWARDER(glVertex4iv);
+    LOAD_FORWARDER(glVertex4s);
+    LOAD_FORWARDER(glVertex4sv);
+    LOAD_FORWARDER(glVertexPointer);
+    LOAD_FORWARDER(wglChoosePixelFormat);
+    LOAD_FORWARDER(wglCopyContext);
+    LOAD_FORWARDER(wglCreateLayerContext);
+    LOAD_FORWARDER(wglDescribeLayerPlane);
+    LOAD_FORWARDER(wglDescribePixelFormat);
+    LOAD_FORWARDER(wglGetCurrentContext);
+    LOAD_FORWARDER(wglGetCurrentDC);
+    LOAD_FORWARDER(wglGetDefaultProcAddress);
+    LOAD_FORWARDER(wglGetLayerPaletteEntries);
+    LOAD_FORWARDER(wglGetPixelFormat);
+    LOAD_FORWARDER(wglRealizeLayerPalette);
+    LOAD_FORWARDER(wglSetLayerPaletteEntries);
+    LOAD_FORWARDER(wglSetPixelFormat);
+    LOAD_FORWARDER(wglShareLists);
+    LOAD_FORWARDER(wglSwapLayerBuffers);
+    LOAD_FORWARDER(wglSwapMultipleBuffers);
+    LOAD_FORWARDER(wglUseFontBitmapsA);
+    LOAD_FORWARDER(wglUseFontBitmapsW);
+    LOAD_FORWARDER(wglUseFontOutlinesA);
+    LOAD_FORWARDER(wglUseFontOutlinesW);
+}

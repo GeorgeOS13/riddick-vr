@@ -133,8 +133,7 @@ void IpcBridgeHost::SignalFrameConsumed() {
 
 bool IpcBridgeHost::IsClientConnected() const {
     if (!m_pSharedState) return false;
-    // Check if client has reported or shared handles within reasonable time
-    return (m_pSharedState->leftEyeSharedHandle != 0);
+    return m_pSharedState->clientConnected;
 }
 
 // ============================================================================
@@ -181,11 +180,19 @@ bool IpcBridgeClient::Connect(uint32_t timeoutMs) {
     m_hMutex = OpenMutexA(MUTEX_ALL_ACCESS, FALSE, RIDDICK_VR_IPC_MUTEX_NAME);
 
     m_connected = true;
+    if (m_hMutex && WaitForSingleObject(m_hMutex, 50) == WAIT_OBJECT_0) {
+        m_pSharedState->clientConnected = true;
+        ReleaseMutex(m_hMutex);
+    }
     return true;
 }
 
 void IpcBridgeClient::Disconnect() {
     if (m_pSharedState) {
+        if (m_hMutex && WaitForSingleObject(m_hMutex, 50) == WAIT_OBJECT_0) {
+            m_pSharedState->clientConnected = false;
+            ReleaseMutex(m_hMutex);
+        }
         UnmapViewOfFile(m_pSharedState);
         m_pSharedState = nullptr;
     }
@@ -228,6 +235,8 @@ bool IpcBridgeClient::WriteState(const RiddickVRSharedState& state) {
     if (!m_connected || !m_pSharedState) return false;
 
     if (WaitForSingleObject(m_hMutex, 20) == WAIT_OBJECT_0) {
+        m_pSharedState->clientConnected = true;
+        m_pSharedState->clientFrameCount++;
         m_pSharedState->leftEyeSharedHandle = state.leftEyeSharedHandle;
         m_pSharedState->rightEyeSharedHandle = state.rightEyeSharedHandle;
         ReleaseMutex(m_hMutex);

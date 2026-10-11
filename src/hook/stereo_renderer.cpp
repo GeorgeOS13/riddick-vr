@@ -114,10 +114,24 @@ void StereoRenderer::OnViewport(GLint x, GLint y, GLsizei width, GLsizei height)
 void StereoRenderer::OnSwapBuffers(HDC hdc) {
     if (!m_initialized) return;
 
+    static uint32_t s_swapCount = 0;
+    static DWORD s_lastFpsTime = 0;
+    static uint32_t s_fpsFrameCount = 0;
+
+    s_swapCount++;
+    s_fpsFrameCount++;
+
+    DWORD now = GetTickCount();
+    if (now - s_lastFpsTime >= 5000) {
+        float fps = s_fpsFrameCount / ((now - s_lastFpsTime) / 1000.0f);
+        VR_LOG_INFO("OnSwapBuffers: Frame %u (%.1f FPS, HDC: %p)", s_swapCount, fps, hdc);
+        s_lastFpsTime = now;
+        s_fpsFrameCount = 0;
+    }
+
     // Retry connecting to host if not yet connected
     if (!m_ipcClient.IsConnected()) {
         static DWORD s_lastRetry = 0;
-        DWORD now = GetTickCount();
         if (now - s_lastRetry > 3000) {
             s_lastRetry = now;
             if (m_ipcClient.Connect(100)) {
@@ -132,6 +146,9 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
         if (m_ipcClient.ReadState(m_sharedState)) {
             m_vrActive = m_sharedState.vrActive;
         }
+
+        // Write client frame count and state
+        m_ipcClient.WriteState(m_sharedState);
 
         // If buffers exist and blit is available, mirror left eye to default desktop backbuffer
         if (m_leftFbo && OpenGLProxy::glBlitFramebuffer) {

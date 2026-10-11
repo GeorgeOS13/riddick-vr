@@ -64,6 +64,8 @@ struct RiddickVRSharedState {
     // Flags and heartbeat
     bool vrActive;
     bool shouldRecenter;
+    bool clientConnected;
+    uint32_t clientFrameCount;
     uint32_t heartbeatTimestamp;
 };
 
