@@ -1,0 +1,9 @@
+LIBRARY opengl32.dll
+EXPORTS
+    wglCreateContext
+    wglDeleteContext
+    wglMakeCurrent
+    wglSwapBuffers
+    wglGetProcAddress
+    glViewport
+    glScissor

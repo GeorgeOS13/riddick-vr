@@ -62,8 +62,26 @@ riddick-vr/
 * Windows 10 / 11 (x64)
 * Visual Studio 2022 (with MSVC v143 toolsets for both x86 and x64)
 * CMake 3.25+
-* OpenXR SDK (1.0+)
 * A legitimate copy of *The Chronicles of Riddick: Assault on Dark Athena* (GOG / retail PC release)
+
+### 1. Build the 64-bit OpenXR Companion Host (`RiddickVRHost.exe`)
+```powershell
+cmake -B build_x64 -A x64
+cmake --build build_x64 --config Release
+```
+Output: `build_x64/Release/RiddickVRHost.exe`
+
+### 2. Build the 32-bit Hook Proxy (`opengl32.dll`)
+```powershell
+cmake -B build_x86 -A Win32
+cmake --build build_x86 --config Release
+```
+Output: `build_x86/Release/opengl32.dll`
+
+### 3. Installation
+1. Copy `opengl32.dll` into the game's executable directory (e.g. `<DarkAthena>/System/Win32_x86/`).
+2. Run `RiddickVRHost.exe` to start the OpenXR companion session.
+3. Launch `DarkAthena.exe`! The hook will automatically attach, log to `riddick_vr.log`, and bind to the host.
 
 ---
 
