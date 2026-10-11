@@ -17,28 +17,58 @@ BOOL WINAPI ConsoleHandlerRoutine(DWORD dwCtrlType) {
 }
 
 int main(int argc, char* argv[]) {
-    std::cout << "========================================" << std::endl;
-    std::cout << "  Riddick VR - OpenXR Companion Host   " << std::endl;
-    std::cout << "========================================" << std::endl;
+    bool validateOnly = false;
+    bool verbose = false;
+
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--validate-only") {
+            validateOnly = true;
+        } else if (arg == "--verbose") {
+            verbose = true;
+        } else if (arg == "--help" || arg == "-h") {
+            std::cout << "Usage: riddickvr-host [OPTIONS]\n"
+                      << "Options:\n"
+                      << "  --validate-only    Verify OpenXR runtime and exit without running VR loop\n"
+                      << "  --verbose          Enable verbose debug logging\n"
+                      << "  --help, -h         Show this help message\n";
+            return 0;
+        }
+    }
+
+    std::cout << "========================================\n"
+              << "   Riddick VR - x64 OpenXR Companion    \n"
+              << "========================================\n";
+
+    if (validateOnly) {
+        std::cout << "[Host] Running in validation-only mode (--validate-only)...\n";
+    }
 
     SetConsoleCtrlHandler(ConsoleHandlerRoutine, TRUE);
 
     // Initialize IPC Bridge Host
     RiddickVR::IpcBridgeHost ipcHost;
     if (!ipcHost.Initialize()) {
-        std::cerr << "[Host] ERROR: Failed to create IPC shared memory mapping!" << std::endl;
+        std::cerr << "[Host] ERROR: Failed to create IPC shared memory mapping!\n";
         return 1;
     }
-    std::cout << "[Host] Shared memory IPC bridge initialized successfully." << std::endl;
+    std::cout << "[Host] Shared memory IPC bridge initialized successfully.\n";
 
     // Initialize OpenXR Manager
     RiddickVR::OpenXRManager xrManager;
     g_pManager = &xrManager;
 
     if (!xrManager.Initialize()) {
-        std::cerr << "[Host] ERROR: Failed to initialize OpenXR Manager!" << std::endl;
+        std::cerr << "[Host] ERROR: Failed to initialize OpenXR Manager!\n";
         ipcHost.Shutdown();
         return 1;
+    }
+
+    if (validateOnly) {
+        std::cout << "[Host] OpenXR runtime validation SUCCESSFUL. Ready for VR.\n";
+        xrManager.Shutdown();
+        ipcHost.Shutdown();
+        return 0;
     }
 
     // Run VR loop
@@ -47,6 +77,6 @@ int main(int argc, char* argv[]) {
     // Cleanup
     xrManager.Shutdown();
     ipcHost.Shutdown();
-    std::cout << "[Host] Exited cleanly." << std::endl;
+    std::cout << "[Host] Exited cleanly.\n";
     return 0;
 }

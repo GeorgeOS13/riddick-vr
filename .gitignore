@@ -1,6 +1,7 @@
 # Build directories
 build*/
 bin/
+dist/
 out/
 .vs/
 *.user
