@@ -1,0 +1,28 @@
+# Build directories
+build/
+bin/
+out/
+.vs/
+*.user
+*.suo
+
+# Intermediate build objects
+*.obj
+*.o
+*.lib
+*.a
+*.exp
+*.ilk
+*.pdb
+
+# Dependencies / Third-party
+third_party/
+deps/
+vcpkg/
+vcpkg_installed/
+
+# OS and IDE files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
