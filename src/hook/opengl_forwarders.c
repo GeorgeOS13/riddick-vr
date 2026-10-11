@@ -114,7 +114,6 @@ DEFINE_FORWARDER(glFogfv)
 DEFINE_FORWARDER(glFogi)
 DEFINE_FORWARDER(glFogiv)
 DEFINE_FORWARDER(glFrontFace)
-DEFINE_FORWARDER(glFrustum)
 DEFINE_FORWARDER(glGenLists)
 DEFINE_FORWARDER(glGenTextures)
 DEFINE_FORWARDER(glGetBooleanv)
@@ -177,7 +176,6 @@ DEFINE_FORWARDER(glLineWidth)
 DEFINE_FORWARDER(glListBase)
 DEFINE_FORWARDER(glLoadIdentity)
 DEFINE_FORWARDER(glLoadMatrixd)
-DEFINE_FORWARDER(glLoadMatrixf)
 DEFINE_FORWARDER(glLoadName)
 DEFINE_FORWARDER(glLogicOp)
 DEFINE_FORWARDER(glMap1d)
@@ -192,7 +190,6 @@ DEFINE_FORWARDER(glMaterialf)
 DEFINE_FORWARDER(glMaterialfv)
 DEFINE_FORWARDER(glMateriali)
 DEFINE_FORWARDER(glMaterialiv)
-DEFINE_FORWARDER(glMatrixMode)
 DEFINE_FORWARDER(glMultMatrixd)
 DEFINE_FORWARDER(glMultMatrixf)
 DEFINE_FORWARDER(glNewList)
@@ -479,7 +476,6 @@ void InitializeForwarders(HMODULE hRealDll) {
     LOAD_FORWARDER(glFogi);
     LOAD_FORWARDER(glFogiv);
     LOAD_FORWARDER(glFrontFace);
-    LOAD_FORWARDER(glFrustum);
     LOAD_FORWARDER(glGenLists);
     LOAD_FORWARDER(glGenTextures);
     LOAD_FORWARDER(glGetBooleanv);
@@ -542,7 +538,6 @@ void InitializeForwarders(HMODULE hRealDll) {
     LOAD_FORWARDER(glListBase);
     LOAD_FORWARDER(glLoadIdentity);
     LOAD_FORWARDER(glLoadMatrixd);
-    LOAD_FORWARDER(glLoadMatrixf);
     LOAD_FORWARDER(glLoadName);
     LOAD_FORWARDER(glLogicOp);
     LOAD_FORWARDER(glMap1d);
@@ -557,7 +552,6 @@ void InitializeForwarders(HMODULE hRealDll) {
     LOAD_FORWARDER(glMaterialfv);
     LOAD_FORWARDER(glMateriali);
     LOAD_FORWARDER(glMaterialiv);
-    LOAD_FORWARDER(glMatrixMode);
     LOAD_FORWARDER(glMultMatrixd);
     LOAD_FORWARDER(glMultMatrixf);
     LOAD_FORWARDER(glNewList);

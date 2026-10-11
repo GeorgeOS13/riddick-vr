@@ -1,4 +1,12 @@
-$allExports = Get-Content "C:\Users\GigelCastel\riddick-vr\all_exports.txt"
+$dumpbin = (Get-ChildItem -Path "C:\Program Files\Microsoft Visual Studio", "C:\Program Files (x86)\Microsoft Visual Studio" -Filter "dumpbin.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName -First 1)
+$dump = & $dumpbin /exports "C:\Windows\SysWOW64\opengl32.dll"
+$allExports = @()
+$dump | ForEach-Object {
+    if ($_ -match '^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]{8}\s+([A-Za-z0-9_]+)') {
+        $allExports += $matches[1]
+    }
+}
+Write-Host "Extracted $($allExports.Count) exports directly from SysWOW64\opengl32.dll."
 
 $overridden = @(
     "wglCreateContext",
@@ -7,7 +15,10 @@ $overridden = @(
     "wglSwapBuffers",
     "wglGetProcAddress",
     "glViewport",
-    "glScissor"
+    "glScissor",
+    "glMatrixMode",
+    "glLoadMatrixf",
+    "glFrustum"
 )
 
 # 1. Generate opengl32.def

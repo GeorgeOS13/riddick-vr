@@ -36,6 +36,18 @@ void WINAPI glScissor(GLint x, GLint y, GLsizei width, GLsizei height) {
     RiddickVR::OpenGLProxy::Hook_glScissor(x, y, width, height);
 }
 
+void WINAPI glMatrixMode(GLenum mode) {
+    RiddickVR::OpenGLProxy::Hook_glMatrixMode(mode);
+}
+
+void WINAPI glLoadMatrixf(const GLfloat* m) {
+    RiddickVR::OpenGLProxy::Hook_glLoadMatrixf(m);
+}
+
+void WINAPI glFrustum(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble zNear, GLdouble zFar) {
+    RiddickVR::OpenGLProxy::Hook_glFrustum(left, right, bottom, top, zNear, zFar);
+}
+
 } // extern "C"
 
 typedef BOOL (WINAPI *PFN_GdiSwapBuffers)(HDC);

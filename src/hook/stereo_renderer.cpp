@@ -1,4 +1,5 @@
 #include "stereo_renderer.h"
+#include "camera_hook.h"
 #include "logging.h"
 
 namespace RiddickVR {
@@ -29,6 +30,8 @@ bool StereoRenderer::Initialize(HDC hdc, HGLRC hglrc) {
         m_vrActive = false;
     }
 
+    CreateEyeBuffers(m_eyeWidth, m_eyeHeight);
+
     m_initialized = true;
     return true;
 }
@@ -52,7 +55,7 @@ bool StereoRenderer::CreateEyeBuffers(uint32_t width, uint32_t height) {
     m_eyeWidth = width;
     m_eyeHeight = height;
 
-    // Allocate textures and FBOs for Left Eye
+    // --- Left Eye FBO ---
     OpenGLProxy::glGenFramebuffers(1, &m_leftFbo);
     OpenGLProxy::glGenTextures(1, &m_leftColorTex);
     OpenGLProxy::glBindTexture(GL_TEXTURE_2D, m_leftColorTex);
@@ -63,7 +66,19 @@ bool StereoRenderer::CreateEyeBuffers(uint32_t width, uint32_t height) {
     OpenGLProxy::glBindFramebuffer(0x8D40 /* GL_FRAMEBUFFER */, m_leftFbo);
     OpenGLProxy::glFramebufferTexture2D(0x8D40, 0x8CE0 /* GL_COLOR_ATTACHMENT0 */, GL_TEXTURE_2D, m_leftColorTex, 0);
 
-    // Allocate textures and FBOs for Right Eye
+    if (OpenGLProxy::glGenRenderbuffers) {
+        OpenGLProxy::glGenRenderbuffers(1, &m_leftDepthRbo);
+        OpenGLProxy::glBindRenderbuffer(0x8D41 /* GL_RENDERBUFFER */, m_leftDepthRbo);
+        OpenGLProxy::glRenderbufferStorage(0x8D41, 0x88F0 /* GL_DEPTH24_STENCIL8 */, width, height);
+        OpenGLProxy::glFramebufferRenderbuffer(0x8D40, 0x821A /* GL_DEPTH_STENCIL_ATTACHMENT */, 0x8D41, m_leftDepthRbo);
+    }
+
+    GLenum leftStatus = OpenGLProxy::glCheckFramebufferStatus ? OpenGLProxy::glCheckFramebufferStatus(0x8D40) : 0x8CD5;
+    if (leftStatus != 0x8CD5 /* GL_FRAMEBUFFER_COMPLETE */) {
+        VR_LOG_WARN("Left Eye FBO incomplete: status 0x%X", leftStatus);
+    }
+
+    // --- Right Eye FBO ---
     OpenGLProxy::glGenFramebuffers(1, &m_rightFbo);
     OpenGLProxy::glGenTextures(1, &m_rightColorTex);
     OpenGLProxy::glBindTexture(GL_TEXTURE_2D, m_rightColorTex);
@@ -74,11 +89,24 @@ bool StereoRenderer::CreateEyeBuffers(uint32_t width, uint32_t height) {
     OpenGLProxy::glBindFramebuffer(0x8D40, m_rightFbo);
     OpenGLProxy::glFramebufferTexture2D(0x8D40, 0x8CE0, GL_TEXTURE_2D, m_rightColorTex, 0);
 
+    if (OpenGLProxy::glGenRenderbuffers) {
+        OpenGLProxy::glGenRenderbuffers(1, &m_rightDepthRbo);
+        OpenGLProxy::glBindRenderbuffer(0x8D41, m_rightDepthRbo);
+        OpenGLProxy::glRenderbufferStorage(0x8D41, 0x88F0, width, height);
+        OpenGLProxy::glFramebufferRenderbuffer(0x8D40, 0x821A, 0x8D41, m_rightDepthRbo);
+    }
+
+    GLenum rightStatus = OpenGLProxy::glCheckFramebufferStatus ? OpenGLProxy::glCheckFramebufferStatus(0x8D40) : 0x8CD5;
+    if (rightStatus != 0x8CD5) {
+        VR_LOG_WARN("Right Eye FBO incomplete: status 0x%X", rightStatus);
+    }
+
     // Unbind back to default framebuffer
     OpenGLProxy::glBindFramebuffer(0x8D40, 0);
     OpenGLProxy::glBindTexture(GL_TEXTURE_2D, 0);
 
-    VR_LOG_INFO("Stereo Eye Framebuffers successfully created (%ux%u)", width, height);
+    VR_LOG_INFO("Stereo Eye Framebuffers successfully created (%ux%u, LeftFBO: %u, RightFBO: %u)",
+        width, height, m_leftFbo, m_rightFbo);
     return true;
 }
 
@@ -91,6 +119,17 @@ void StereoRenderer::DestroyEyeBuffers() {
         if (m_rightFbo) {
             OpenGLProxy::glDeleteFramebuffers(1, &m_rightFbo);
             m_rightFbo = 0;
+        }
+    }
+
+    if (OpenGLProxy::glDeleteRenderbuffers) {
+        if (m_leftDepthRbo) {
+            OpenGLProxy::glDeleteRenderbuffers(1, &m_leftDepthRbo);
+            m_leftDepthRbo = 0;
+        }
+        if (m_rightDepthRbo) {
+            OpenGLProxy::glDeleteRenderbuffers(1, &m_rightDepthRbo);
+            m_rightDepthRbo = 0;
         }
     }
 
@@ -145,6 +184,7 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
         // Read updated tracking state for next frame
         if (m_ipcClient.ReadState(m_sharedState)) {
             m_vrActive = m_sharedState.vrActive;
+            CameraHook::Instance().Update(m_sharedState);
         }
 
         // Write client frame count and state

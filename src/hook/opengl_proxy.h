@@ -5,7 +5,7 @@
 
 namespace RiddickVR {
 
-// Forward-declared modern OpenGL extension function types
+// Extension function types
 typedef void (APIENTRY *PFNGLBINDFRAMEBUFFERPROC)(GLenum target, GLuint framebuffer);
 typedef void (APIENTRY *PFNGLGENFRAMEBUFFERSPROC)(GLsizei n, GLuint *framebuffers);
 typedef void (APIENTRY *PFNGLDELETEFRAMEBUFFERSPROC)(GLsizei n, const GLuint *framebuffers);
@@ -13,6 +13,17 @@ typedef void (APIENTRY *PFNGLFRAMEBUFFERTEXTURE2DPROC)(GLenum target, GLenum att
 typedef GLenum (APIENTRY *PFNGLCHECKFRAMEBUFFERSTATUSPROC)(GLenum target);
 typedef void (APIENTRY *PFNGLBLITFRAMEBUFFERPROC)(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter);
 typedef void (APIENTRY *PFNGLUNIFORMMATRIX4FVPROC)(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
+
+// Renderbuffer extension types
+typedef void (APIENTRY *PFNGLGENRENDERBUFFERSPROC)(GLsizei n, GLuint *renderbuffers);
+typedef void (APIENTRY *PFNGLBINDRENDERBUFFERPROC)(GLenum target, GLuint renderbuffer);
+typedef void (APIENTRY *PFNGLRENDERBUFFERSTORAGEPROC)(GLenum target, GLenum internalformat, GLsizei width, GLsizei height);
+typedef void (APIENTRY *PFNGLFRAMEBUFFERRENDERBUFFERPROC)(GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer);
+typedef void (APIENTRY *PFNGLDELETERENDERBUFFERSPROC)(GLsizei n, const GLuint *renderbuffers);
+
+// ARB Vertex Program / GLSL extension types
+typedef void (APIENTRY *PFNGLPROGRAMENVPARAMETER4FVARBPROC)(GLenum target, GLuint index, const GLfloat *params);
+typedef void (APIENTRY *PFNGLPROGRAMLOCALPARAMETER4FVARBPROC)(GLenum target, GLuint index, const GLfloat *params);
 
 typedef void (APIENTRY *PFN_glBindTexture)(GLenum target, GLuint texture);
 typedef void (APIENTRY *PFN_glGenTextures)(GLsizei n, GLuint *textures);
@@ -24,6 +35,7 @@ class OpenGLProxy {
 public:
     static bool Initialize();
     static void Shutdown();
+    static void QueryContextExtensions();
 
     // WGL Interception Points
     static HGLRC WINAPI Hook_wglCreateContext(HDC hdc);
@@ -35,6 +47,15 @@ public:
     // GL Interception Points
     static void WINAPI Hook_glViewport(GLint x, GLint y, GLsizei width, GLsizei height);
     static void WINAPI Hook_glScissor(GLint x, GLint y, GLsizei width, GLsizei height);
+    static void WINAPI Hook_glMatrixMode(GLenum mode);
+    static void WINAPI Hook_glLoadMatrixf(const GLfloat *m);
+    static void WINAPI Hook_glFrustum(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble zNear, GLdouble zFar);
+
+    // Matrix state inspection
+    static GLenum GetCurrentMatrixMode();
+    static bool HasInterceptedProjection();
+    static const float* GetLastProjectionMatrix();
+    static const float* GetLastViewMatrix();
 
     // GL 1.1 functions retrieved dynamically
     static PFN_glBindTexture glBindTexture;
@@ -51,6 +72,17 @@ public:
     static PFNGLCHECKFRAMEBUFFERSTATUSPROC glCheckFramebufferStatus;
     static PFNGLBLITFRAMEBUFFERPROC glBlitFramebuffer;
     static PFNGLUNIFORMMATRIX4FVPROC glUniformMatrix4fv;
+
+    // Renderbuffers
+    static PFNGLGENRENDERBUFFERSPROC glGenRenderbuffers;
+    static PFNGLBINDRENDERBUFFERPROC glBindRenderbuffer;
+    static PFNGLRENDERBUFFERSTORAGEPROC glRenderbufferStorage;
+    static PFNGLFRAMEBUFFERRENDERBUFFERPROC glFramebufferRenderbuffer;
+    static PFNGLDELETERENDERBUFFERSPROC glDeleteRenderbuffers;
+
+    // ARB Program parameters
+    static PFNGLPROGRAMENVPARAMETER4FVARBPROC glProgramEnvParameter4fvARB;
+    static PFNGLPROGRAMLOCALPARAMETER4FVARBPROC glProgramLocalParameter4fvARB;
 
     static HMODULE GetRealOpenGLModule() { return s_hRealOpenGL; }
 
