@@ -46,6 +46,8 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4 AND RIDDICKVR_BUILD_PROXY)
     
     target_link_libraries(opengl32 PRIVATE
         riddick_vr_bridge
+        d3d11
+        dxgi
     )
     
     set_target_properties(opengl32 PROPERTIES
@@ -64,5 +66,7 @@ elseif(CMAKE_SIZEOF_VOID_P EQUAL 8 AND RIDDICKVR_BUILD_HOST)
     
     target_link_libraries(riddickvr-host PRIVATE
         riddick_vr_bridge
+        d3d11
+        dxgi
     )
 endif()

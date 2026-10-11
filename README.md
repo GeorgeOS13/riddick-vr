@@ -6,7 +6,7 @@ Inspired by and building on architectural patterns from [F.E.A.R. VR](https://gi
 
 ---
 
-## ⚠️ Bug Reports & Issue Tracking
+## 🐛 Bug Reports & Issue Tracking
 
 All development progress, feedback, regressions, and bug reports are tracked through the **[GitHub Issues tab](../../issues)**. Please use the issue templates provided when reporting crashes, camera artifacts, or controller glitches.
 
@@ -19,12 +19,13 @@ All development progress, feedback, regressions, and bug reports are tracked thr
 1. **Native Stereo Rendering:** Injecting asymmetric projection matrices and IPD offsets into the Starbreeze Engine's OpenGL pipeline.
 2. **First-Person Body Decoupling:** Isolating the 6DOF VR head tracking from the game's heavily animated neck and torso bone rigs to prevent motion sickness.
 3. **Dual-Process 32-bit / 64-bit Architecture:** Bridging the 32-bit `DarkAthena.exe` executable to 64-bit OpenXR runtimes (Meta Quest Link, SteamVR, Virtual Desktop).
-4. **Motion Controls & Melee:** Mapping fists, brass knuckles, shivs, Ulaks, and firearms to 6DOF tracked controllers.
-5. **Atmospheric FX Adaptation:** Adjusting Riddick's iconic "Eyeshine" night-vision mode, stencil shadow volumes, and minimalist diegetic HUD for stereo depth.
+4. **Hardware Zero-Copy Texture Sharing:** Utilizing `WGL_NV_DX_interop` to share dual 2048x2048 eye buffers directly between 32-bit OpenGL and 64-bit Direct3D 11 swapchains without CPU readback stalls.
+5. **Motion Controls & Melee:** Mapping fists, brass knuckles, shivs, Ulaks, and firearms to 6DOF tracked controllers with physical crouch detection, smooth/snap turning, and locomotion.
+6. **Atmospheric FX Adaptation:** Adjusting Riddick's iconic "Eyeshine" night-vision mode, stencil shadow volumes, and minimalist diegetic HUD for stereoscopic depth convergence (~1.8m).
 
 ---
 
-## 📚 Architecture Decision Records (ADRs)
+## 🏛️ Architecture Decision Records (ADRs)
 
 Key technical choices, trade-offs, and implementation strategies are documented in the Architecture Decision Records:
 
@@ -39,20 +40,24 @@ Key technical choices, trade-offs, and implementation strategies are documented 
 
 ---
 
-## 🏗️ Repository Layout
+## 📁 Repository Layout
 
 ```
 riddick-vr/
 ├── .github/
 │   └── ISSUE_TEMPLATE/       # Templates for bug reports and feature requests
 ├── docs/
-│   └── adr/                  # Architectural Decision Records
-├── include/                  # Shared headers and interface definitions
+│   └── adr/                  # Architectural Decision Records (ADR 0001 - 0006)
+├── include/
+│   └── riddick_vr_protocol.h # IPC shared state, poses, matrix, controller formats
 ├── src/
-│   ├── hook/                 # 32-bit opengl32.dll proxy & memory injector
-│   ├── bridge/               # Low-latency shared memory IPC & texture sharing
-│   └── host/                 # 64-bit OpenXR companion process
-└── CMakeLists.txt            # Build configuration
+│   ├── hook/                 # 32-bit opengl32.dll proxy, 368-symbol forwarders, stereo FBO, camera hook
+│   ├── bridge/               # Low-latency shared memory IPC bridge & synchronization
+│   └── host/                 # 64-bit OpenXR companion host process (riddickvr-host.exe)
+├── tools/
+│   ├── build-all.ps1         # Unified multi-architecture build script
+│   └── generate_forwarders.ps1 # Automated 368-symbol OpenGL forwarder generator
+└── CMakeLists.txt            # Unified CMake build definition
 ```
 
 ---
@@ -60,28 +65,45 @@ riddick-vr/
 ## 🚀 Building & Prerequisites
 
 * Windows 10 / 11 (x64)
-* Visual Studio 2022 (with MSVC v143 toolsets for both x86 and x64)
+* Visual Studio 2022 (with MSVC v143 toolsets for both Win32 and x64)
 * CMake 3.25+
+* Direct3D 11 & DXGI (included with standard Windows SDK)
 * A legitimate copy of *The Chronicles of Riddick: Assault on Dark Athena* (GOG / retail PC release)
 
-### 1. Build the 64-bit OpenXR Companion Host (`RiddickVRHost.exe`)
+### Unified Multi-Arch Build
+To build both the 64-bit Companion Host and 32-bit Game Proxy into `dist/`, run:
 ```powershell
-cmake -B build_x64 -A x64
-cmake --build build_x64 --config Release
+.\tools\build-all.ps1
 ```
-Output: `build_x64/Release/RiddickVRHost.exe`
 
-### 2. Build the 32-bit Hook Proxy (`opengl32.dll`)
-```powershell
-cmake -B build_x86 -A Win32
-cmake --build build_x86 --config Release
-```
-Output: `build_x86/Release/opengl32.dll`
+The script automatically produces:
+* `dist\riddickvr-host.exe` (64-bit native OpenXR companion)
+* `dist\opengl32.dll` (32-bit game proxy hook)
 
-### 3. Installation
-1. Copy `opengl32.dll` into the game's executable directory (e.g. `<DarkAthena>/System/Win32_x86/`).
-2. Run `RiddickVRHost.exe` to start the OpenXR companion session.
-3. Launch `DarkAthena.exe`! The hook will automatically attach, log to `riddick_vr.log`, and bind to the host.
+---
+
+## 🎮 Installation & Play
+
+1. Copy `dist\opengl32.dll` into your game executable directory:
+   ```
+   <GameFolder>\System\Win32_x86\opengl32.dll
+   ```
+2. Start your VR runtime (Virtual Desktop Streamer + VDXR, Meta Quest Link, or SteamVR).
+3. (Optional) Run validation to check your OpenXR setup:
+   ```powershell
+   .\dist\riddickvr-host.exe --validate-only
+   ```
+4. Launch `riddickvr-host.exe` in the background or companion window.
+5. Launch `DarkAthena.exe`! The game proxy will automatically link to the 64-bit host over shared memory and initialize zero-copy GPU texture sharing at full frame rate.
+
+### Controls Mapping
+* **Left Thumbstick:** Smooth Locomotion (`W`, `A`, `S`, `D`)
+* **Right Thumbstick (X):** Snap / Smooth Turn
+* **Physical Crouch:** Duck below threshold ($Y < -0.35\text{ m}$) triggers game crouch (`C`)
+* **Right Trigger:** Primary Attack / Fire (Left Mouse Button)
+* **Left Trigger:** Aim / Block (Right Mouse Button)
+* **Left Grip:** Interact / Action (`E`)
+* **Right Grip:** Reload (`R`)
 
 ---
 

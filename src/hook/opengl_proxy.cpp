@@ -27,6 +27,14 @@ PFNGLDELETERENDERBUFFERSPROC OpenGLProxy::glDeleteRenderbuffers = nullptr;
 PFNGLPROGRAMENVPARAMETER4FVARBPROC OpenGLProxy::glProgramEnvParameter4fvARB = nullptr;
 PFNGLPROGRAMLOCALPARAMETER4FVARBPROC OpenGLProxy::glProgramLocalParameter4fvARB = nullptr;
 
+PFNWGLDXOPENDEVICENVPROC OpenGLProxy::wglDXOpenDeviceNV = nullptr;
+PFNWGLDXCLOSEDEVICENVPROC OpenGLProxy::wglDXCloseDeviceNV = nullptr;
+PFNWGLDXREGISTEROBJECTNVPROC OpenGLProxy::wglDXRegisterObjectNV = nullptr;
+PFNWGLDXUNREGISTEROBJECTNVPROC OpenGLProxy::wglDXUnregisterObjectNV = nullptr;
+PFNWGLDXOBJECTACCESSNVPROC OpenGLProxy::wglDXObjectAccessNV = nullptr;
+PFNWGLDXLOCKOBJECTSNVPROC OpenGLProxy::wglDXLockObjectsNV = nullptr;
+PFNWGLDXUNLOCKOBJECTSNVPROC OpenGLProxy::wglDXUnlockObjectsNV = nullptr;
+
 PFN_glBindTexture OpenGLProxy::glBindTexture = nullptr;
 PFN_glGenTextures OpenGLProxy::glGenTextures = nullptr;
 PFN_glDeleteTextures OpenGLProxy::glDeleteTextures = nullptr;
@@ -153,6 +161,21 @@ void OpenGLProxy::QueryContextExtensions() {
 
     if (!glProgramEnvParameter4fvARB) glProgramEnvParameter4fvARB = (PFNGLPROGRAMENVPARAMETER4FVARBPROC)LoadExt("glProgramEnvParameter4fvARB");
     if (!glProgramLocalParameter4fvARB) glProgramLocalParameter4fvARB = (PFNGLPROGRAMLOCALPARAMETER4FVARBPROC)LoadExt("glProgramLocalParameter4fvARB");
+
+    // Query WGL_NV_DX_interop
+    if (!wglDXOpenDeviceNV) wglDXOpenDeviceNV = (PFNWGLDXOPENDEVICENVPROC)LoadExt("wglDXOpenDeviceNV");
+    if (!wglDXCloseDeviceNV) wglDXCloseDeviceNV = (PFNWGLDXCLOSEDEVICENVPROC)LoadExt("wglDXCloseDeviceNV");
+    if (!wglDXRegisterObjectNV) wglDXRegisterObjectNV = (PFNWGLDXREGISTEROBJECTNVPROC)LoadExt("wglDXRegisterObjectNV");
+    if (!wglDXUnregisterObjectNV) wglDXUnregisterObjectNV = (PFNWGLDXUNREGISTEROBJECTNVPROC)LoadExt("wglDXUnregisterObjectNV");
+    if (!wglDXObjectAccessNV) wglDXObjectAccessNV = (PFNWGLDXOBJECTACCESSNVPROC)LoadExt("wglDXObjectAccessNV");
+    if (!wglDXLockObjectsNV) wglDXLockObjectsNV = (PFNWGLDXLOCKOBJECTSNVPROC)LoadExt("wglDXLockObjectsNV");
+    if (!wglDXUnlockObjectsNV) wglDXUnlockObjectsNV = (PFNWGLDXUNLOCKOBJECTSNVPROC)LoadExt("wglDXUnlockObjectsNV");
+
+    if (wglDXOpenDeviceNV && wglDXRegisterObjectNV) {
+        VR_LOG_INFO("Hardware Interop: WGL_NV_DX_interop supported by active OpenGL driver!");
+    } else {
+        VR_LOG_INFO("Hardware Interop: WGL_NV_DX_interop not advertised; using FBO blit pipeline.");
+    }
 }
 
 HGLRC WINAPI OpenGLProxy::Hook_wglCreateContext(HDC hdc) {
@@ -259,6 +282,26 @@ void WINAPI OpenGLProxy::Hook_glLoadMatrixf(const GLfloat *m) {
 
             if (real_glLoadMatrixf) {
                 real_glLoadMatrixf(vrProj);
+                return;
+            }
+        }
+        // 2D Orthographic HUD / UI Projection Interception (fabsf(m[15] - 1.0f) < 0.01f)
+        else if (StereoRenderer::Instance().IsVREnabled() && fabsf(m[15] - 1.0f) < 0.01f) {
+            const auto pass = StereoRenderer::Instance().GetCurrentPass();
+            float hudOffset = StereoRenderer::Instance().GetHudConvergenceOffset();
+
+            GLfloat hudProj[16];
+            memcpy(hudProj, m, sizeof(hudProj));
+
+            // Apply slight horizontal convergence parallax for stereoscopic depth (~1.8m virtual plane)
+            if (pass == StereoPass::LeftEye) {
+                hudProj[12] += hudOffset;
+            } else if (pass == StereoPass::RightEye) {
+                hudProj[12] -= hudOffset;
+            }
+
+            if (real_glLoadMatrixf) {
+                real_glLoadMatrixf(hudProj);
                 return;
             }
         }

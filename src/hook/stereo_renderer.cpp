@@ -105,12 +105,18 @@ bool StereoRenderer::CreateEyeBuffers(uint32_t width, uint32_t height) {
     OpenGLProxy::glBindFramebuffer(0x8D40, 0);
     OpenGLProxy::glBindTexture(GL_TEXTURE_2D, 0);
 
+    // Initialize hardware texture sharing if supported
+    InitD3D11Interop(width, height);
+    LockSharedTextures();
+
     VR_LOG_INFO("Stereo Eye Framebuffers successfully created (%ux%u, LeftFBO: %u, RightFBO: %u)",
         width, height, m_leftFbo, m_rightFbo);
     return true;
 }
 
 void StereoRenderer::DestroyEyeBuffers() {
+    ReleaseD3D11Interop();
+
     if (OpenGLProxy::glDeleteFramebuffers) {
         if (m_leftFbo) {
             OpenGLProxy::glDeleteFramebuffers(1, &m_leftFbo);
@@ -142,6 +148,164 @@ void StereoRenderer::DestroyEyeBuffers() {
             OpenGLProxy::glDeleteTextures(1, &m_rightColorTex);
             m_rightColorTex = 0;
         }
+    }
+}
+
+bool StereoRenderer::InitD3D11Interop(uint32_t width, uint32_t height) {
+    if (!OpenGLProxy::HasDXInteropSupport()) {
+        VR_LOG_INFO("Hardware Interop: WGL_NV_DX_interop not available; using standard FBO pipeline.");
+        return false;
+    }
+
+    ReleaseD3D11Interop();
+
+    D3D_FEATURE_LEVEL featureLevels[] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_0 };
+    D3D_FEATURE_LEVEL featureLevel;
+    HRESULT hr = D3D11CreateDevice(
+        nullptr,
+        D3D_DRIVER_TYPE_HARDWARE,
+        nullptr,
+        0,
+        featureLevels,
+        2,
+        D3D11_SDK_VERSION,
+        &m_d3d11Device,
+        &featureLevel,
+        &m_d3d11Context
+    );
+
+    if (FAILED(hr) || !m_d3d11Device) {
+        VR_LOG_WARN("Hardware Interop: D3D11CreateDevice failed with hr=0x%08X", hr);
+        return false;
+    }
+
+    m_hDXDevice = OpenGLProxy::wglDXOpenDeviceNV(m_d3d11Device);
+    if (!m_hDXDevice) {
+        VR_LOG_WARN("Hardware Interop: wglDXOpenDeviceNV failed!");
+        ReleaseD3D11Interop();
+        return false;
+    }
+
+    D3D11_TEXTURE2D_DESC desc = {};
+    desc.Width = width;
+    desc.Height = height;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.SampleDesc.Quality = 0;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
+
+    // Create Left Eye Shared D3D11 Texture
+    hr = m_d3d11Device->CreateTexture2D(&desc, nullptr, &m_d3d11LeftTex);
+    if (SUCCEEDED(hr) && m_d3d11LeftTex) {
+        IDXGIResource* pResource = nullptr;
+        if (SUCCEEDED(m_d3d11LeftTex->QueryInterface(__uuidof(IDXGIResource), (void**)&pResource))) {
+            pResource->GetSharedHandle(&m_sharedHandleLeft);
+            pResource->Release();
+        }
+    }
+
+    // Create Right Eye Shared D3D11 Texture
+    hr = m_d3d11Device->CreateTexture2D(&desc, nullptr, &m_d3d11RightTex);
+    if (SUCCEEDED(hr) && m_d3d11RightTex) {
+        IDXGIResource* pResource = nullptr;
+        if (SUCCEEDED(m_d3d11RightTex->QueryInterface(__uuidof(IDXGIResource), (void**)&pResource))) {
+            pResource->GetSharedHandle(&m_sharedHandleRight);
+            pResource->Release();
+        }
+    }
+
+    if (!m_sharedHandleLeft || !m_sharedHandleRight) {
+        VR_LOG_WARN("Hardware Interop: Failed to retrieve DXGI shared resource handles.");
+        ReleaseD3D11Interop();
+        return false;
+    }
+
+    // Register with OpenGL textures
+    m_hDXLeftTex = OpenGLProxy::wglDXRegisterObjectNV(
+        m_hDXDevice, m_d3d11LeftTex, m_leftColorTex, GL_TEXTURE_2D, WGL_ACCESS_READ_WRITE_NV
+    );
+    m_hDXRightTex = OpenGLProxy::wglDXRegisterObjectNV(
+        m_hDXDevice, m_d3d11RightTex, m_rightColorTex, GL_TEXTURE_2D, WGL_ACCESS_READ_WRITE_NV
+    );
+
+    if (!m_hDXLeftTex || !m_hDXRightTex) {
+        VR_LOG_WARN("Hardware Interop: wglDXRegisterObjectNV failed!");
+        ReleaseD3D11Interop();
+        return false;
+    }
+
+    m_dxInteropActive = true;
+    m_sharedState.leftEyeSharedHandle = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(m_sharedHandleLeft));
+    m_sharedState.rightEyeSharedHandle = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(m_sharedHandleRight));
+
+    if (m_ipcClient.IsConnected()) {
+        m_ipcClient.WriteState(m_sharedState);
+    }
+
+    VR_LOG_INFO("Hardware Interop: SUCCESS! Zero-copy GPU texture sharing ACTIVE (Left: 0x%p, Right: 0x%p)",
+        m_sharedHandleLeft, m_sharedHandleRight);
+    return true;
+}
+
+void StereoRenderer::ReleaseD3D11Interop() {
+    UnlockSharedTextures();
+
+    if (m_hDXDevice) {
+        if (m_hDXLeftTex && OpenGLProxy::wglDXUnregisterObjectNV) {
+            OpenGLProxy::wglDXUnregisterObjectNV(m_hDXDevice, m_hDXLeftTex);
+            m_hDXLeftTex = nullptr;
+        }
+        if (m_hDXRightTex && OpenGLProxy::wglDXUnregisterObjectNV) {
+            OpenGLProxy::wglDXUnregisterObjectNV(m_hDXDevice, m_hDXRightTex);
+            m_hDXRightTex = nullptr;
+        }
+        if (OpenGLProxy::wglDXCloseDeviceNV) {
+            OpenGLProxy::wglDXCloseDeviceNV(m_hDXDevice);
+        }
+        m_hDXDevice = nullptr;
+    }
+
+    if (m_d3d11LeftTex) {
+        m_d3d11LeftTex->Release();
+        m_d3d11LeftTex = nullptr;
+    }
+    if (m_d3d11RightTex) {
+        m_d3d11RightTex->Release();
+        m_d3d11RightTex = nullptr;
+    }
+    if (m_d3d11Context) {
+        m_d3d11Context->Release();
+        m_d3d11Context = nullptr;
+    }
+    if (m_d3d11Device) {
+        m_d3d11Device->Release();
+        m_d3d11Device = nullptr;
+    }
+
+    m_sharedHandleLeft = nullptr;
+    m_sharedHandleRight = nullptr;
+    m_dxInteropActive = false;
+}
+
+void StereoRenderer::LockSharedTextures() {
+    if (!m_dxInteropActive || m_texturesLocked || !m_hDXDevice || !OpenGLProxy::wglDXLockObjectsNV) return;
+
+    HANDLE objects[2] = { m_hDXLeftTex, m_hDXRightTex };
+    if (OpenGLProxy::wglDXLockObjectsNV(m_hDXDevice, 2, objects)) {
+        m_texturesLocked = true;
+    }
+}
+
+void StereoRenderer::UnlockSharedTextures() {
+    if (!m_dxInteropActive || !m_texturesLocked || !m_hDXDevice || !OpenGLProxy::wglDXUnlockObjectsNV) return;
+
+    HANDLE objects[2] = { m_hDXLeftTex, m_hDXRightTex };
+    if (OpenGLProxy::wglDXUnlockObjectsNV(m_hDXDevice, 2, objects)) {
+        m_texturesLocked = false;
     }
 }
 
@@ -181,10 +345,19 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
     }
 
     if (m_ipcClient.IsConnected()) {
+        // Unlock GPU interop textures before notifying host OpenXR compositor
+        UnlockSharedTextures();
+
         // Read updated tracking state for next frame
         if (m_ipcClient.ReadState(m_sharedState)) {
             m_vrActive = m_sharedState.vrActive;
             CameraHook::Instance().Update(m_sharedState);
+        }
+
+        // Re-assign persistent GPU shared texture handles
+        if (m_dxInteropActive) {
+            m_sharedState.leftEyeSharedHandle = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(m_sharedHandleLeft));
+            m_sharedState.rightEyeSharedHandle = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(m_sharedHandleRight));
         }
 
         // Write client frame count and state
@@ -204,6 +377,9 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
 
         // Signal host that frame is ready
         m_ipcClient.SignalFrameReady();
+
+        // Re-lock shared textures for the upcoming frame
+        LockSharedTextures();
     }
 }
 

@@ -17,6 +17,28 @@ bool OpenXRManager::Initialize() {
 
     std::cout << "[Host] Initializing OpenXR Session..." << std::endl;
 
+    // Initialize D3D11 Compositor Device
+    D3D_FEATURE_LEVEL featureLevels[] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_0 };
+    D3D_FEATURE_LEVEL featureLevel;
+    HRESULT hr = D3D11CreateDevice(
+        nullptr,
+        D3D_DRIVER_TYPE_HARDWARE,
+        nullptr,
+        0,
+        featureLevels,
+        2,
+        D3D11_SDK_VERSION,
+        &m_d3d11Device,
+        &featureLevel,
+        &m_d3d11Context
+    );
+
+    if (SUCCEEDED(hr) && m_d3d11Device) {
+        std::cout << "[Host] Created Direct3D 11 host compositor device." << std::endl;
+    } else {
+        std::cout << "[Host] Warning: Direct3D 11 device creation failed (hr=0x" << std::hex << hr << std::dec << ")" << std::endl;
+    }
+
     // Check for openxr_loader.dll
     HMODULE hLoader = LoadLibraryA("openxr_loader.dll");
     if (!hLoader) {
@@ -35,10 +57,71 @@ bool OpenXRManager::Initialize() {
 }
 
 void OpenXRManager::Shutdown() {
+    ReleaseSharedTextures();
+
+    if (m_d3d11Context) {
+        m_d3d11Context->Release();
+        m_d3d11Context = nullptr;
+    }
+    if (m_d3d11Device) {
+        m_d3d11Device->Release();
+        m_d3d11Device = nullptr;
+    }
+
     m_running = false;
     m_sessionActive = false;
     m_initialized = false;
     std::cout << "[Host] OpenXR Manager shut down." << std::endl;
+}
+
+bool OpenXRManager::EnsureSharedTextures(uint64_t leftHandle, uint64_t rightHandle) {
+    if (!m_d3d11Device || !leftHandle || !rightHandle) return false;
+    if (leftHandle == m_currentLeftHandle && rightHandle == m_currentRightHandle && m_sharedLeftTex && m_sharedRightTex) {
+        return true;
+    }
+
+    ReleaseSharedTextures();
+
+    HANDLE hLeft = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(leftHandle & 0xFFFFFFFFULL));
+    HANDLE hRight = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(rightHandle & 0xFFFFFFFFULL));
+
+    HRESULT hrLeft = m_d3d11Device->OpenSharedResource(
+        hLeft,
+        __uuidof(ID3D11Texture2D),
+        (void**)&m_sharedLeftTex
+    );
+
+    HRESULT hrRight = m_d3d11Device->OpenSharedResource(
+        hRight,
+        __uuidof(ID3D11Texture2D),
+        (void**)&m_sharedRightTex
+    );
+
+    if (SUCCEEDED(hrLeft) && SUCCEEDED(hrRight) && m_sharedLeftTex && m_sharedRightTex) {
+        m_currentLeftHandle = leftHandle;
+        m_currentRightHandle = rightHandle;
+        std::cout << "[Host] Successfully opened cross-process shared eye textures (Left: 0x" 
+                  << std::hex << leftHandle << ", Right: 0x" << rightHandle << std::dec << ")!" << std::endl;
+        return true;
+    } else {
+        std::cout << "[Host] Warning: Could not open cross-process shared eye textures (Left hr: 0x" 
+                  << std::hex << hrLeft << ", Right hr: 0x" << hrRight << std::dec << ")" << std::endl;
+        ReleaseSharedTextures();
+        return false;
+    }
+}
+
+void OpenXRManager::ReleaseSharedTextures() {
+    if (m_sharedLeftTex) {
+        m_sharedLeftTex->Release();
+        m_sharedLeftTex = nullptr;
+    }
+    if (m_sharedRightTex) {
+        m_sharedRightTex->Release();
+        m_sharedRightTex = nullptr;
+    }
+    m_currentLeftHandle = 0;
+    m_currentRightHandle = 0;
 }
 
 bool OpenXRManager::PollEvents() {
@@ -102,6 +185,14 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
 
     // Wait for the game hook to finish rendering the frame (up to 16ms)
     if (ipcHost.WaitForFrameReady(16)) {
+        // Read client state to check for shared texture handles
+        RiddickVRSharedState clientState{};
+        if (ipcHost.ReadState(clientState)) {
+            if (clientState.leftEyeSharedHandle && clientState.rightEyeSharedHandle) {
+                EnsureSharedTextures(clientState.leftEyeSharedHandle, clientState.rightEyeSharedHandle);
+            }
+        }
+
         // Frame received from game; submit to OpenXR compositor
         ipcHost.SignalFrameConsumed();
     }

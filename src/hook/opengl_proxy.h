@@ -25,6 +25,19 @@ typedef void (APIENTRY *PFNGLDELETERENDERBUFFERSPROC)(GLsizei n, const GLuint *r
 typedef void (APIENTRY *PFNGLPROGRAMENVPARAMETER4FVARBPROC)(GLenum target, GLuint index, const GLfloat *params);
 typedef void (APIENTRY *PFNGLPROGRAMLOCALPARAMETER4FVARBPROC)(GLenum target, GLuint index, const GLfloat *params);
 
+// WGL_NV_DX_interop extension types
+#define WGL_ACCESS_READ_ONLY_NV     0x00000000
+#define WGL_ACCESS_READ_WRITE_NV    0x00000001
+#define WGL_ACCESS_WRITE_DISCARD_NV 0x00000002
+
+typedef HANDLE (APIENTRY *PFNWGLDXOPENDEVICENVPROC)(void *dxDevice);
+typedef BOOL   (APIENTRY *PFNWGLDXCLOSEDEVICENVPROC)(HANDLE hDevice);
+typedef HANDLE (APIENTRY *PFNWGLDXREGISTEROBJECTNVPROC)(HANDLE hDevice, void *dxObject, GLuint name, GLenum type, GLenum access);
+typedef BOOL   (APIENTRY *PFNWGLDXUNREGISTEROBJECTNVPROC)(HANDLE hDevice, HANDLE hObject);
+typedef BOOL   (APIENTRY *PFNWGLDXOBJECTACCESSNVPROC)(HANDLE hObject, GLenum access);
+typedef BOOL   (APIENTRY *PFNWGLDXLOCKOBJECTSNVPROC)(HANDLE hDevice, GLint count, HANDLE *hObjects);
+typedef BOOL   (APIENTRY *PFNWGLDXUNLOCKOBJECTSNVPROC)(HANDLE hDevice, GLint count, HANDLE *hObjects);
+
 typedef void (APIENTRY *PFN_glBindTexture)(GLenum target, GLuint texture);
 typedef void (APIENTRY *PFN_glGenTextures)(GLsizei n, GLuint *textures);
 typedef void (APIENTRY *PFN_glDeleteTextures)(GLsizei n, const GLuint *textures);
@@ -83,6 +96,16 @@ public:
     // ARB Program parameters
     static PFNGLPROGRAMENVPARAMETER4FVARBPROC glProgramEnvParameter4fvARB;
     static PFNGLPROGRAMLOCALPARAMETER4FVARBPROC glProgramLocalParameter4fvARB;
+
+    // WGL_NV_DX_interop extension pointers
+    static PFNWGLDXOPENDEVICENVPROC wglDXOpenDeviceNV;
+    static PFNWGLDXCLOSEDEVICENVPROC wglDXCloseDeviceNV;
+    static PFNWGLDXREGISTEROBJECTNVPROC wglDXRegisterObjectNV;
+    static PFNWGLDXUNREGISTEROBJECTNVPROC wglDXUnregisterObjectNV;
+    static PFNWGLDXOBJECTACCESSNVPROC wglDXObjectAccessNV;
+    static PFNWGLDXLOCKOBJECTSNVPROC wglDXLockObjectsNV;
+    static PFNWGLDXUNLOCKOBJECTSNVPROC wglDXUnlockObjectsNV;
+    static bool HasDXInteropSupport() { return wglDXOpenDeviceNV != nullptr && wglDXRegisterObjectNV != nullptr; }
 
     static HMODULE GetRealOpenGLModule() { return s_hRealOpenGL; }
 
