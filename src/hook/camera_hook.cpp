@@ -129,27 +129,16 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         cursorShowing = (ci.flags & CURSOR_SHOWING) != 0;
     }
 
-    // Auto-detect cutscenes and dialogue sequences via projection matrix:
-    // First-person gameplay uses proj[0] ~0.60 to 0.70.
-    // 3rd-person cutscenes, dialogues, and cinematic cameras use narrow telephoto lenses with proj[0] > 1.2f (e.g. 2.14f).
-    bool isCutsceneOrDialogue = false;
-    if (OpenGLProxy::HasInterceptedProjection()) {
-        const float* proj = OpenGLProxy::GetLastProjectionMatrix();
-        if (proj && proj[0] > 1.2f) {
-            isCutsceneOrDialogue = true;
-        }
-    }
-
     uint32_t btns = vrState.rightController.buttons | vrState.leftController.buttons;
     static uint32_t s_prevButtons = 0;
     static bool s_manualCinemaToggle = false;
 
-    // Toggle Cinema Screen Mode on Button Y
+    // Toggle Cinema Screen Mode manually on Button Y (or auto-engage in cursor menus)
     if ((btns & RIDDICK_VR_BTN_Y) && !(s_prevButtons & RIDDICK_VR_BTN_Y)) {
         s_manualCinemaToggle = !s_manualCinemaToggle;
         VR_LOG_INFO("Cinema Screen Mode toggled manually: %s", s_manualCinemaToggle ? "ON (Virtual Screen)" : "OFF (Immersive 3D)");
     }
-    vrState.cinemaMode = cursorShowing || isCutsceneOrDialogue || s_manualCinemaToggle;
+    vrState.cinemaMode = cursorShowing || s_manualCinemaToggle;
 
     // 0. Head Tracking Look Input (HMD Orientation -> In-Game View Yaw & Pitch)
     // Only apply in-game look when not in cinema menu mode
@@ -425,18 +414,23 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         if (btnA) vrState.rightHapticPulse = 0.4f;
     }
 
-    // BUTTON B -> JUMP (Space)
+    // BUTTON B -> JUMP (Space) / BACK / DISMISS / ESCAPE / CANCEL
     bool btnB = (btns & RIDDICK_VR_BTN_B) != 0;
     bool prevBtnB = (s_prevButtons & RIDDICK_VR_BTN_B) != 0;
     if (btnB != prevBtnB) {
-        SendKey(VK_SPACE, btnB);
+        SendKey(VK_SPACE, btnB);      // Jump in gameplay
+        SendKey(VK_ESCAPE, btnB);     // Dismiss popups / menus / smokes
+        SendKey(VK_BACK, btnB);       // Back in Cube UI
+        SendKey(VK_TAB, btnB);        // Dismiss Cube PDA
+        if (btnB) vrState.rightHapticPulse = 0.3f;
     }
 
-    // BUTTON X -> OFF-HAND INTERACT ('E') & CROUCH TOGGLE ('C')
+    // BUTTON X -> OFF-HAND INTERACT ('E') & CROUCH TOGGLE ('C') & CONFIRM
     bool btnX = (btns & RIDDICK_VR_BTN_X) != 0;
     bool prevBtnX = (s_prevButtons & RIDDICK_VR_BTN_X) != 0;
     if (btnX && !prevBtnX) {
         SendKeyTap('E');
+        SendKeyTap(VK_RETURN);
         SendKeyTap('C');
         vrState.leftHapticPulse = 0.3f;
     }
@@ -457,11 +451,13 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         vrState.rightHapticPulse = 0.6f;
     }
 
-    // Left Controller Menu Button -> Pause Menu / Skip Cutscene (Escape & Space)
+    // Left Controller Menu Button -> Pause Menu / Dismiss / Skip Cutscene (Escape & Backspace & Tab)
     bool btnMenu = (btns & RIDDICK_VR_BTN_MENU) != 0;
     bool prevBtnMenu = (s_prevButtons & RIDDICK_VR_BTN_MENU) != 0;
     if (btnMenu && !prevBtnMenu) {
         SendKeyTap(VK_ESCAPE);
+        SendKeyTap(VK_BACK);
+        SendKeyTap(VK_TAB);
         SendKeyTap(VK_SPACE);
         vrState.leftHapticPulse = 0.4f;
     }

@@ -81,26 +81,23 @@ static RiddickVRMatrix4x4 CreateViewFromPose(const XrPosef& pose) {
     return result;
 }
 
-static XrQuaternionf RemoveRoll(const XrQuaternionf& q) {
+static XrQuaternionf ExtractRoll(const XrQuaternionf& q) {
     float qx = q.x, qy = q.y, qz = q.z, qw = q.w;
     float norm = sqrtf(qx * qx + qy * qy + qz * qz + qw * qw);
     if (norm > 0.0001f) {
         qx /= norm; qy /= norm; qz /= norm; qw /= norm;
     }
-    float yaw = atan2f(2.0f * (qw * qy + qz * qx), 1.0f - 2.0f * (qx * qx + qy * qy));
-    float sinPitch = 2.0f * (qw * qx - qy * qz);
-    float pitch = (fabsf(sinPitch) >= 1.0f) ? copysignf(1.5707963f, sinPitch) : asinf(sinPitch);
+    // Extract head roll (Z-axis tilt) only; yaw and pitch are driven by in-game camera
+    float sinRoll = 2.0f * (qw * qz + qx * qy);
+    float cosRoll = 1.0f - 2.0f * (qy * qy + qz * qz);
+    float roll = atan2f(sinRoll, cosRoll);
 
-    float cy = cosf(yaw * 0.5f);
-    float sy = sinf(yaw * 0.5f);
-    float cp = cosf(pitch * 0.5f);
-    float sp = sinf(pitch * 0.5f);
-
+    float halfRoll = roll * 0.5f;
     XrQuaternionf result;
-    result.w = cy * cp;
-    result.x = cy * sp;
-    result.y = sy * cp;
-    result.z = -sy * sp;
+    result.x = 0.0f;
+    result.y = 0.0f;
+    result.z = sinf(halfRoll);
+    result.w = cosf(halfRoll);
     return result;
 }
 
@@ -1106,23 +1103,12 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
                 xrReleaseSwapchainImage(m_swapchains[eye].handle, &relInfo);
 
                 projViews[eye].pose.position = m_locatedViews[eye].pose.position;
-                projViews[eye].pose.orientation = RemoveRoll(m_locatedViews[eye].pose.orientation);
-
-                // Map active rendered viewport to headset FOV without letterbox bars
-                constexpr float srcAspect = 16.0f / 9.0f;
-                int32_t dstW = m_swapchains[eye].width;
-                int32_t dstH = static_cast<int32_t>(dstW / srcAspect);
-                if (dstH > static_cast<int32_t>(m_swapchains[eye].height)) {
-                    dstH = m_swapchains[eye].height;
-                    dstW = static_cast<int32_t>(dstH * srcAspect);
-                }
-                int32_t dstX = (m_swapchains[eye].width - dstW) / 2;
-                int32_t dstY = (m_swapchains[eye].height - dstH) / 2;
+                projViews[eye].pose.orientation = ExtractRoll(m_locatedViews[eye].pose.orientation);
 
                 projViews[eye].fov = m_locatedViews[eye].fov;
                 projViews[eye].subImage.swapchain = m_swapchains[eye].handle;
-                projViews[eye].subImage.imageRect.offset = {dstX, dstY};
-                projViews[eye].subImage.imageRect.extent = {dstW, dstH};
+                projViews[eye].subImage.imageRect.offset = {0, 0};
+                projViews[eye].subImage.imageRect.extent = { (int32_t)m_swapchains[eye].width, (int32_t)m_swapchains[eye].height };
             }
 
             static bool s_wasCinemaMode = false;
@@ -1349,17 +1335,34 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
             state.leftController.gripPose.orientation = { 0, 0, 0, 1 };
             state.rightController.gripPose.orientation = { 0, 0, 0, 1 };
 
-            // Automated self-play inputs:
-            // Tap Button A periodically to pass intro/menus
-            if ((totalFrames > 40 && totalFrames < 50) || 
-                (totalFrames > 120 && totalFrames < 130) ||
-                (totalFrames > 200 && totalFrames < 210)) {
+            // Automated self-play simulation:
+            // 1. Natural head orientation oscillation (looking around in VR)
+            float t = totalFrames * 0.05f;
+            float simYaw = sinf(t * 0.8f) * 0.35f;   // +/- 20 degrees yaw
+            float simPitch = cosf(t * 0.5f) * 0.18f; // +/- 10 degrees pitch
+            float cy = cosf(simYaw * 0.5f), sy = sinf(simYaw * 0.5f);
+            float cp = cosf(simPitch * 0.5f), sp = sinf(simPitch * 0.5f);
+            state.hmdPose.orientation.x = cy * sp;
+            state.hmdPose.orientation.y = sy * cp;
+            state.hmdPose.orientation.z = -sy * sp;
+            state.hmdPose.orientation.w = cy * cp;
+
+            // 2. Intermittent button tapping:
+            // Tap Button A (confirm / select / interact / talk)
+            if ((totalFrames % 60) >= 30 && (totalFrames % 60) <= 36) {
                 state.rightController.buttons |= RIDDICK_VR_BTN_A;
             }
+            // Tap Button B (dismiss popup / smokes / back / jump)
+            if ((totalFrames % 100) >= 80 && (totalFrames % 100) <= 86) {
+                state.rightController.buttons |= RIDDICK_VR_BTN_B;
+            }
 
-            // Simulate walking forward
-            if (totalFrames > 250 && totalFrames < 350) {
-                state.leftController.thumbstickY = 0.8f;
+            // 3. Locomotion: Move forward into level and turn
+            if (totalFrames > 60) {
+                state.leftController.thumbstickY = 0.85f; // Walk forward
+            }
+            if (totalFrames > 120 && (totalFrames % 120) > 60) {
+                state.rightController.thumbstickX = 0.4f; // Turn slightly right
             }
 
             ipcHost.WriteState(state);
