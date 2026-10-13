@@ -19,6 +19,7 @@ BOOL WINAPI ConsoleHandlerRoutine(DWORD dwCtrlType) {
 int main(int argc, char* argv[]) {
     bool validateOnly = false;
     bool verbose = false;
+    bool autoExitWithGame = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -26,12 +27,15 @@ int main(int argc, char* argv[]) {
             validateOnly = true;
         } else if (arg == "--verbose") {
             verbose = true;
+        } else if (arg == "--auto-exit-with-game") {
+            autoExitWithGame = true;
         } else if (arg == "--help" || arg == "-h") {
             std::cout << "Usage: riddickvr-host [OPTIONS]\n"
                       << "Options:\n"
-                      << "  --validate-only    Verify OpenXR runtime and exit without running VR loop\n"
-                      << "  --verbose          Enable verbose debug logging\n"
-                      << "  --help, -h         Show this help message\n";
+                      << "  --validate-only         Verify OpenXR runtime and exit without running VR loop\n"
+                      << "  --auto-exit-with-game   Exit automatically when game process disconnects\n"
+                      << "  --verbose               Enable verbose debug logging\n"
+                      << "  --help, -h              Show this help message\n";
             return 0;
         }
     }
@@ -74,7 +78,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Run VR loop
-    xrManager.RunLoop(ipcHost);
+    xrManager.RunLoop(ipcHost, autoExitWithGame);
 
     // Cleanup
     xrManager.Shutdown();

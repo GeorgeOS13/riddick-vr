@@ -80,20 +80,30 @@ if (Test-Path $hookBinary) {
 }
 
 # -----------------------------------------------------------------------------
-# Summary & Quickstart instructions
+# Summary & Deployment
 # -----------------------------------------------------------------------------
 $distReadme = @"
 Riddick VR — Release Artifacts
 =============================
-1. Copy 'opengl32.dll' to your Dark Athena executable directory:
-   e.g. <GameFolder>\System\Win32_x86\opengl32.dll
+1. Copy 'opengl32.dll', 'riddickvr-host.exe', and 'openxr_loader.dll' to your Dark Athena directory:
+   e.g. <GameFolder>\System\Win32_x86\
 
-2. Launch 'riddickvr-host.exe' with your VR headset connected.
-   (Run 'riddickvr-host.exe --validate-only' to check OpenXR runtime setup).
+2. Launch Virtual Desktop with your VR headset connected.
 
-3. Launch Dark Athena! The game will link to the 64-bit host over shared memory.
+3. Launch Dark Athena! The game automatically spawns riddickvr-host.exe and connects to OpenXR.
 "@
 Set-Content -Path (Join-Path $DistDir "README.txt") -Value $distReadme
+
+$gameDir = "F:\The Chronicles of Riddick - Assault on Dark Athena\System\Win32_x86"
+if (Test-Path $gameDir) {
+    Write-Host "`n>>> Auto-deploying binaries to Game Folder: $gameDir" -ForegroundColor Magenta
+    Copy-Item -Force (Join-Path $DistDir "opengl32.dll") $gameDir
+    Copy-Item -Force (Join-Path $DistDir "riddickvr-host.exe") $gameDir
+    if (Test-Path (Join-Path $DistDir "openxr_loader.dll")) {
+        Copy-Item -Force (Join-Path $DistDir "openxr_loader.dll") $gameDir
+    }
+    Write-Host "  -> Deployed opengl32.dll, riddickvr-host.exe, and openxr_loader.dll to game directory!" -ForegroundColor Green
+}
 
 Write-Host "`n========================================================" -ForegroundColor Green
 Write-Host "  BUILD COMPLETE: Artifacts packaged in 'dist/'         " -ForegroundColor Green

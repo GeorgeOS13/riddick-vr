@@ -1,8 +1,102 @@
 #include "stereo_renderer.h"
 #include "camera_hook.h"
 #include "logging.h"
+#include <tlhelp32.h>
+#include <string>
+#include <vector>
 
 namespace RiddickVR {
+
+static bool IsHostRunning() {
+    bool running = false;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot != INVALID_HANDLE_VALUE) {
+        PROCESSENTRY32 pe{};
+        pe.dwSize = sizeof(pe);
+        if (Process32First(snapshot, &pe)) {
+            do {
+                if (_stricmp(pe.szExeFile, "riddickvr-host.exe") == 0) {
+                    running = true;
+                    break;
+                }
+            } while (Process32Next(snapshot, &pe));
+        }
+        CloseHandle(snapshot);
+    }
+    return running;
+}
+
+static bool SpawnHostProcess() {
+    static DWORD s_lastSpawnAttempt = 0;
+    DWORD now = GetTickCount();
+    if (now - s_lastSpawnAttempt < 5000) {
+        return false;
+    }
+    s_lastSpawnAttempt = now;
+
+    if (IsHostRunning()) {
+        VR_LOG_INFO("riddickvr-host.exe is already running in background.");
+        return true;
+    }
+
+    char modulePath[MAX_PATH] = { 0 };
+    GetModuleFileNameA(NULL, modulePath, MAX_PATH);
+    std::string dir = modulePath;
+    size_t lastSlash = dir.find_last_of("\\/");
+    if (lastSlash != std::string::npos) {
+        dir = dir.substr(0, lastSlash);
+    }
+
+    std::string hostCandidate1 = dir + "\\riddickvr-host.exe";
+    std::string hostCandidate2 = "C:\\Users\\GigelCastel\\riddick-vr\\dist\\riddickvr-host.exe";
+
+    std::string chosenHost = "";
+    if (GetFileAttributesA(hostCandidate1.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        chosenHost = hostCandidate1;
+    } else if (GetFileAttributesA(hostCandidate2.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        chosenHost = hostCandidate2;
+    }
+
+    if (chosenHost.empty()) {
+        VR_LOG_WARN("Could not locate riddickvr-host.exe in %s or dist directory.", dir.c_str());
+        return false;
+    }
+
+    VR_LOG_INFO("Auto-launching OpenXR Host Companion: %s", chosenHost.c_str());
+
+    std::string hostWorkingDir = chosenHost.substr(0, chosenHost.find_last_of("\\/"));
+
+    STARTUPINFOA si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+
+    std::string cmdLine = "\"" + chosenHost + "\" --auto-exit-with-game";
+    std::vector<char> cmdLineBuf(cmdLine.begin(), cmdLine.end());
+    cmdLineBuf.push_back('\0');
+
+    BOOL success = CreateProcessA(
+        nullptr,
+        cmdLineBuf.data(),
+        nullptr,
+        nullptr,
+        FALSE,
+        CREATE_NEW_CONSOLE,
+        nullptr,
+        hostWorkingDir.c_str(),
+        &si,
+        &pi
+    );
+
+    if (success) {
+        VR_LOG_INFO("Successfully launched riddickvr-host.exe (PID: %u)", pi.dwProcessId);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+        return true;
+    } else {
+        VR_LOG_WARN("Failed to launch riddickvr-host.exe (Error: %u)", GetLastError());
+        return false;
+    }
+}
 
 StereoRenderer& StereoRenderer::Instance() {
     static StereoRenderer s_instance;
@@ -15,7 +109,19 @@ bool StereoRenderer::Initialize(HDC hdc, HGLRC hglrc) {
     VR_LOG_INFO("Initializing StereoRenderer for OpenGL context %p...", hglrc);
 
     // Attempt connecting to the 64-bit OpenXR Host
-    if (m_ipcClient.Connect(1500)) {
+    if (!m_ipcClient.Connect(100)) {
+        VR_LOG_INFO("RiddickVRHost not detected. Attempting auto-spawn...");
+        if (SpawnHostProcess()) {
+            for (int retry = 0; retry < 25; ++retry) {
+                Sleep(100);
+                if (m_ipcClient.Connect(100)) {
+                    break;
+                }
+            }
+        }
+    }
+
+    if (m_ipcClient.IsConnected()) {
         VR_LOG_INFO("Connected to RiddickVRHost shared memory IPC bridge!");
         m_vrActive = true;
         m_currentPass = StereoPass::LeftEye;
@@ -342,6 +448,8 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
             if (m_ipcClient.Connect(100)) {
                 VR_LOG_INFO("Late connected to RiddickVRHost!");
                 m_vrActive = true;
+            } else {
+                SpawnHostProcess();
             }
         }
     }

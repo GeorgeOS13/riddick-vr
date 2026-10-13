@@ -81,7 +81,12 @@ static RiddickVRMatrix4x4 CreateViewFromPose(const XrPosef& pose) {
     return result;
 }
 
-OpenXRManager::OpenXRManager() = default;
+OpenXRManager::OpenXRManager() {
+    m_locatedViews[0].pose.orientation.w = 1.0f;
+    m_locatedViews[0].fov = { -0.785f, 0.785f, 0.785f, -0.785f };
+    m_locatedViews[1].pose.orientation.w = 1.0f;
+    m_locatedViews[1].fov = { -0.785f, 0.785f, 0.785f, -0.785f };
+}
 
 OpenXRManager::~OpenXRManager() {
     Shutdown();
@@ -188,7 +193,12 @@ bool OpenXRManager::CreateInstance() {
 
     XrResult res = xrCreateInstance(&createInfo, &m_instance);
     if (XR_FAILED(res) || m_instance == XR_NULL_HANDLE) {
-        std::cout << "[Host] Notice: Could not create OpenXR instance (" << GetXrErrorString(res) << "). Active runtime may be unavailable." << std::endl;
+        static DWORD s_lastLogTime = 0;
+        DWORD now = GetTickCount();
+        if (now - s_lastLogTime >= 5000) {
+            std::cout << "[Host] Searching for active OpenXR headset runtime (" << GetXrErrorString(res) << ")... Ensure Virtual Desktop is streaming." << std::endl;
+            s_lastLogTime = now;
+        }
         return false;
     }
 
@@ -270,16 +280,20 @@ bool OpenXRManager::InitializeSession() {
     CreateActions();
     CreateSwapchains();
 
-    // Begin Session
+    // Begin Session (if runtime is already in READY state, or wait for event)
     XrSessionBeginInfo beginInfo{XR_TYPE_SESSION_BEGIN_INFO};
     beginInfo.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
     res = xrBeginSession(m_session, &beginInfo);
     if (XR_SUCCEEDED(res)) {
         m_sessionActive = true;
         std::cout << "[Host] OpenXR Session ACTIVE and running!" << std::endl;
+    } else if (res == XR_ERROR_SESSION_NOT_READY) {
+        std::cout << "[Host] OpenXR Session initialized; awaiting runtime READY state..." << std::endl;
+    } else {
+        std::cout << "[Host] Notice: xrBeginSession returned " << GetXrErrorString(res) << std::endl;
     }
 
-    return m_sessionActive;
+    return (m_session != XR_NULL_HANDLE);
 }
 
 bool OpenXRManager::CreateSpaces() {
@@ -403,12 +417,39 @@ bool OpenXRManager::CreateSwapchains() {
 
     DestroySwapchains();
 
+    int64_t chosenFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+    if (xrEnumerateSwapchainFormats) {
+        uint32_t formatCount = 0;
+        xrEnumerateSwapchainFormats(m_session, 0, &formatCount, nullptr);
+        if (formatCount > 0) {
+            std::vector<int64_t> formats(formatCount);
+            xrEnumerateSwapchainFormats(m_session, formatCount, &formatCount, formats.data());
+
+            bool foundPreferred = false;
+            for (auto f : formats) {
+                if (f == DXGI_FORMAT_R8G8B8A8_UNORM) {
+                    chosenFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+                    foundPreferred = true;
+                    break;
+                }
+            }
+            if (!foundPreferred) {
+                for (auto f : formats) {
+                    if (f == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || f == DXGI_FORMAT_B8G8R8A8_UNORM) {
+                        chosenFormat = f;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     for (int eye = 0; eye < 2; ++eye) {
         XrSwapchainCreateInfo createInfo{XR_TYPE_SWAPCHAIN_CREATE_INFO};
         createInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | 
                                 XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT | 
                                 XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
-        createInfo.format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        createInfo.format = chosenFormat;
         createInfo.sampleCount = 1;
         createInfo.width = m_recommendedWidth;
         createInfo.height = m_recommendedHeight;
@@ -445,6 +486,60 @@ void OpenXRManager::DestroySwapchains() {
     }
 }
 
+bool OpenXRManager::TryConnectOpenXR() {
+    if (m_sessionActive) return true;
+
+    if (!m_openxrAvailable) {
+        if (!LoadLoader()) return false;
+    }
+
+    if (!m_instance) {
+        if (!CreateInstance()) {
+            return false;
+        }
+    }
+
+    if (!m_session) {
+        if (!InitializeSession()) {
+            TeardownSession();
+            return false;
+        }
+    }
+
+    return true;
+}
+
+void OpenXRManager::TeardownSession() {
+    ReleaseSharedTextures();
+    DestroySwapchains();
+
+    if (m_leftGripSpace && xrDestroySpace) { xrDestroySpace(m_leftGripSpace); m_leftGripSpace = XR_NULL_HANDLE; }
+    if (m_rightGripSpace && xrDestroySpace) { xrDestroySpace(m_rightGripSpace); m_rightGripSpace = XR_NULL_HANDLE; }
+    if (m_leftAimSpace && xrDestroySpace) { xrDestroySpace(m_leftAimSpace); m_leftAimSpace = XR_NULL_HANDLE; }
+    if (m_rightAimSpace && xrDestroySpace) { xrDestroySpace(m_rightAimSpace); m_rightAimSpace = XR_NULL_HANDLE; }
+    if (m_appSpace && xrDestroySpace) { xrDestroySpace(m_appSpace); m_appSpace = XR_NULL_HANDLE; }
+    if (m_viewSpace && xrDestroySpace) { xrDestroySpace(m_viewSpace); m_viewSpace = XR_NULL_HANDLE; }
+
+    if (m_actionSet && xrDestroyActionSet) {
+        xrDestroyActionSet(m_actionSet);
+        m_actionSet = XR_NULL_HANDLE;
+    }
+
+    if (m_session && xrDestroySession) {
+        xrDestroySession(m_session);
+        m_session = XR_NULL_HANDLE;
+    }
+
+    if (m_instance && xrDestroyInstance) {
+        xrDestroyInstance(m_instance);
+        m_instance = XR_NULL_HANDLE;
+    }
+
+    m_sessionActive = false;
+    m_sessionState = XR_SESSION_STATE_UNKNOWN;
+    std::cout << "[Host] OpenXR session cleared. Ready for reconnection." << std::endl;
+}
+
 bool OpenXRManager::Initialize() {
     if (m_initialized) return true;
 
@@ -454,9 +549,7 @@ bool OpenXRManager::Initialize() {
 
     if (LoadLoader()) {
         std::cout << "[Host] Successfully linked openxr_loader.dll." << std::endl;
-        if (CreateInstance()) {
-            InitializeSession();
-        }
+        TryConnectOpenXR();
     } else {
         std::cout << "[Host] Notice: openxr_loader.dll not active; running in low-latency IPC standalone bridge mode." << std::endl;
     }
@@ -531,24 +624,8 @@ bool OpenXRManager::Validate(std::string& outReport) {
 }
 
 void OpenXRManager::Shutdown() {
-    ReleaseSharedTextures();
-    DestroySwapchains();
+    TeardownSession();
 
-    if (m_leftGripSpace && xrDestroySpace) xrDestroySpace(m_leftGripSpace);
-    if (m_rightGripSpace && xrDestroySpace) xrDestroySpace(m_rightGripSpace);
-    if (m_leftAimSpace && xrDestroySpace) xrDestroySpace(m_leftAimSpace);
-    if (m_rightAimSpace && xrDestroySpace) xrDestroySpace(m_rightAimSpace);
-    if (m_appSpace && xrDestroySpace) xrDestroySpace(m_appSpace);
-    if (m_viewSpace && xrDestroySpace) xrDestroySpace(m_viewSpace);
-
-    if (m_session && xrDestroySession) {
-        xrDestroySession(m_session);
-        m_session = XR_NULL_HANDLE;
-    }
-    if (m_instance && xrDestroyInstance) {
-        xrDestroyInstance(m_instance);
-        m_instance = XR_NULL_HANDLE;
-    }
     if (m_hLoader) {
         FreeLibrary(m_hLoader);
         m_hLoader = nullptr;
@@ -626,14 +703,23 @@ bool OpenXRManager::PollEvents() {
             if (m_sessionState == XR_SESSION_STATE_READY) {
                 XrSessionBeginInfo beginInfo{XR_TYPE_SESSION_BEGIN_INFO};
                 beginInfo.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
-                xrBeginSession(m_session, &beginInfo);
-                m_sessionActive = true;
+                XrResult res = xrBeginSession(m_session, &beginInfo);
+                if (XR_SUCCEEDED(res)) {
+                    m_sessionActive = true;
+                    std::cout << "[Host] >>> OpenXR Session READY -> Switched to active VR rendering! <<<" << std::endl;
+                } else {
+                    std::cout << "[Host] Notice: xrBeginSession failed (" << GetXrErrorString(res) << ")" << std::endl;
+                }
             } else if (m_sessionState == XR_SESSION_STATE_STOPPING) {
-                xrEndSession(m_session);
+                std::cout << "[Host] OpenXR Session stopping..." << std::endl;
+                if (m_sessionActive && xrEndSession) {
+                    xrEndSession(m_session);
+                }
                 m_sessionActive = false;
             } else if (m_sessionState == XR_SESSION_STATE_EXITING || m_sessionState == XR_SESSION_STATE_LOSS_PENDING) {
-                m_running = false;
-                m_sessionActive = false;
+                std::cout << "[Host] OpenXR Session lost/exiting. Resetting session for reconnection..." << std::endl;
+                TeardownSession();
+                break;
             }
         }
         eventBuffer.type = XR_TYPE_EVENT_DATA_BUFFER;
@@ -814,6 +900,8 @@ void OpenXRManager::UpdateTracking(RiddickVRSharedState& state, XrTime predicted
         XrView views[2] = { {XR_TYPE_VIEW}, {XR_TYPE_VIEW} };
 
         if (XR_SUCCEEDED(xrLocateViews(m_session, &viewLocateInfo, &viewState, 2, &viewCount, views)) && viewCount >= 2) {
+            m_locatedViews[0] = views[0];
+            m_locatedViews[1] = views[1];
             state.leftEyeProjection = CreateProjectionFromFov(views[0].fov);
             state.rightEyeProjection = CreateProjectionFromFov(views[1].fov);
 
@@ -916,11 +1004,8 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
                 XrSwapchainImageReleaseInfo relInfo{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
                 xrReleaseSwapchainImage(m_swapchains[eye].handle, &relInfo);
 
-                projViews[eye].pose.orientation.w = 1.0f;
-                projViews[eye].fov.angleLeft = -0.785f;
-                projViews[eye].fov.angleRight = 0.785f;
-                projViews[eye].fov.angleUp = 0.785f;
-                projViews[eye].fov.angleDown = -0.785f;
+                projViews[eye].pose = m_locatedViews[eye].pose;
+                projViews[eye].fov = m_locatedViews[eye].fov;
                 projViews[eye].subImage.swapchain = m_swapchains[eye].handle;
                 projViews[eye].subImage.imageRect.offset = {0, 0};
                 projViews[eye].subImage.imageRect.extent = { (int32_t)m_swapchains[eye].width, (int32_t)m_swapchains[eye].height };
@@ -945,22 +1030,44 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
     }
 }
 
-void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost) {
+void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
     std::cout << "[Host] Entering VR compositor main loop. Press Ctrl+C in console to terminate." << std::endl;
 
     auto lastReport = std::chrono::steady_clock::now();
+    auto lastRetry = std::chrono::steady_clock::now();
+    auto lastClientSeen = std::chrono::steady_clock::now();
+    bool hadClient = false;
     uint32_t framesCounted = 0;
 
     while (m_running && PollEvents()) {
+        auto now = std::chrono::steady_clock::now();
+
+        if (ipcHost.IsClientConnected()) {
+            hadClient = true;
+            lastClientSeen = now;
+        } else if (autoExitWithGame && hadClient) {
+            if (std::chrono::duration_cast<std::chrono::seconds>(now - lastClientSeen).count() >= 4) {
+                std::cout << "[Host] Game process disconnected. Auto-exiting host companion..." << std::endl;
+                break;
+            }
+        }
+
+        // Retry connecting to OpenXR runtime periodically if not yet active
+        if (!m_sessionActive || m_session == XR_NULL_HANDLE) {
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastRetry).count() >= 1500) {
+                lastRetry = now;
+                TryConnectOpenXR();
+            }
+        }
+
         RenderFrame(ipcHost);
         framesCounted++;
 
-        auto now = std::chrono::steady_clock::now();
         if (std::chrono::duration_cast<std::chrono::seconds>(now - lastReport).count() >= 5) {
             float fps = framesCounted / 5.0f;
             std::cout << "[Host] Heartbeat: " << std::fixed << std::setprecision(1) << fps << " FPS | Connected: " 
                       << (ipcHost.IsClientConnected() ? "YES" : "WAITING FOR GAME")
-                      << " | OpenXR Session: " << (m_sessionActive ? "RUNNING" : "STANDBY") << std::endl;
+                      << " | OpenXR Session: " << (m_sessionActive ? "RUNNING (IMMERSIVE VR)" : "SEARCHING FOR HEADSET...") << std::endl;
             framesCounted = 0;
             lastReport = now;
         }

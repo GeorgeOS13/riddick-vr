@@ -31,11 +31,14 @@ public:
     bool Validate(std::string& outReport);
     void Shutdown();
 
-    void RunLoop(IpcBridgeHost& ipcHost);
+    void RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame = false);
     void RequestExit() { m_running = false; }
 
     bool IsSessionActive() const { return m_sessionActive; }
     bool IsOpenXRLoaded() const { return m_openxrAvailable; }
+
+    bool TryConnectOpenXR();
+    void TeardownSession();
 
 private:
     bool LoadLoader();
@@ -107,6 +110,7 @@ private:
     // Headset display configuration
     uint32_t m_recommendedWidth = 2048;
     uint32_t m_recommendedHeight = 2048;
+    XrView m_locatedViews[2] = { {XR_TYPE_VIEW}, {XR_TYPE_VIEW} };
 
     bool m_initialized = false;
     bool m_running = false;
