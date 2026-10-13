@@ -570,6 +570,13 @@ bool OpenXRManager::Initialize() {
 
     InitializeD3D11Device();
 
+    if (m_mockMode) {
+        std::cout << "[Host] Mock Mode active: Headless simulated VR runtime engaged." << std::endl;
+        m_initialized = true;
+        m_running = true;
+        return true;
+    }
+
     if (LoadLoader()) {
         std::cout << "[Host] Successfully linked openxr_loader.dll." << std::endl;
         TryConnectOpenXR();
@@ -1119,8 +1126,20 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
                 quadLayer.space = m_appSpace ? m_appSpace : (m_viewSpace ? m_viewSpace : XR_NULL_HANDLE);
                 quadLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
                 quadLayer.subImage.swapchain = m_swapchains[0].handle;
-                quadLayer.subImage.imageRect.offset = {0, 0};
-                quadLayer.subImage.imageRect.extent = { (int32_t)m_swapchains[0].width, (int32_t)m_swapchains[0].height };
+
+                // Crop to the exact 16:9 active region (matching stereo_renderer.cpp blit)
+                constexpr float srcAspect = 16.0f / 9.0f;
+                int32_t dstW = m_swapchains[0].width;
+                int32_t dstH = static_cast<int32_t>(dstW / srcAspect);
+                if (dstH > static_cast<int32_t>(m_swapchains[0].height)) {
+                    dstH = m_swapchains[0].height;
+                    dstW = static_cast<int32_t>(dstH * srcAspect);
+                }
+                int32_t dstX = (m_swapchains[0].width - dstW) / 2;
+                int32_t dstY = (m_swapchains[0].height - dstH) / 2;
+
+                quadLayer.subImage.imageRect.offset = {dstX, dstY};
+                quadLayer.subImage.imageRect.extent = {dstW, dstH};
                 quadLayer.pose = s_cinemaQuadPose;
                 quadLayer.size.width = 2.0f;
                 quadLayer.size.height = 1.125f; // 16:9 aspect ratio
@@ -1150,7 +1169,217 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
     }
 }
 
+bool OpenXRManager::SaveTextureToBMP(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11Texture2D* texture, const std::string& filename) {
+    if (!device || !context || !texture) return false;
+
+    D3D11_TEXTURE2D_DESC desc{};
+    texture->GetDesc(&desc);
+
+    D3D11_TEXTURE2D_DESC stagingDesc = desc;
+    stagingDesc.Usage = D3D11_USAGE_STAGING;
+    stagingDesc.BindFlags = 0;
+    stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    stagingDesc.MiscFlags = 0;
+
+    ID3D11Texture2D* stagingTex = nullptr;
+    HRESULT hr = device->CreateTexture2D(&stagingDesc, nullptr, &stagingTex);
+    if (FAILED(hr) || !stagingTex) return false;
+
+    context->CopyResource(stagingTex, texture);
+
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    hr = context->Map(stagingTex, 0, D3D11_MAP_READ, 0, &mapped);
+    if (FAILED(hr)) {
+        stagingTex->Release();
+        return false;
+    }
+
+    FILE* fp = nullptr;
+    fopen_s(&fp, filename.c_str(), "wb");
+    if (fp) {
+        #pragma pack(push, 1)
+        struct BMPFileHeader {
+            uint16_t bfType = 0x4D42;
+            uint32_t bfSize = 0;
+            uint16_t bfReserved1 = 0;
+            uint16_t bfReserved2 = 0;
+            uint32_t bfOffBits = 54;
+            uint32_t biSize = 40;
+            int32_t  biWidth = 0;
+            int32_t  biHeight = 0;
+            uint16_t biPlanes = 1;
+            uint16_t biBitCount = 32;
+            uint32_t biCompression = 0;
+            uint32_t biSizeImage = 0;
+            int32_t  biXPelsPerMeter = 2835;
+            int32_t  biYPelsPerMeter = 2835;
+            uint32_t biClrUsed = 0;
+            uint32_t biClrImportant = 0;
+        } header;
+        #pragma pack(pop)
+
+        header.biWidth = static_cast<int32_t>(desc.Width);
+        header.biHeight = -static_cast<int32_t>(desc.Height); // Top-down
+        header.biSizeImage = desc.Width * desc.Height * 4;
+        header.bfSize = sizeof(header) + header.biSizeImage;
+
+        fwrite(&header, sizeof(header), 1, fp);
+
+        const uint8_t* pSrc = static_cast<const uint8_t*>(mapped.pData);
+        std::vector<uint8_t> row(desc.Width * 4);
+
+        for (uint32_t y = 0; y < desc.Height; ++y) {
+            const uint8_t* rowSrc = pSrc + y * mapped.RowPitch;
+            for (uint32_t x = 0; x < desc.Width; ++x) {
+                // RGBA to BGRA
+                row[x * 4 + 0] = rowSrc[x * 4 + 2];
+                row[x * 4 + 1] = rowSrc[x * 4 + 1];
+                row[x * 4 + 2] = rowSrc[x * 4 + 0];
+                row[x * 4 + 3] = rowSrc[x * 4 + 3];
+            }
+            fwrite(row.data(), 1, desc.Width * 4, fp);
+        }
+
+        fclose(fp);
+    }
+
+    context->Unmap(stagingTex, 0);
+    stagingTex->Release();
+    return (fp != nullptr);
+}
+
 void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
+    if (m_mockMode) {
+        std::cout << "[Host] ========================================================\n";
+        std::cout << "[Host] RUNNING IN HEADLESS MOCK / SELF-PLAY TEST MODE\n";
+        std::cout << "[Host] Simulating Meta Quest 2 VR Headset (2496x2688 @ 90FPS)\n";
+        if (!m_dumpDir.empty()) {
+            std::cout << "[Host] Artifact frame dump directory: " << m_dumpDir << " (Interval: " << m_dumpInterval << ")\n";
+            CreateDirectoryA(m_dumpDir.c_str(), NULL);
+        }
+        std::cout << "[Host] ========================================================" << std::endl;
+
+        m_recommendedWidth = 2496;
+        m_recommendedHeight = 2688;
+
+        auto lastReport = std::chrono::steady_clock::now();
+        uint32_t framesCounted = 0;
+        uint32_t totalFrames = 0;
+        bool hadClient = false;
+        auto lastClientSeen = std::chrono::steady_clock::now();
+
+        while (m_running) {
+            auto now = std::chrono::steady_clock::now();
+            bool clientConnected = ipcHost.IsClientConnected();
+            if (clientConnected) {
+                hadClient = true;
+                lastClientSeen = now;
+            } else if (autoExitWithGame && hadClient) {
+                if (std::chrono::duration_cast<std::chrono::seconds>(now - lastClientSeen).count() >= 3) {
+                    std::cout << "[Host] Game process disconnected. Exiting mock host..." << std::endl;
+                    break;
+                }
+            }
+
+            RiddickVRSharedState state{};
+            state.protocolVersion = RIDDICK_VR_PROTOCOL_VERSION;
+            state.vrActive = true;
+            state.clientConnected = clientConnected;
+            state.renderWidth = m_recommendedWidth;
+            state.renderHeight = m_recommendedHeight;
+            state.heartbeatTimestamp = GetTickCount();
+            state.frameIndex = ++m_frameIndex;
+
+            state.hmdPose.isValid = true;
+            state.hmdPose.position = { 0.0f, 1.70f, 0.0f };
+            state.hmdPose.orientation = { 0.0f, 0.0f, 0.0f, 1.0f };
+
+            constexpr float HALF_IPD = 0.032f;
+            for (int i = 0; i < 16; ++i) {
+                state.leftEyeView.m[i] = (i % 5 == 0) ? 1.0f : 0.0f;
+                state.rightEyeView.m[i] = (i % 5 == 0) ? 1.0f : 0.0f;
+            }
+            state.leftEyeView.m[12] = -HALF_IPD;
+            state.rightEyeView.m[12] = +HALF_IPD;
+
+            constexpr float fovTan = 1.0f;
+            for (int i = 0; i < 16; ++i) {
+                state.leftEyeProjection.m[i] = 0.0f;
+                state.rightEyeProjection.m[i] = 0.0f;
+            }
+            state.leftEyeProjection.m[0] = 1.0f / fovTan;
+            state.leftEyeProjection.m[5] = 1.0f / fovTan;
+            state.leftEyeProjection.m[10] = -1.0001f;
+            state.leftEyeProjection.m[11] = -1.0f;
+            state.leftEyeProjection.m[14] = -0.1000f;
+            state.rightEyeProjection = state.leftEyeProjection;
+
+            state.leftController.isConnected = true;
+            state.rightController.isConnected = true;
+            state.leftController.gripPose.position = { -0.2f, 1.2f, -0.3f };
+            state.rightController.gripPose.position = { 0.2f, 1.2f, -0.3f };
+            state.leftController.gripPose.orientation = { 0, 0, 0, 1 };
+            state.rightController.gripPose.orientation = { 0, 0, 0, 1 };
+
+            // Automated self-play inputs:
+            // Tap Button A periodically to pass intro/menus
+            if ((totalFrames > 40 && totalFrames < 50) || 
+                (totalFrames > 120 && totalFrames < 130) ||
+                (totalFrames > 200 && totalFrames < 210)) {
+                state.rightController.buttons |= RIDDICK_VR_BTN_A;
+            }
+
+            // Simulate walking forward
+            if (totalFrames > 250 && totalFrames < 350) {
+                state.leftController.thumbstickY = 0.8f;
+            }
+
+            ipcHost.WriteState(state);
+
+            bool frameReady = ipcHost.WaitForFrameReady(20);
+            if (frameReady) {
+                RiddickVRSharedState clientState{};
+                if (ipcHost.ReadState(clientState)) {
+                    if (clientState.leftEyeSharedHandle && clientState.rightEyeSharedHandle) {
+                        EnsureSharedTextures(clientState.leftEyeSharedHandle, clientState.rightEyeSharedHandle);
+                    }
+                }
+
+                totalFrames++;
+                framesCounted++;
+
+                // Capture and dump frame BMP if scheduled
+                if (!m_dumpDir.empty() && m_sharedLeftTex && 
+                    (totalFrames == 1 || totalFrames % m_dumpInterval == 0)) {
+                    char outPath[MAX_PATH];
+                    sprintf_s(outPath, "%s\\test_frame_%04u.bmp", m_dumpDir.c_str(), totalFrames);
+                    if (SaveTextureToBMP(m_d3d11Device, m_d3d11Context, m_sharedLeftTex, outPath)) {
+                        std::cout << "[Mock Host] Captured test frame " << totalFrames << " -> " << outPath << std::endl;
+                    }
+                }
+
+                ipcHost.SignalFrameConsumed();
+
+                if (m_maxFrames > 0 && totalFrames >= m_maxFrames) {
+                    std::cout << "[Mock Host] Completed requested " << m_maxFrames << " test frames. Exiting successfully." << std::endl;
+                    break;
+                }
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+
+            if (std::chrono::duration_cast<std::chrono::seconds>(now - lastReport).count() >= 3) {
+                float fps = framesCounted / 3.0f;
+                std::cout << "[Mock Host] Test Heartbeat: " << std::fixed << std::setprecision(1) << fps 
+                          << " FPS | Total Frames: " << totalFrames << " | Game Connected: " 
+                          << (clientConnected ? "YES" : "WAITING") << std::endl;
+                lastReport = now;
+                framesCounted = 0;
+            }
+        }
+        return;
+    }
+
     std::cout << "[Host] Entering VR compositor main loop. Press Ctrl+C in console to terminate." << std::endl;
 
     auto lastReport = std::chrono::steady_clock::now();

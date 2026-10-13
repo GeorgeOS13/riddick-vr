@@ -387,16 +387,15 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
     // 9. Face Buttons Mapping
 
-    // BUTTON A -> PRIMARY INTERACT / USE / TALK / OPEN / CLIMB ('E' + Enter/Click in menus)
+    // BUTTON A -> PRIMARY INTERACT / USE / TALK / OPEN / CLIMB / MENU CONFIRM / INTRO SKIP
     bool btnA = (btns & RIDDICK_VR_BTN_A) != 0;
     bool prevBtnA = (s_prevButtons & RIDDICK_VR_BTN_A) != 0;
     if (btnA != prevBtnA) {
         SendKey('E', btnA);
-        if (cursorShowing || vrState.cinemaMode) {
-            SendKey(VK_RETURN, btnA);
-            if (btnA) mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-            else mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-        }
+        SendKey(VK_RETURN, btnA);
+        SendKey(VK_SPACE, btnA);
+        if (btnA) mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+        else mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
         if (btnA) vrState.rightHapticPulse = 0.4f;
     }
 

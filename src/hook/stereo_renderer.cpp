@@ -492,10 +492,30 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
             GLint srcW = (m_windowWidth > 0) ? m_windowWidth : 1920;
             GLint srcH = (m_windowHeight > 0) ? m_windowHeight : 1080;
 
+            // Preserve true 16:9 aspect ratio and center HUD within the visible VR lens sweet spot
+            float srcAspect = (srcH > 0) ? (static_cast<float>(srcW) / static_cast<float>(srcH)) : (16.0f / 9.0f);
+            GLint dstW = m_eyeWidth;
+            GLint dstH = static_cast<GLint>(dstW / srcAspect);
+            if (dstH > static_cast<GLint>(m_eyeHeight)) {
+                dstH = m_eyeHeight;
+                dstW = static_cast<GLint>(dstH * srcAspect);
+            }
+            GLint dstX = (m_eyeWidth - dstW) / 2;
+            GLint dstY = (m_eyeHeight - dstH) / 2;
+
             // Read from default backbuffer 0
             OpenGLProxy::real_glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */, 0);
             if (OpenGLProxy::glReadBuffer) {
                 OpenGLProxy::glReadBuffer(0x0405 /* GL_BACK */);
+            }
+
+            // Clear destination eye framebuffers to solid opaque black before blit
+            if (OpenGLProxy::glClearColor && OpenGLProxy::real_glClearFunc) {
+                OpenGLProxy::glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+                OpenGLProxy::real_glBindFramebuffer(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, m_leftFbo);
+                OpenGLProxy::real_glClearFunc(GL_COLOR_BUFFER_BIT);
+                OpenGLProxy::real_glBindFramebuffer(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, m_rightFbo);
+                OpenGLProxy::real_glClearFunc(GL_COLOR_BUFFER_BIT);
             }
 
             // Blit into Left Eye FBO (vertically flipped: srcY goes from srcH down to 0)
@@ -503,7 +523,7 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
             OpenGLProxy::real_glBindFramebuffer(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, m_leftFbo);
             OpenGLProxy::glBlitFramebuffer(
                 0, srcH, srcW, 0,
-                0, 0, m_eyeWidth, m_eyeHeight,
+                dstX, dstY, dstX + dstW, dstY + dstH,
                 GL_COLOR_BUFFER_BIT, GL_LINEAR
             );
 
@@ -511,7 +531,7 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
             OpenGLProxy::real_glBindFramebuffer(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, m_rightFbo);
             OpenGLProxy::glBlitFramebuffer(
                 0, srcH, srcW, 0,
-                0, 0, m_eyeWidth, m_eyeHeight,
+                dstX, dstY, dstX + dstW, dstY + dstH,
                 GL_COLOR_BUFFER_BIT, GL_LINEAR
             );
 

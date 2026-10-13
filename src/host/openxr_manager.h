@@ -40,6 +40,15 @@ public:
     bool TryConnectOpenXR();
     void TeardownSession();
 
+    void SetMockMode(bool enable, const std::string& dumpDir = "", uint32_t maxFrames = 0, uint32_t dumpInterval = 10) {
+        m_mockMode = enable;
+        m_dumpDir = dumpDir;
+        m_maxFrames = maxFrames;
+        m_dumpInterval = dumpInterval;
+    }
+    bool IsMockMode() const { return m_mockMode; }
+    static bool SaveTextureToBMP(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11Texture2D* texture, const std::string& filename);
+
 private:
     bool LoadLoader();
     bool CreateInstance();
@@ -116,6 +125,11 @@ private:
     bool m_running = false;
     bool m_sessionActive = false;
     uint32_t m_frameIndex = 0;
+
+    bool m_mockMode = false;
+    std::string m_dumpDir;
+    uint32_t m_maxFrames = 0;
+    uint32_t m_dumpInterval = 10;
 
     // Function pointers loaded dynamically from openxr_loader.dll
     PFN_xrGetInstanceProcAddr xrGetInstanceProcAddr = nullptr;
