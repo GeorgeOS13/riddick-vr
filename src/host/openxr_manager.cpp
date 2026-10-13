@@ -187,7 +187,7 @@ bool OpenXRManager::CreateInstance() {
     createInfo.applicationInfo.applicationVersion = 1;
     strcpy_s(createInfo.applicationInfo.engineName, "Starbreeze Engine");
     createInfo.applicationInfo.engineVersion = 1;
-    createInfo.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
+    createInfo.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0);
     createInfo.enabledExtensionCount = 1;
     createInfo.enabledExtensionNames = enabledExtensions;
 
