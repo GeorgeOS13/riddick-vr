@@ -41,6 +41,8 @@ PFN_glGenTextures OpenGLProxy::glGenTextures = nullptr;
 PFN_glDeleteTextures OpenGLProxy::glDeleteTextures = nullptr;
 PFN_glTexImage2D OpenGLProxy::glTexImage2D = nullptr;
 PFN_glTexParameteri OpenGLProxy::glTexParameteri = nullptr;
+OpenGLProxy::PFN_glReadBuffer OpenGLProxy::glReadBuffer = nullptr;
+PFNGLBINDFRAMEBUFFERPROC OpenGLProxy::real_glBindFramebuffer = nullptr;
 
 // Real WGL & GL Typedefs
 typedef HGLRC (WINAPI *PFN_wglCreateContext)(HDC);
@@ -68,7 +70,6 @@ static PFN_glLoadMatrixf    real_glLoadMatrixf = nullptr;
 static PFN_glFrustum        real_glFrustum = nullptr;
 static PFN_glOrtho          real_glOrtho = nullptr;
 static PFN_glClear          real_glClear = nullptr;
-static PFNGLBINDFRAMEBUFFERPROC real_glBindFramebuffer = nullptr;
 
 static GLenum s_currentMatrixMode = 0x1700; // GL_MODELVIEW
 static float s_lastProjection[16] = {0};
@@ -128,6 +129,7 @@ bool OpenGLProxy::Initialize() {
     glDeleteTextures      = (PFN_glDeleteTextures)GetProcAddress(s_hRealOpenGL, "glDeleteTextures");
     glTexImage2D          = (PFN_glTexImage2D)GetProcAddress(s_hRealOpenGL, "glTexImage2D");
     glTexParameteri       = (PFN_glTexParameteri)GetProcAddress(s_hRealOpenGL, "glTexParameteri");
+    glReadBuffer          = (PFN_glReadBuffer)GetProcAddress(s_hRealOpenGL, "glReadBuffer");
 
     InitializeForwarders(s_hRealOpenGL);
 
@@ -385,15 +387,6 @@ void WINAPI OpenGLProxy::Hook_glClear(GLbitfield mask) {
 }
 
 void WINAPI OpenGLProxy::Hook_glBindFramebuffer(GLenum target, GLuint framebuffer) {
-    if (StereoRenderer::Instance().IsVREnabled()) {
-        if (framebuffer == 0) {
-            GLuint eyeFbo = StereoRenderer::Instance().GetActiveEyeFbo();
-            if (eyeFbo && real_glBindFramebuffer) {
-                real_glBindFramebuffer(target, eyeFbo);
-                return;
-            }
-        }
-    }
     if (real_glBindFramebuffer) {
         real_glBindFramebuffer(target, framebuffer);
     }

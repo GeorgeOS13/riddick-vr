@@ -440,6 +440,18 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
         s_fpsFrameCount = 0;
     }
 
+    // Determine current window size from HDC if not already set or resized
+    HWND hwnd = WindowFromDC(hdc);
+    if (hwnd) {
+        RECT rc;
+        if (GetClientRect(hwnd, &rc)) {
+            if (rc.right > rc.left && rc.bottom > rc.top) {
+                m_windowWidth = rc.right - rc.left;
+                m_windowHeight = rc.bottom - rc.top;
+            }
+        }
+    }
+
     // Retry connecting to host if not yet connected
     if (!m_ipcClient.IsConnected()) {
         static DWORD s_lastRetry = 0;
@@ -455,14 +467,56 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
     }
 
     if (m_ipcClient.IsConnected()) {
-        // Unlock GPU interop textures before notifying host OpenXR compositor
-        UnlockSharedTextures();
-
-        // Read updated tracking state for next frame
+        // Read updated tracking state from host
         if (m_ipcClient.ReadState(m_sharedState)) {
             m_vrActive = m_sharedState.vrActive;
             CameraHook::Instance().Update(m_sharedState);
+
+            // Dynamically resize eye framebuffers if OpenXR headset requested specific dimensions
+            if (m_sharedState.renderWidth > 0 && m_sharedState.renderHeight > 0 &&
+                (m_sharedState.renderWidth != m_eyeWidth || m_sharedState.renderHeight != m_eyeHeight)) {
+                VR_LOG_INFO("Resizing Stereo Eye Framebuffers to match OpenXR headset (%ux%u -> %ux%u)",
+                    m_eyeWidth, m_eyeHeight, m_sharedState.renderWidth, m_sharedState.renderHeight);
+                CreateEyeBuffers(m_sharedState.renderWidth, m_sharedState.renderHeight);
+            }
         }
+
+        // 1. Lock textures for OpenGL drawing
+        LockSharedTextures();
+
+        // 2. Capture the game's rendered backbuffer and blit into Left & Right eye FBOs
+        if (OpenGLProxy::real_glBindFramebuffer && OpenGLProxy::glBlitFramebuffer) {
+            GLint srcW = (m_windowWidth > 0) ? m_windowWidth : 1920;
+            GLint srcH = (m_windowHeight > 0) ? m_windowHeight : 1080;
+
+            // Read from default backbuffer 0
+            OpenGLProxy::real_glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */, 0);
+            if (OpenGLProxy::glReadBuffer) {
+                OpenGLProxy::glReadBuffer(0x0405 /* GL_BACK */);
+            }
+
+            // Blit into Left Eye FBO
+            OpenGLProxy::real_glBindFramebuffer(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, m_leftFbo);
+            OpenGLProxy::glBlitFramebuffer(
+                0, 0, srcW, srcH,
+                0, 0, m_eyeWidth, m_eyeHeight,
+                GL_COLOR_BUFFER_BIT, GL_LINEAR
+            );
+
+            // Blit into Right Eye FBO
+            OpenGLProxy::real_glBindFramebuffer(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, m_rightFbo);
+            OpenGLProxy::glBlitFramebuffer(
+                0, 0, srcW, srcH,
+                0, 0, m_eyeWidth, m_eyeHeight,
+                GL_COLOR_BUFFER_BIT, GL_LINEAR
+            );
+
+            // Restore default framebuffer 0 for the game and spectator display
+            OpenGLProxy::real_glBindFramebuffer(0x8D40 /* GL_FRAMEBUFFER */, 0);
+        }
+
+        // 3. Unlock textures so D3D11 / OpenXR host can read them
+        UnlockSharedTextures();
 
         // Re-assign persistent GPU shared texture handles
         if (m_dxInteropActive) {
@@ -473,18 +527,6 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
         // Write client frame count and state
         m_ipcClient.WriteState(m_sharedState);
 
-        // If buffers exist and blit is available, mirror left eye to default desktop backbuffer
-        if (m_leftFbo && OpenGLProxy::glBlitFramebuffer) {
-            OpenGLProxy::glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */, m_leftFbo);
-            OpenGLProxy::glBindFramebuffer(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, 0);
-            OpenGLProxy::glBlitFramebuffer(
-                0, 0, m_eyeWidth, m_eyeHeight,
-                0, 0, m_windowWidth, m_windowHeight,
-                GL_COLOR_BUFFER_BIT, GL_LINEAR
-            );
-            OpenGLProxy::glBindFramebuffer(0x8D40, 0);
-        }
-
         // Signal host that frame is ready
         m_ipcClient.SignalFrameReady();
 
@@ -494,9 +536,6 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
         } else {
             m_currentPass = StereoPass::LeftEye;
         }
-
-        // Re-lock shared textures for the upcoming frame
-        LockSharedTextures();
     }
 }
 

@@ -79,9 +79,15 @@ public:
     static PFN_glDeleteTextures glDeleteTextures;
     static PFN_glTexImage2D glTexImage2D;
     static PFN_glTexParameteri glTexParameteri;
+    typedef void (WINAPI *PFN_glReadBuffer)(GLenum mode);
+    static PFN_glReadBuffer glReadBuffer;
 
     // Extension pointers retrieved via wglGetProcAddress
     static PFNGLBINDFRAMEBUFFERPROC glBindFramebuffer;
+    static PFNGLBINDFRAMEBUFFERPROC real_glBindFramebuffer;
+    static void BindRealFramebuffer(GLenum target, GLuint fbo) {
+        if (real_glBindFramebuffer) real_glBindFramebuffer(target, fbo);
+    }
     static PFNGLGENFRAMEBUFFERSPROC glGenFramebuffers;
     static PFNGLDELETEFRAMEBUFFERSPROC glDeleteFramebuffers;
     static PFNGLFRAMEBUFFERTEXTURE2DPROC glFramebufferTexture2D;

@@ -672,8 +672,14 @@ bool OpenXRManager::EnsureSharedTextures(uint64_t leftHandle, uint64_t rightHand
     if (SUCCEEDED(hrLeft) && SUCCEEDED(hrRight) && m_sharedLeftTex && m_sharedRightTex) {
         m_currentLeftHandle = leftHandle;
         m_currentRightHandle = rightHandle;
+
+        D3D11_TEXTURE2D_DESC desc{};
+        m_sharedLeftTex->GetDesc(&desc);
+        std::cout << "[Host] Bound GPU eye textures from game: " << desc.Width << "x" << desc.Height 
+                  << " (Swapchain: " << m_swapchains[0].width << "x" << m_swapchains[0].height << ")" << std::endl;
         return true;
     } else {
+        std::cerr << "[Host] ERROR: OpenSharedResource failed! hrLeft=0x" << std::hex << hrLeft << ", hrRight=0x" << hrRight << std::dec << std::endl;
         ReleaseSharedTextures();
         return false;
     }
@@ -998,7 +1004,23 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
                 // Copy shared D3D11 texture into swapchain image if available
                 ID3D11Texture2D* srcTex = (eye == 0) ? m_sharedLeftTex : m_sharedRightTex;
                 if (srcTex && m_d3d11Context && imageIndex < m_swapchains[eye].images.size()) {
-                    m_d3d11Context->CopyResource(m_swapchains[eye].images[imageIndex].texture, srcTex);
+                    D3D11_TEXTURE2D_DESC srcDesc{};
+                    srcTex->GetDesc(&srcDesc);
+                    if (srcDesc.Width == m_swapchains[eye].width && srcDesc.Height == m_swapchains[eye].height) {
+                        m_d3d11Context->CopyResource(m_swapchains[eye].images[imageIndex].texture, srcTex);
+                    } else {
+                        D3D11_BOX box{};
+                        box.left = 0;
+                        box.top = 0;
+                        box.front = 0;
+                        box.right = (std::min)(srcDesc.Width, m_swapchains[eye].width);
+                        box.bottom = (std::min)(srcDesc.Height, m_swapchains[eye].height);
+                        box.back = 1;
+                        m_d3d11Context->CopySubresourceRegion(
+                            m_swapchains[eye].images[imageIndex].texture, 0, 0, 0, 0,
+                            srcTex, 0, &box
+                        );
+                    }
                 }
 
                 XrSwapchainImageReleaseInfo relInfo{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
