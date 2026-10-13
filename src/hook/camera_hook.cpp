@@ -92,6 +92,81 @@ void CameraHook::StabilizeViewMatrix(float* outView, const float* inView, const 
 void CameraHook::Update(const RiddickVRSharedState& vrState) {
     if (!m_initialized || !vrState.vrActive) return;
 
+    // 0. Head Tracking Look Input (HMD Orientation -> In-Game View Yaw & Pitch)
+    static bool s_hasPrevHmdOrientation = false;
+    static float s_prevHmdYaw = 0.0f;
+    static float s_prevHmdPitch = 0.0f;
+    static float s_accumulatedLookX = 0.0f;
+    static float s_accumulatedLookY = 0.0f;
+
+    if (vrState.hmdPose.isValid) {
+        float qx = vrState.hmdPose.orientation.x;
+        float qy = vrState.hmdPose.orientation.y;
+        float qz = vrState.hmdPose.orientation.z;
+        float qw = vrState.hmdPose.orientation.w;
+
+        float norm = sqrtf(qx * qx + qy * qy + qz * qz + qw * qw);
+        if (norm > 0.0001f) {
+            qx /= norm;
+            qy /= norm;
+            qz /= norm;
+            qw /= norm;
+
+            // Yaw (rotation around Y axis: left/right)
+            float currentYaw = atan2f(2.0f * (qw * qy + qz * qx), 1.0f - 2.0f * (qx * qx + qy * qy));
+
+            // Pitch (rotation around X axis: up/down)
+            float sinPitch = 2.0f * (qw * qx - qy * qz);
+            float currentPitch = 0.0f;
+            if (fabsf(sinPitch) >= 1.0f) {
+                currentPitch = copysignf(1.5707963f, sinPitch);
+            } else {
+                currentPitch = asinf(sinPitch);
+            }
+
+            if (!s_hasPrevHmdOrientation || vrState.shouldRecenter) {
+                s_prevHmdYaw = currentYaw;
+                s_prevHmdPitch = currentPitch;
+                s_accumulatedLookX = 0.0f;
+                s_accumulatedLookY = 0.0f;
+                s_hasPrevHmdOrientation = true;
+            } else {
+                float deltaYaw = currentYaw - s_prevHmdYaw;
+                // Handle wrap-around across -pi / +pi boundary
+                while (deltaYaw > 3.14159265f) deltaYaw -= 6.2831853f;
+                while (deltaYaw < -3.14159265f) deltaYaw += 6.2831853f;
+
+                float deltaPitch = currentPitch - s_prevHmdPitch;
+
+                s_prevHmdYaw = currentYaw;
+                s_prevHmdPitch = currentPitch;
+
+                // Sensitivity scaling:
+                // Riddick default sensitivity uses ~350 mouse counts per 45 degrees (~445.6 counts/radian).
+                constexpr float SENSITIVITY_YAW = 445.6f;
+                constexpr float SENSITIVITY_PITCH = 445.6f;
+
+                // In OpenXR:
+                // Head turning right -> deltaYaw < 0. In Windows, mouse dx > 0 turns right.
+                // Head looking up   -> deltaPitch > 0. In Windows, mouse dy < 0 looks up.
+                float mouseDeltaX = -deltaYaw * SENSITIVITY_YAW;
+                float mouseDeltaY = -deltaPitch * SENSITIVITY_PITCH;
+
+                s_accumulatedLookX += mouseDeltaX;
+                s_accumulatedLookY += mouseDeltaY;
+
+                int moveX = static_cast<int>(s_accumulatedLookX);
+                int moveY = static_cast<int>(s_accumulatedLookY);
+
+                if (moveX != 0 || moveY != 0) {
+                    s_accumulatedLookX -= moveX;
+                    s_accumulatedLookY -= moveY;
+                    mouse_event(MOUSEEVENTF_MOVE, moveX, moveY, 0, 0);
+                }
+            }
+        }
+    }
+
     // 1. Physical Crouch Detection
     static bool s_isPhysicallyCrouched = false;
     constexpr float CROUCH_THRESHOLD = -0.35f; // 35 cm duck below standing baseline

@@ -81,6 +81,29 @@ static RiddickVRMatrix4x4 CreateViewFromPose(const XrPosef& pose) {
     return result;
 }
 
+static XrQuaternionf RemoveRoll(const XrQuaternionf& q) {
+    float qx = q.x, qy = q.y, qz = q.z, qw = q.w;
+    float norm = sqrtf(qx * qx + qy * qy + qz * qz + qw * qw);
+    if (norm > 0.0001f) {
+        qx /= norm; qy /= norm; qz /= norm; qw /= norm;
+    }
+    float yaw = atan2f(2.0f * (qw * qy + qz * qx), 1.0f - 2.0f * (qx * qx + qy * qy));
+    float sinPitch = 2.0f * (qw * qx - qy * qz);
+    float pitch = (fabsf(sinPitch) >= 1.0f) ? copysignf(1.5707963f, sinPitch) : asinf(sinPitch);
+
+    float cy = cosf(yaw * 0.5f);
+    float sy = sinf(yaw * 0.5f);
+    float cp = cosf(pitch * 0.5f);
+    float sp = sinf(pitch * 0.5f);
+
+    XrQuaternionf result;
+    result.w = cy * cp;
+    result.x = cy * sp;
+    result.y = sy * cp;
+    result.z = -sy * sp;
+    return result;
+}
+
 OpenXRManager::OpenXRManager() {
     m_locatedViews[0].pose.orientation.w = 1.0f;
     m_locatedViews[0].fov = { -0.785f, 0.785f, 0.785f, -0.785f };
@@ -1021,18 +1044,23 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
                             srcTex, 0, &box
                         );
                     }
+                    if (m_d3d11Context) {
+                        m_d3d11Context->Flush();
+                    }
                 }
 
                 XrSwapchainImageReleaseInfo relInfo{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
                 xrReleaseSwapchainImage(m_swapchains[eye].handle, &relInfo);
 
-                projViews[eye].pose = m_locatedViews[eye].pose;
+                projViews[eye].pose.position = m_locatedViews[eye].pose.position;
+                projViews[eye].pose.orientation = RemoveRoll(m_locatedViews[eye].pose.orientation);
                 projViews[eye].fov = m_locatedViews[eye].fov;
                 projViews[eye].subImage.swapchain = m_swapchains[eye].handle;
                 projViews[eye].subImage.imageRect.offset = {0, 0};
                 projViews[eye].subImage.imageRect.extent = { (int32_t)m_swapchains[eye].width, (int32_t)m_swapchains[eye].height };
             }
 
+            layer.layerFlags = 0;
             layer.space = m_appSpace;
             layer.viewCount = 2;
             layer.views = projViews;

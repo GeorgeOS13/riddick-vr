@@ -495,28 +495,55 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
                 OpenGLProxy::glReadBuffer(0x0405 /* GL_BACK */);
             }
 
-            // Blit into Left Eye FBO
+            // Blit into Left Eye FBO (vertically flipped: srcY goes from srcH down to 0)
+            // Fixes: OpenGL bottom-left origin to Direct3D 11 / OpenXR top-left origin!
             OpenGLProxy::real_glBindFramebuffer(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, m_leftFbo);
             OpenGLProxy::glBlitFramebuffer(
-                0, 0, srcW, srcH,
+                0, srcH, srcW, 0,
                 0, 0, m_eyeWidth, m_eyeHeight,
                 GL_COLOR_BUFFER_BIT, GL_LINEAR
             );
 
-            // Blit into Right Eye FBO
+            // Blit into Right Eye FBO (vertically flipped: srcY goes from srcH down to 0)
             OpenGLProxy::real_glBindFramebuffer(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, m_rightFbo);
             OpenGLProxy::glBlitFramebuffer(
-                0, 0, srcW, srcH,
+                0, srcH, srcW, 0,
                 0, 0, m_eyeWidth, m_eyeHeight,
                 GL_COLOR_BUFFER_BIT, GL_LINEAR
             );
+
+            // Force alpha channel to fully opaque 1.0f on both eye buffers to eliminate
+            // Virtual Desktop / VDXR green screen chroma keying and transparency flashes
+            if (OpenGLProxy::glColorMask && OpenGLProxy::glClearColor && OpenGLProxy::real_glClearFunc) {
+                OpenGLProxy::glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_TRUE);
+                OpenGLProxy::glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+
+                OpenGLProxy::real_glBindFramebuffer(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, m_leftFbo);
+                OpenGLProxy::real_glClearFunc(GL_COLOR_BUFFER_BIT);
+
+                OpenGLProxy::real_glBindFramebuffer(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, m_rightFbo);
+                OpenGLProxy::real_glClearFunc(GL_COLOR_BUFFER_BIT);
+
+                OpenGLProxy::glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+            }
 
             // Restore default framebuffer 0 for the game and spectator display
             OpenGLProxy::real_glBindFramebuffer(0x8D40 /* GL_FRAMEBUFFER */, 0);
         }
 
+        // Flush OpenGL command queue so GPU work is committed before unlocking
+        if (OpenGLProxy::glFlush) {
+            OpenGLProxy::glFlush();
+        }
+
         // 3. Unlock textures so D3D11 / OpenXR host can read them
         UnlockSharedTextures();
+
+        // Flush D3D11 device context so GPU commands on the shared resource are committed
+        // before the separate OpenXR host process accesses it
+        if (m_d3d11Context) {
+            m_d3d11Context->Flush();
+        }
 
         // Re-assign persistent GPU shared texture handles
         if (m_dxInteropActive) {

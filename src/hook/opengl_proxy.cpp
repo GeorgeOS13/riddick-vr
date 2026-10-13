@@ -42,6 +42,11 @@ PFN_glDeleteTextures OpenGLProxy::glDeleteTextures = nullptr;
 PFN_glTexImage2D OpenGLProxy::glTexImage2D = nullptr;
 PFN_glTexParameteri OpenGLProxy::glTexParameteri = nullptr;
 OpenGLProxy::PFN_glReadBuffer OpenGLProxy::glReadBuffer = nullptr;
+OpenGLProxy::PFN_glColorMask OpenGLProxy::glColorMask = nullptr;
+OpenGLProxy::PFN_glClearColor OpenGLProxy::glClearColor = nullptr;
+OpenGLProxy::PFN_glFlush OpenGLProxy::glFlush = nullptr;
+OpenGLProxy::PFN_glFinish OpenGLProxy::glFinish = nullptr;
+OpenGLProxy::PFN_real_glClear OpenGLProxy::real_glClearFunc = nullptr;
 PFNGLBINDFRAMEBUFFERPROC OpenGLProxy::real_glBindFramebuffer = nullptr;
 
 // Real WGL & GL Typedefs
@@ -130,6 +135,11 @@ bool OpenGLProxy::Initialize() {
     glTexImage2D          = (PFN_glTexImage2D)GetProcAddress(s_hRealOpenGL, "glTexImage2D");
     glTexParameteri       = (PFN_glTexParameteri)GetProcAddress(s_hRealOpenGL, "glTexParameteri");
     glReadBuffer          = (PFN_glReadBuffer)GetProcAddress(s_hRealOpenGL, "glReadBuffer");
+    glColorMask           = (PFN_glColorMask)GetProcAddress(s_hRealOpenGL, "glColorMask");
+    glClearColor          = (PFN_glClearColor)GetProcAddress(s_hRealOpenGL, "glClearColor");
+    glFlush               = (PFN_glFlush)GetProcAddress(s_hRealOpenGL, "glFlush");
+    glFinish              = (PFN_glFinish)GetProcAddress(s_hRealOpenGL, "glFinish");
+    real_glClearFunc      = (PFN_real_glClear)GetProcAddress(s_hRealOpenGL, "glClear");
 
     InitializeForwarders(s_hRealOpenGL);
 
@@ -278,28 +288,9 @@ void WINAPI OpenGLProxy::Hook_glLoadMatrixf(const GLfloat *m) {
                 s_projMatrixCount, m[0], m[5], m[10], m[14], m[1], m[2], m[3], m[15]);
         }
 
-        // 3D Perspective Projection Interception (m[15] == 0.0f)
-        if (StereoRenderer::Instance().IsVREnabled() && fabsf(m[15]) < 0.01f) {
-            const auto& vrState = StereoRenderer::Instance().GetLatestState();
-            const auto pass = StereoRenderer::Instance().GetCurrentPass();
-
-            GLfloat vrProj[16];
-            const float* srcProj = (pass == StereoPass::RightEye) 
-                ? vrState.rightEyeProjection.m 
-                : vrState.leftEyeProjection.m;
-            memcpy(vrProj, srcProj, sizeof(vrProj));
-
-            // Preserve near/far planes from original game projection if valid
-            if (m[10] != 0.0f && m[14] != 0.0f) {
-                vrProj[10] = m[10];
-                vrProj[14] = m[14];
-            }
-
-            if (real_glLoadMatrixf) {
-                real_glLoadMatrixf(vrProj);
-                return;
-            }
-        }
+        // Preserve 3D Perspective Projection intact for Starbreeze Engine
+        // Note: Starbreeze uses custom projection depth conventions (m[5] < 0, m[10] > 0)
+        // Overwriting them corrupts depth and shadow passes.
         // 2D Orthographic HUD / UI Projection Interception (fabsf(m[15] - 1.0f) < 0.01f)
         else if (StereoRenderer::Instance().IsVREnabled() && fabsf(m[15] - 1.0f) < 0.01f) {
             const auto pass = StereoRenderer::Instance().GetCurrentPass();

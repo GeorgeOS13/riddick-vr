@@ -81,6 +81,16 @@ public:
     static PFN_glTexParameteri glTexParameteri;
     typedef void (WINAPI *PFN_glReadBuffer)(GLenum mode);
     static PFN_glReadBuffer glReadBuffer;
+    typedef void (WINAPI *PFN_glColorMask)(GLboolean red, GLboolean green, GLboolean blue, GLboolean alpha);
+    static PFN_glColorMask glColorMask;
+    typedef void (WINAPI *PFN_glClearColor)(GLclampf red, GLclampf green, GLclampf blue, GLclampf alpha);
+    static PFN_glClearColor glClearColor;
+    typedef void (WINAPI *PFN_glFlush)(void);
+    static PFN_glFlush glFlush;
+    typedef void (WINAPI *PFN_glFinish)(void);
+    static PFN_glFinish glFinish;
+    typedef void (WINAPI *PFN_real_glClear)(GLbitfield mask);
+    static PFN_real_glClear real_glClearFunc;
 
     // Extension pointers retrieved via wglGetProcAddress
     static PFNGLBINDFRAMEBUFFERPROC glBindFramebuffer;
