@@ -79,6 +79,7 @@ struct RiddickVRSharedState {
     bool vrActive;
     bool shouldRecenter;
     bool clientConnected;
+    bool cinemaMode;         // Cinema screen mode for menus & cutscenes
     uint32_t clientFrameCount;
     uint32_t heartbeatTimestamp;
 };

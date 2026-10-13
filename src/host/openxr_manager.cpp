@@ -995,12 +995,34 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
     ipcHost.WriteState(state);
 
     // Wait for the game hook to finish rendering the frame (up to 16ms)
+    RiddickVRSharedState clientState{};
     bool frameReady = ipcHost.WaitForFrameReady(16);
     if (frameReady) {
-        RiddickVRSharedState clientState{};
         if (ipcHost.ReadState(clientState)) {
             if (clientState.leftEyeSharedHandle && clientState.rightEyeSharedHandle) {
                 EnsureSharedTextures(clientState.leftEyeSharedHandle, clientState.rightEyeSharedHandle);
+            }
+
+            // Apply haptics requested by game hook (melee punches, gun recoil, reload, eyeshine)
+            if (clientState.leftHapticPulse > 0.05f && xrApplyHapticFeedback) {
+                XrHapticVibration vib{XR_TYPE_HAPTIC_VIBRATION};
+                vib.amplitude = (std::min)(clientState.leftHapticPulse, 1.0f);
+                vib.duration = XR_MIN_HAPTIC_DURATION * 4;
+                vib.frequency = XR_FREQUENCY_UNSPECIFIED;
+                XrHapticActionInfo hapticInfo{XR_TYPE_HAPTIC_ACTION_INFO};
+                hapticInfo.action = m_hapticAction;
+                hapticInfo.subactionPath = m_leftHandPath;
+                xrApplyHapticFeedback(m_session, &hapticInfo, (XrHapticBaseHeader*)&vib);
+            }
+            if (clientState.rightHapticPulse > 0.05f && xrApplyHapticFeedback) {
+                XrHapticVibration vib{XR_TYPE_HAPTIC_VIBRATION};
+                vib.amplitude = (std::min)(clientState.rightHapticPulse, 1.0f);
+                vib.duration = XR_MIN_HAPTIC_DURATION * 4;
+                vib.frequency = XR_FREQUENCY_UNSPECIFIED;
+                XrHapticActionInfo hapticInfo{XR_TYPE_HAPTIC_ACTION_INFO};
+                hapticInfo.action = m_hapticAction;
+                hapticInfo.subactionPath = m_rightHandPath;
+                xrApplyHapticFeedback(m_session, &hapticInfo, (XrHapticBaseHeader*)&vib);
             }
         }
     }
@@ -1009,6 +1031,7 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
     if (m_sessionActive && m_session && xrEndFrame) {
         std::vector<XrCompositionLayerBaseHeader*> layers;
         XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+        XrCompositionLayerQuad quadLayer{XR_TYPE_COMPOSITION_LAYER_QUAD};
         XrCompositionLayerProjectionView projViews[2] = {
             {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},
             {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}
@@ -1054,17 +1077,64 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
 
                 projViews[eye].pose.position = m_locatedViews[eye].pose.position;
                 projViews[eye].pose.orientation = RemoveRoll(m_locatedViews[eye].pose.orientation);
-                projViews[eye].fov = m_locatedViews[eye].fov;
+
+                // Un-zoom in-game action FOV to match natural 1:1 real-world human scale
+                constexpr float FOV_UNZOOM_SCALE = 1.25f;
+                projViews[eye].fov.angleLeft = m_locatedViews[eye].fov.angleLeft * FOV_UNZOOM_SCALE;
+                projViews[eye].fov.angleRight = m_locatedViews[eye].fov.angleRight * FOV_UNZOOM_SCALE;
+                projViews[eye].fov.angleUp = m_locatedViews[eye].fov.angleUp * FOV_UNZOOM_SCALE;
+                projViews[eye].fov.angleDown = m_locatedViews[eye].fov.angleDown * FOV_UNZOOM_SCALE;
+
                 projViews[eye].subImage.swapchain = m_swapchains[eye].handle;
                 projViews[eye].subImage.imageRect.offset = {0, 0};
                 projViews[eye].subImage.imageRect.extent = { (int32_t)m_swapchains[eye].width, (int32_t)m_swapchains[eye].height };
             }
 
-            layer.layerFlags = 0;
-            layer.space = m_appSpace;
-            layer.viewCount = 2;
-            layer.views = projViews;
-            layers.push_back((XrCompositionLayerBaseHeader*)&layer);
+            static bool s_wasCinemaMode = false;
+            static XrPosef s_cinemaQuadPose = { {0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, -1.8f} };
+            static bool s_hasCinemaPose = false;
+
+            if (clientState.cinemaMode) {
+                // Floating Virtual Cinema Screen for Menus and Cutscenes
+                if (!s_wasCinemaMode || !s_hasCinemaPose || clientState.shouldRecenter) {
+                    float qx = m_locatedViews[0].pose.orientation.x;
+                    float qy = m_locatedViews[0].pose.orientation.y;
+                    float qz = m_locatedViews[0].pose.orientation.z;
+                    float qw = m_locatedViews[0].pose.orientation.w;
+                    float yaw = atan2f(2.0f * (qw * qy + qz * qx), 1.0f - 2.0f * (qx * qx + qy * qy));
+                    float sinHalf = sinf(yaw * 0.5f);
+                    float cosHalf = cosf(yaw * 0.5f);
+                    s_cinemaQuadPose.orientation = {0.0f, sinHalf, 0.0f, cosHalf};
+
+                    float fwdX = -sinf(yaw);
+                    float fwdZ = -cosf(yaw);
+                    s_cinemaQuadPose.position.x = m_locatedViews[0].pose.position.x + fwdX * 1.8f;
+                    s_cinemaQuadPose.position.y = m_locatedViews[0].pose.position.y;
+                    s_cinemaQuadPose.position.z = m_locatedViews[0].pose.position.z + fwdZ * 1.8f;
+                    s_hasCinemaPose = true;
+                }
+                s_wasCinemaMode = true;
+
+                quadLayer.layerFlags = 0;
+                quadLayer.space = m_appSpace ? m_appSpace : (m_viewSpace ? m_viewSpace : XR_NULL_HANDLE);
+                quadLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                quadLayer.subImage.swapchain = m_swapchains[0].handle;
+                quadLayer.subImage.imageRect.offset = {0, 0};
+                quadLayer.subImage.imageRect.extent = { (int32_t)m_swapchains[0].width, (int32_t)m_swapchains[0].height };
+                quadLayer.pose = s_cinemaQuadPose;
+                quadLayer.size.width = 2.0f;
+                quadLayer.size.height = 1.125f; // 16:9 aspect ratio
+
+                layers.push_back((XrCompositionLayerBaseHeader*)&quadLayer);
+            } else {
+                s_wasCinemaMode = false;
+                // IMMERSIVE 3D ACTION MODE:
+                layer.layerFlags = 0;
+                layer.space = m_appSpace;
+                layer.viewCount = 2;
+                layer.views = projViews;
+                layers.push_back((XrCompositionLayerBaseHeader*)&layer);
+            }
         }
 
         XrFrameEndInfo endInfo{XR_TYPE_FRAME_END_INFO};

@@ -10,7 +10,7 @@ public:
     static CameraHook& Instance();
 
     bool Initialize();
-    void Update(const RiddickVRSharedState& vrState);
+    void Update(RiddickVRSharedState& vrState);
 
     // Matrix injection and horizon stabilization
     void StabilizeViewMatrix(float* outView, const float* inView, const RiddickVRSharedState& vrState, int eyePass);

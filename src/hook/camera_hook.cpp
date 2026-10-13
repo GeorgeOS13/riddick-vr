@@ -29,6 +29,35 @@ bool CameraHook::ScanForCameraSignature() {
     return false; // Dynamic matrix intercept active
 }
 
+static void SendKey(WORD vk, bool isDown) {
+    UINT scan = MapVirtualKeyA(vk, MAPVK_VK_TO_VSC);
+
+    // 1. DirectInput 8 Scan Code hardware event
+    INPUT inScancode = {};
+    inScancode.type = INPUT_KEYBOARD;
+    inScancode.ki.wVk = 0;
+    inScancode.ki.wScan = static_cast<WORD>(scan);
+    inScancode.ki.dwFlags = KEYEVENTF_SCANCODE | (isDown ? 0 : KEYEVENTF_KEYUP);
+    SendInput(1, &inScancode, sizeof(INPUT));
+
+    // 2. Standard Virtual Key event
+    INPUT inVk = {};
+    inVk.type = INPUT_KEYBOARD;
+    inVk.ki.wVk = vk;
+    inVk.ki.wScan = static_cast<WORD>(scan);
+    inVk.ki.dwFlags = isDown ? 0 : KEYEVENTF_KEYUP;
+    SendInput(1, &inVk, sizeof(INPUT));
+
+    // 3. Win32 legacy keybd_event fallback
+    keybd_event(static_cast<BYTE>(vk), static_cast<BYTE>(scan), isDown ? 0 : KEYEVENTF_KEYUP, 0);
+}
+
+static void SendKeyTap(WORD vk) {
+    SendKey(vk, true);
+    Sleep(15);
+    SendKey(vk, false);
+}
+
 void CameraHook::StabilizeViewMatrix(float* outView, const float* inView, const RiddickVRSharedState& vrState, int eyePass) {
     if (!inView || !outView) return;
 
@@ -89,17 +118,36 @@ void CameraHook::StabilizeViewMatrix(float* outView, const float* inView, const 
     }
 }
 
-void CameraHook::Update(const RiddickVRSharedState& vrState) {
+void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (!m_initialized || !vrState.vrActive) return;
 
+    // Detect if Windows mouse cursor is visible (Menus, Loading, Dialogue UI)
+    CURSORINFO ci{ sizeof(CURSORINFO) };
+    bool cursorShowing = false;
+    if (GetCursorInfo(&ci)) {
+        cursorShowing = (ci.flags & CURSOR_SHOWING) != 0;
+    }
+
+    uint32_t btns = vrState.rightController.buttons | vrState.leftController.buttons;
+    static uint32_t s_prevButtons = 0;
+    static bool s_manualCinemaToggle = false;
+
+    // Toggle Cinema Screen Mode on Button Y (or auto-engage in menus when cursor is showing)
+    if ((btns & RIDDICK_VR_BTN_Y) && !(s_prevButtons & RIDDICK_VR_BTN_Y)) {
+        s_manualCinemaToggle = !s_manualCinemaToggle;
+        VR_LOG_INFO("Cinema Screen Mode toggled: %s", s_manualCinemaToggle ? "ON (Virtual Screen)" : "OFF (Immersive 3D)");
+    }
+    vrState.cinemaMode = cursorShowing || s_manualCinemaToggle;
+
     // 0. Head Tracking Look Input (HMD Orientation -> In-Game View Yaw & Pitch)
+    // Only apply in-game look when not in cinema menu mode
     static bool s_hasPrevHmdOrientation = false;
     static float s_prevHmdYaw = 0.0f;
     static float s_prevHmdPitch = 0.0f;
     static float s_accumulatedLookX = 0.0f;
     static float s_accumulatedLookY = 0.0f;
 
-    if (vrState.hmdPose.isValid) {
+    if (vrState.hmdPose.isValid && !vrState.cinemaMode) {
         float qx = vrState.hmdPose.orientation.x;
         float qy = vrState.hmdPose.orientation.y;
         float qz = vrState.hmdPose.orientation.z;
@@ -141,14 +189,9 @@ void CameraHook::Update(const RiddickVRSharedState& vrState) {
                 s_prevHmdYaw = currentYaw;
                 s_prevHmdPitch = currentPitch;
 
-                // Sensitivity scaling:
-                // Riddick default sensitivity uses ~350 mouse counts per 45 degrees (~445.6 counts/radian).
                 constexpr float SENSITIVITY_YAW = 445.6f;
                 constexpr float SENSITIVITY_PITCH = 445.6f;
 
-                // In OpenXR:
-                // Head turning right -> deltaYaw < 0. In Windows, mouse dx > 0 turns right.
-                // Head looking up   -> deltaPitch > 0. In Windows, mouse dy < 0 looks up.
                 float mouseDeltaX = -deltaYaw * SENSITIVITY_YAW;
                 float mouseDeltaY = -deltaPitch * SENSITIVITY_PITCH;
 
@@ -165,23 +208,25 @@ void CameraHook::Update(const RiddickVRSharedState& vrState) {
                 }
             }
         }
+    } else {
+        s_hasPrevHmdOrientation = false;
     }
 
     // 1. Physical Crouch Detection
     static bool s_isPhysicallyCrouched = false;
-    constexpr float CROUCH_THRESHOLD = -0.35f; // 35 cm duck below standing baseline
+    constexpr float CROUCH_THRESHOLD = -0.35f;
 
     if (vrState.hmdPose.position.y < CROUCH_THRESHOLD) {
         if (!s_isPhysicallyCrouched) {
             s_isPhysicallyCrouched = true;
             VR_LOG_INFO("Physical crouch engaged (Y: %.2fm)", vrState.hmdPose.position.y);
-            keybd_event('C', 0x2E, 0, 0);
+            SendKey('C', true);
         }
     } else {
         if (s_isPhysicallyCrouched) {
             s_isPhysicallyCrouched = false;
             VR_LOG_INFO("Physical crouch disengaged");
-            keybd_event('C', 0x2E, KEYEVENTF_KEYUP, 0);
+            SendKey('C', false);
         }
     }
 
@@ -194,22 +239,10 @@ void CameraHook::Update(const RiddickVRSharedState& vrState) {
     bool wantD = vrState.leftController.thumbstickX > DEADZONE;
     bool wantA = vrState.leftController.thumbstickX < -DEADZONE;
 
-    if (wantW != s_wPressed) {
-        keybd_event('W', 0x11, wantW ? 0 : KEYEVENTF_KEYUP, 0);
-        s_wPressed = wantW;
-    }
-    if (wantS != s_sPressed) {
-        keybd_event('S', 0x1F, wantS ? 0 : KEYEVENTF_KEYUP, 0);
-        s_sPressed = wantS;
-    }
-    if (wantA != s_aPressed) {
-        keybd_event('A', 0x1E, wantA ? 0 : KEYEVENTF_KEYUP, 0);
-        s_aPressed = wantA;
-    }
-    if (wantD != s_dPressed) {
-        keybd_event('D', 0x20, wantD ? 0 : KEYEVENTF_KEYUP, 0);
-        s_dPressed = wantD;
-    }
+    if (wantW != s_wPressed) { SendKey('W', wantW); s_wPressed = wantW; }
+    if (wantS != s_sPressed) { SendKey('S', wantS); s_sPressed = wantS; }
+    if (wantA != s_aPressed) { SendKey('A', wantA); s_aPressed = wantA; }
+    if (wantD != s_dPressed) { SendKey('D', wantD); s_dPressed = wantD; }
 
     // 3. Smooth & Snap Turning (Right Thumbstick X)
     static bool s_snapTurnArmed = true;
@@ -218,19 +251,17 @@ void CameraHook::Update(const RiddickVRSharedState& vrState) {
     if (fabsf(stickX) > 0.75f) {
         if (s_snapTurnArmed) {
             s_snapTurnArmed = false;
-            // Snap turn 45 degrees
             int snapDelta = (stickX > 0.0f) ? 350 : -350;
             mouse_event(MOUSEEVENTF_MOVE, snapDelta, 0, 0, 0);
         }
     } else if (fabsf(stickX) > DEADZONE) {
-        // Smooth turn rate
         int deltaX = static_cast<int>(stickX * 16.0f);
         mouse_event(MOUSEEVENTF_MOVE, deltaX, 0, 0, 0);
     } else {
         s_snapTurnArmed = true;
     }
 
-    // 4. Physical Melee Punching Gestures (Tier 2 ADR-0005)
+    // 4. Physical Melee Combat Gestures (Jabs, Hooks, Uppercuts)
     static DWORD s_lastPunchTime = 0;
     DWORD now = GetTickCount();
 
@@ -239,65 +270,96 @@ void CameraHook::Update(const RiddickVRSharedState& vrState) {
     float rSpeed = sqrtf(rVel.x * rVel.x + rVel.y * rVel.y + rVel.z * rVel.z);
     float lSpeed = sqrtf(lVel.x * lVel.x + lVel.y * lVel.y + lVel.z * lVel.z);
 
-    if (now - s_lastPunchTime > 350) { // Cooldown between physical punches
+    if (now - s_lastPunchTime > 350) {
         if (rSpeed > 1.8f || lSpeed > 1.8f) {
             const auto& activeVel = (rSpeed > lSpeed) ? rVel : lVel;
             s_lastPunchTime = now;
 
             if (activeVel.y > 1.2f) {
-                // Uppercut gesture (upward thrust) -> 'S' + Attack
-                VR_LOG_INFO("Physical Gesture: UPPERCUT detected (speed: %.2f m/s)", (rSpeed > lSpeed) ? rSpeed : lSpeed);
-                keybd_event('S', 0x1F, 0, 0);
+                VR_LOG_INFO("Physical Gesture: UPPERCUT detected");
+                SendKey('S', true);
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                keybd_event('S', 0x1F, KEYEVENTF_KEYUP, 0);
+                SendKey('S', false);
             } else if (activeVel.x > 1.2f) {
-                // Right hook -> 'D' + Attack
                 VR_LOG_INFO("Physical Gesture: RIGHT HOOK detected");
-                keybd_event('D', 0x20, 0, 0);
+                SendKey('D', true);
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                keybd_event('D', 0x20, KEYEVENTF_KEYUP, 0);
+                SendKey('D', false);
             } else if (activeVel.x < -1.2f) {
-                // Left hook -> 'A' + Attack
                 VR_LOG_INFO("Physical Gesture: LEFT HOOK detected");
-                keybd_event('A', 0x1E, 0, 0);
+                SendKey('A', true);
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                keybd_event('A', 0x1E, KEYEVENTF_KEYUP, 0);
+                SendKey('A', false);
             } else {
-                // Straight Jab / Cross -> 'W' + Attack
                 VR_LOG_INFO("Physical Gesture: STRAIGHT PUNCH detected");
-                keybd_event('W', 0x11, 0, 0);
+                SendKey('W', true);
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                keybd_event('W', 0x11, KEYEVENTF_KEYUP, 0);
+                SendKey('W', false);
             }
+
+            if (rSpeed > lSpeed) vrState.rightHapticPulse = 0.9f;
+            else vrState.leftHapticPulse = 0.9f;
         }
     }
 
-    // 5. Guard / Block Pose Detection
-    // Both hands raised near chin (y > -0.20m relative to neck) and close together (< 0.28m apart)
-    static bool s_guardActive = false;
-    float handDist = sqrtf(
+    // 5. Tactical Weapon Reload Gesture (F.E.A.R. VR Style)
+    // Bringing left hand to right weapon (< 18cm) or reaching down to hip pouch triggers Reload ('R')
+    static DWORD s_lastReloadGestureTime = 0;
+    float reloadHandDist = sqrtf(
         powf(vrState.leftController.gripPose.position.x - vrState.rightController.gripPose.position.x, 2) +
         powf(vrState.leftController.gripPose.position.y - vrState.rightController.gripPose.position.y, 2) +
         powf(vrState.leftController.gripPose.position.z - vrState.rightController.gripPose.position.z, 2)
     );
 
-    bool wantGuard = (handDist < 0.28f) && 
+    if (now - s_lastReloadGestureTime > 1200) {
+        if ((reloadHandDist < 0.18f && vrState.leftController.grip > 0.3f) || 
+            (vrState.leftController.gripPose.position.y < -0.38f && vrState.leftController.grip > 0.4f)) {
+            s_lastReloadGestureTime = now;
+            VR_LOG_INFO("Tactical Gesture: MANUAL WEAPON RELOAD triggered");
+            SendKeyTap('R');
+            vrState.leftHapticPulse = 0.5f;
+            vrState.rightHapticPulse = 0.7f;
+        }
+    }
+
+    // 6. Eyeshine / Night Vision Temple Gesture (tapping side of head)
+    static DWORD s_lastEyeshineGestureTime = 0;
+    bool handNearHead = (vrState.rightController.gripPose.position.y > 0.08f && fabsf(vrState.rightController.gripPose.position.x) > 0.12f && vrState.rightController.grip > 0.5f) ||
+                        (vrState.leftController.gripPose.position.y > 0.08f && fabsf(vrState.leftController.gripPose.position.x) > 0.12f && vrState.leftController.grip > 0.5f);
+    if (handNearHead && now - s_lastEyeshineGestureTime > 1500) {
+        s_lastEyeshineGestureTime = now;
+        VR_LOG_INFO("Tactical Gesture: EYESHINE toggled");
+        SendKeyTap('Q'); // Native Riddick Eyeshine key
+        SendKeyTap('F'); // Flashlight fallback
+        vrState.rightHapticPulse = 0.8f;
+        vrState.leftHapticPulse = 0.8f;
+    }
+
+    // 7. Guard / Block Pose Detection (both hands raised in front of chin)
+    float guardHandDist = sqrtf(
+        powf(vrState.leftController.gripPose.position.x - vrState.rightController.gripPose.position.x, 2) +
+        powf(vrState.leftController.gripPose.position.y - vrState.rightController.gripPose.position.y, 2) +
+        powf(vrState.leftController.gripPose.position.z - vrState.rightController.gripPose.position.z, 2)
+    );
+
+    bool wantGuard = (guardHandDist < 0.28f) && 
                      (vrState.leftController.gripPose.position.y > -0.20f) && 
                      (vrState.rightController.gripPose.position.y > -0.20f);
 
-    // 6. Combat Triggers & Grips
+    // 8. Triggers & Grips
     static bool s_leftTriggerDown = false, s_rightTriggerDown = false;
     static bool s_leftGripDown = false, s_rightGripDown = false;
 
-    // Right Trigger -> Fire / Primary Attack
+    // Right Trigger -> Fire / Primary Attack / UI Select Click
     bool wantRightTrigger = vrState.rightController.trigger > 0.5f;
     if (wantRightTrigger != s_rightTriggerDown) {
         mouse_event(wantRightTrigger ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
         s_rightTriggerDown = wantRightTrigger;
+        if (wantRightTrigger) vrState.rightHapticPulse = 0.4f;
     }
 
     // Left Trigger OR Guard Pose -> Aim / Block (Right Click)
@@ -307,47 +369,67 @@ void CameraHook::Update(const RiddickVRSharedState& vrState) {
         s_leftTriggerDown = wantBlock;
     }
 
-    // Left Grip -> Interact ('E')
+    // Left Grip -> Grab / Secondary Interact ('E')
     bool wantLeftGrip = vrState.leftController.grip > 0.5f;
     if (wantLeftGrip != s_leftGripDown) {
-        keybd_event('E', 0x12, wantLeftGrip ? 0 : KEYEVENTF_KEYUP, 0);
+        SendKey('E', wantLeftGrip);
         s_leftGripDown = wantLeftGrip;
+        if (wantLeftGrip) vrState.leftHapticPulse = 0.3f;
     }
 
-    // Right Grip -> Reload ('R')
+    // Right Grip -> Weapon Reload ('R')
     bool wantRightGrip = vrState.rightController.grip > 0.5f;
     if (wantRightGrip != s_rightGripDown) {
-        keybd_event('R', 0x13, wantRightGrip ? 0 : KEYEVENTF_KEYUP, 0);
+        SendKey('R', wantRightGrip);
         s_rightGripDown = wantRightGrip;
+        if (wantRightGrip) vrState.rightHapticPulse = 0.5f;
     }
 
-    // 7. Face Buttons Mapping
-    static uint32_t s_prevButtons = 0;
-    uint32_t btns = vrState.rightController.buttons | vrState.leftController.buttons;
+    // 9. Face Buttons Mapping
 
-    // Button A -> Jump (Space)
-    if ((btns & RIDDICK_VR_BTN_A) && !(s_prevButtons & RIDDICK_VR_BTN_A)) {
-        keybd_event(VK_SPACE, 0x39, 0, 0);
-    } else if (!(btns & RIDDICK_VR_BTN_A) && (s_prevButtons & RIDDICK_VR_BTN_A)) {
-        keybd_event(VK_SPACE, 0x39, KEYEVENTF_KEYUP, 0);
+    // BUTTON A -> PRIMARY INTERACT / USE / TALK / OPEN / CLIMB ('E' + Enter/Click in menus)
+    bool btnA = (btns & RIDDICK_VR_BTN_A) != 0;
+    bool prevBtnA = (s_prevButtons & RIDDICK_VR_BTN_A) != 0;
+    if (btnA != prevBtnA) {
+        SendKey('E', btnA);
+        if (cursorShowing || vrState.cinemaMode) {
+            SendKey(VK_RETURN, btnA);
+            if (btnA) mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+            else mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+        }
+        if (btnA) vrState.rightHapticPulse = 0.4f;
     }
 
-    // Button B -> Flashlight / Eyeshine ('F')
-    if ((btns & RIDDICK_VR_BTN_B) && !(s_prevButtons & RIDDICK_VR_BTN_B)) {
-        keybd_event('F', 0x21, 0, 0);
-        keybd_event('F', 0x21, KEYEVENTF_KEYUP, 0);
+    // BUTTON B -> JUMP (Space)
+    bool btnB = (btns & RIDDICK_VR_BTN_B) != 0;
+    bool prevBtnB = (s_prevButtons & RIDDICK_VR_BTN_B) != 0;
+    if (btnB != prevBtnB) {
+        SendKey(VK_SPACE, btnB);
     }
 
-    // Button X -> Crouch toggle ('C')
-    if ((btns & RIDDICK_VR_BTN_X) && !(s_prevButtons & RIDDICK_VR_BTN_X)) {
-        keybd_event('C', 0x2E, 0, 0);
-        keybd_event('C', 0x2E, KEYEVENTF_KEYUP, 0);
+    // BUTTON X -> OFF-HAND INTERACT ('E') & CROUCH TOGGLE ('C')
+    bool btnX = (btns & RIDDICK_VR_BTN_X) != 0;
+    bool prevBtnX = (s_prevButtons & RIDDICK_VR_BTN_X) != 0;
+    if (btnX && !prevBtnX) {
+        SendKeyTap('E');
+        SendKeyTap('C');
+        vrState.leftHapticPulse = 0.3f;
     }
 
-    // Button Y -> Inventory / Holster ('1')
-    if ((btns & RIDDICK_VR_BTN_Y) && !(s_prevButtons & RIDDICK_VR_BTN_Y)) {
-        keybd_event('1', 0x02, 0, 0);
-        keybd_event('1', 0x02, KEYEVENTF_KEYUP, 0);
+    // Left Thumbstick Click -> Crouch Toggle ('C')
+    bool stickLeft = (btns & RIDDICK_VR_BTN_STICK_LEFT) != 0;
+    bool prevStickLeft = (s_prevButtons & RIDDICK_VR_BTN_STICK_LEFT) != 0;
+    if (stickLeft && !prevStickLeft) {
+        SendKeyTap('C');
+    }
+
+    // Right Thumbstick Click -> Recenter HMD & Cinema Screen
+    bool stickRight = (btns & RIDDICK_VR_BTN_STICK_RIGHT) != 0;
+    bool prevStickRight = (s_prevButtons & RIDDICK_VR_BTN_STICK_RIGHT) != 0;
+    if (stickRight && !prevStickRight) {
+        vrState.shouldRecenter = true;
+        s_hasPrevHmdOrientation = false;
+        vrState.rightHapticPulse = 0.6f;
     }
 
     s_prevButtons = btns;
