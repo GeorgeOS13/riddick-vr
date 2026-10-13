@@ -62,14 +62,15 @@ def analyze_frame(bmp_path: Path):
     active_h = active_bottom - active_top + 1
     active_w = active_right - active_left + 1
     active_aspect = active_w / max(active_h, 1)
+    is_loading_indicator = is_black or (active_w < 100 or active_h < 100)
 
     # 3. Check aspect ratio (should be ~1.78 for 16:9, or loading frame)
-    aspect_ok = True if is_black else (1.45 <= active_aspect <= 1.95)
+    aspect_ok = True if is_loading_indicator else (1.45 <= active_aspect <= 1.95)
 
     # 4. Check HUD position:
     # In Quest 2 2688-tall buffer, the safe viewing zone is y in [600, 2100].
     # Bottom HUD elements should be situated above y = 2200 (not clipped off at y = 2688).
-    hud_safe_bottom = True if is_black else (active_bottom < 2200)
+    hud_safe_bottom = True if is_loading_indicator else (active_bottom < 2200)
 
     # 5. Check for Chroma-key Green Flashes (#00FF00)
     green_mask = (arr[:, :, 1] > 200) & (arr[:, :, 0] < 50) & (arr[:, :, 2] < 50)
@@ -88,10 +89,11 @@ def analyze_frame(bmp_path: Path):
         "width": width,
         "height": height,
         "is_black": is_black,
+        "is_loading_indicator": is_loading_indicator,
         "active_bounds": (active_left, active_top, active_right, active_bottom),
         "active_w": active_w,
         "active_h": active_h,
-        "aspect_ratio": round(active_aspect, 3) if not is_black else 0.0,
+        "aspect_ratio": round(active_aspect, 3) if not is_loading_indicator else 0.0,
         "aspect_ok": aspect_ok,
         "hud_safe_bottom": hud_safe_bottom,
         "no_green_glitches": no_green_glitches,
@@ -195,8 +197,8 @@ def run_pipeline(max_frames=120, dump_interval=15, timeout=25, artifacts_dir=DEF
     rendered_count = 0
     for bmp_file in bmp_files:
         res = analyze_frame(bmp_file)
-        if res["is_black"]:
-            print(f"\nFrame: {res['filename']} (Initial Startup / Black Transition Frame -> PASS)")
+        if res["is_black"] or res["is_loading_indicator"]:
+            print(f"\nFrame: {res['filename']} (Initial Startup / Black / Loading Spinner Transition Frame -> PASS)")
             continue
 
         rendered_count += 1

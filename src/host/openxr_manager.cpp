@@ -373,6 +373,7 @@ bool OpenXRManager::CreateActions() {
     CreateAction("grip", "Grip", XR_ACTION_TYPE_FLOAT_INPUT, 2, handSubactionPaths, &m_gripAction);
     CreateAction("primary_btn", "Primary Button", XR_ACTION_TYPE_BOOLEAN_INPUT, 2, handSubactionPaths, &m_primaryBtnAction);
     CreateAction("secondary_btn", "Secondary Button", XR_ACTION_TYPE_BOOLEAN_INPUT, 2, handSubactionPaths, &m_secondaryBtnAction);
+    CreateAction("menu_btn", "Menu Button", XR_ACTION_TYPE_BOOLEAN_INPUT, 2, handSubactionPaths, &m_menuBtnAction);
     CreateAction("recenter_btn", "Recenter Button", XR_ACTION_TYPE_BOOLEAN_INPUT, 2, handSubactionPaths, &m_recenterBtnAction);
     CreateAction("haptic", "Haptic Vibration", XR_ACTION_TYPE_VIBRATION_OUTPUT, 2, handSubactionPaths, &m_hapticAction);
 
@@ -401,6 +402,7 @@ bool OpenXRManager::CreateActions() {
         { m_primaryBtnAction, Path("/user/hand/right/input/a/click") },
         { m_secondaryBtnAction, Path("/user/hand/left/input/y/click") },
         { m_secondaryBtnAction, Path("/user/hand/right/input/b/click") },
+        { m_menuBtnAction, Path("/user/hand/left/input/menu/click") },
         { m_recenterBtnAction, Path("/user/hand/right/input/thumbstick/click") },
         { m_hapticAction, Path("/user/hand/left/output/haptic") },
         { m_hapticAction, Path("/user/hand/right/output/haptic") }
@@ -547,6 +549,17 @@ void OpenXRManager::TeardownSession() {
         xrDestroyActionSet(m_actionSet);
         m_actionSet = XR_NULL_HANDLE;
     }
+    m_gripPoseAction = XR_NULL_HANDLE;
+    m_aimPoseAction = XR_NULL_HANDLE;
+    m_locomotionAction = XR_NULL_HANDLE;
+    m_turnAction = XR_NULL_HANDLE;
+    m_triggerAction = XR_NULL_HANDLE;
+    m_gripAction = XR_NULL_HANDLE;
+    m_primaryBtnAction = XR_NULL_HANDLE;
+    m_secondaryBtnAction = XR_NULL_HANDLE;
+    m_menuBtnAction = XR_NULL_HANDLE;
+    m_recenterBtnAction = XR_NULL_HANDLE;
+    m_hapticAction = XR_NULL_HANDLE;
 
     if (m_session && xrDestroySession) {
         xrDestroySession(m_session);
@@ -855,6 +868,16 @@ void OpenXRManager::UpdateTracking(RiddickVRSharedState& state, XrTime predicted
         XrActionStateBoolean btnY{XR_TYPE_ACTION_STATE_BOOLEAN};
         if (XR_SUCCEEDED(xrGetActionStateBoolean(m_session, &getInfo, &btnY)) && btnY.currentState) {
             state.leftController.buttons |= RIDDICK_VR_BTN_Y;
+        }
+
+        // Menu Button (Left Controller - Escape & Skip Cutscene)
+        if (m_menuBtnAction) {
+            getInfo.action = m_menuBtnAction;
+            getInfo.subactionPath = m_leftHandPath;
+            XrActionStateBoolean btnMenu{XR_TYPE_ACTION_STATE_BOOLEAN};
+            if (XR_SUCCEEDED(xrGetActionStateBoolean(m_session, &getInfo, &btnMenu)) && btnMenu.currentState) {
+                state.leftController.buttons |= RIDDICK_VR_BTN_MENU;
+            }
         }
 
         // Recenter

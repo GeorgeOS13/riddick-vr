@@ -90,6 +90,7 @@ private:
     XrAction m_gripAction = XR_NULL_HANDLE;
     XrAction m_primaryBtnAction = XR_NULL_HANDLE;
     XrAction m_secondaryBtnAction = XR_NULL_HANDLE;
+    XrAction m_menuBtnAction = XR_NULL_HANDLE;
     XrAction m_recenterBtnAction = XR_NULL_HANDLE;
     XrAction m_hapticAction = XR_NULL_HANDLE;
 

@@ -431,6 +431,15 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         vrState.rightHapticPulse = 0.6f;
     }
 
+    // Left Controller Menu Button -> Pause Menu / Skip Cutscene (Escape & Space)
+    bool btnMenu = (btns & RIDDICK_VR_BTN_MENU) != 0;
+    bool prevBtnMenu = (s_prevButtons & RIDDICK_VR_BTN_MENU) != 0;
+    if (btnMenu && !prevBtnMenu) {
+        SendKeyTap(VK_ESCAPE);
+        SendKeyTap(VK_SPACE);
+        vrState.leftHapticPulse = 0.4f;
+    }
+
     s_prevButtons = btns;
 }
 
