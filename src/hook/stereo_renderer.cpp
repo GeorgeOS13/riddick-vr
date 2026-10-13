@@ -18,6 +18,7 @@ bool StereoRenderer::Initialize(HDC hdc, HGLRC hglrc) {
     if (m_ipcClient.Connect(1500)) {
         VR_LOG_INFO("Connected to RiddickVRHost shared memory IPC bridge!");
         m_vrActive = true;
+        m_currentPass = StereoPass::LeftEye;
         if (m_ipcClient.ReadState(m_sharedState)) {
             if (m_sharedState.renderWidth > 0 && m_sharedState.renderHeight > 0) {
                 m_eyeWidth = m_sharedState.renderWidth;
@@ -28,6 +29,7 @@ bool StereoRenderer::Initialize(HDC hdc, HGLRC hglrc) {
     } else {
         VR_LOG_WARN("Could not connect to RiddickVRHost (host process may not be running yet). VR standby mode active.");
         m_vrActive = false;
+        m_currentPass = StereoPass::Mono;
     }
 
     CreateEyeBuffers(m_eyeWidth, m_eyeHeight);
@@ -378,8 +380,28 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
         // Signal host that frame is ready
         m_ipcClient.SignalFrameReady();
 
+        // Alternate stereoscopic eye pass for the upcoming scene draw
+        if (m_currentPass == StereoPass::LeftEye) {
+            m_currentPass = StereoPass::RightEye;
+        } else {
+            m_currentPass = StereoPass::LeftEye;
+        }
+
         // Re-lock shared textures for the upcoming frame
         LockSharedTextures();
+    }
+}
+
+GLuint StereoRenderer::GetActiveEyeFbo() const {
+    if (!m_vrActive) return 0;
+    return (m_currentPass == StereoPass::RightEye) ? m_rightFbo : m_leftFbo;
+}
+
+void StereoRenderer::OnClear(GLbitfield mask) {
+    if (!m_vrActive) return;
+    GLuint activeFbo = GetActiveEyeFbo();
+    if (activeFbo && OpenGLProxy::glBindFramebuffer) {
+        OpenGLProxy::glBindFramebuffer(0x8D40 /* GL_FRAMEBUFFER */, activeFbo);
     }
 }
 

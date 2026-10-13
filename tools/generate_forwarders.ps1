@@ -18,7 +18,9 @@ $overridden = @(
     "glScissor",
     "glMatrixMode",
     "glLoadMatrixf",
-    "glFrustum"
+    "glFrustum",
+    "glOrtho",
+    "glClear"
 )
 
 # 1. Generate opengl32.def

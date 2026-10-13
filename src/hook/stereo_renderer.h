@@ -24,9 +24,14 @@ public:
 
     void OnViewport(GLint x, GLint y, GLsizei width, GLsizei height);
     void OnSwapBuffers(HDC hdc);
+    void OnClear(GLbitfield mask);
 
     StereoPass GetCurrentPass() const { return m_currentPass; }
     void SetCurrentPass(StereoPass pass) { m_currentPass = pass; }
+
+    GLuint GetActiveEyeFbo() const;
+    GLuint GetLeftFbo() const { return m_leftFbo; }
+    GLuint GetRightFbo() const { return m_rightFbo; }
 
     bool IsVREnabled() const { return m_vrActive; }
     const RiddickVRSharedState& GetLatestState() const { return m_sharedState; }

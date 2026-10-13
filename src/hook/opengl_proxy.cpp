@@ -1,6 +1,7 @@
 #include "opengl_proxy.h"
 #include "opengl_forwarders.h"
 #include "stereo_renderer.h"
+#include "camera_hook.h"
 #include "logging.h"
 #include <string>
 
@@ -52,6 +53,8 @@ typedef void  (WINAPI *PFN_glScissor)(GLint, GLint, GLsizei, GLsizei);
 typedef void  (WINAPI *PFN_glMatrixMode)(GLenum);
 typedef void  (WINAPI *PFN_glLoadMatrixf)(const GLfloat*);
 typedef void  (WINAPI *PFN_glFrustum)(GLdouble, GLdouble, GLdouble, GLdouble, GLdouble, GLdouble);
+typedef void  (WINAPI *PFN_glOrtho)(GLdouble, GLdouble, GLdouble, GLdouble, GLdouble, GLdouble);
+typedef void  (WINAPI *PFN_glClear)(GLbitfield);
 
 static PFN_wglCreateContext real_wglCreateContext = nullptr;
 static PFN_wglDeleteContext real_wglDeleteContext = nullptr;
@@ -63,6 +66,9 @@ static PFN_glScissor        real_glScissor = nullptr;
 static PFN_glMatrixMode     real_glMatrixMode = nullptr;
 static PFN_glLoadMatrixf    real_glLoadMatrixf = nullptr;
 static PFN_glFrustum        real_glFrustum = nullptr;
+static PFN_glOrtho          real_glOrtho = nullptr;
+static PFN_glClear          real_glClear = nullptr;
+static PFNGLBINDFRAMEBUFFERPROC real_glBindFramebuffer = nullptr;
 
 static GLenum s_currentMatrixMode = 0x1700; // GL_MODELVIEW
 static float s_lastProjection[16] = {0};
@@ -114,6 +120,8 @@ bool OpenGLProxy::Initialize() {
     real_glMatrixMode     = (PFN_glMatrixMode)GetProcAddress(s_hRealOpenGL, "glMatrixMode");
     real_glLoadMatrixf    = (PFN_glLoadMatrixf)GetProcAddress(s_hRealOpenGL, "glLoadMatrixf");
     real_glFrustum        = (PFN_glFrustum)GetProcAddress(s_hRealOpenGL, "glFrustum");
+    real_glOrtho          = (PFN_glOrtho)GetProcAddress(s_hRealOpenGL, "glOrtho");
+    real_glClear          = (PFN_glClear)GetProcAddress(s_hRealOpenGL, "glClear");
 
     glBindTexture         = (PFN_glBindTexture)GetProcAddress(s_hRealOpenGL, "glBindTexture");
     glGenTextures         = (PFN_glGenTextures)GetProcAddress(s_hRealOpenGL, "glGenTextures");
@@ -145,8 +153,11 @@ void OpenGLProxy::QueryContextExtensions() {
         return p;
     };
 
+    if (!real_glBindFramebuffer) {
+        real_glBindFramebuffer = (PFNGLBINDFRAMEBUFFERPROC)LoadExt("glBindFramebuffer", "glBindFramebufferEXT");
+        glBindFramebuffer = (PFNGLBINDFRAMEBUFFERPROC)Hook_glBindFramebuffer;
+    }
     if (!glGenFramebuffers) glGenFramebuffers = (PFNGLGENFRAMEBUFFERSPROC)LoadExt("glGenFramebuffers", "glGenFramebuffersEXT");
-    if (!glBindFramebuffer) glBindFramebuffer = (PFNGLBINDFRAMEBUFFERPROC)LoadExt("glBindFramebuffer", "glBindFramebufferEXT");
     if (!glDeleteFramebuffers) glDeleteFramebuffers = (PFNGLDELETEFRAMEBUFFERSPROC)LoadExt("glDeleteFramebuffers", "glDeleteFramebuffersEXT");
     if (!glFramebufferTexture2D) glFramebufferTexture2D = (PFNGLFRAMEBUFFERTEXTURE2DPROC)LoadExt("glFramebufferTexture2D", "glFramebufferTexture2DEXT");
     if (!glCheckFramebufferStatus) glCheckFramebufferStatus = (PFNGLCHECKFRAMEBUFFERSTATUSPROC)LoadExt("glCheckFramebufferStatus", "glCheckFramebufferStatusEXT");
@@ -213,7 +224,9 @@ PROC WINAPI OpenGLProxy::Hook_wglGetProcAddress(LPCSTR lpszProc) {
     // Cache essential extension pointers when requested by the game engine
     std::string procName(lpszProc);
     if (procName == "glBindFramebuffer" || procName == "glBindFramebufferEXT") {
-        glBindFramebuffer = (PFNGLBINDFRAMEBUFFERPROC)realProc;
+        real_glBindFramebuffer = (PFNGLBINDFRAMEBUFFERPROC)realProc;
+        glBindFramebuffer = (PFNGLBINDFRAMEBUFFERPROC)Hook_glBindFramebuffer;
+        return (PROC)Hook_glBindFramebuffer;
     } else if (procName == "glGenFramebuffers" || procName == "glGenFramebuffersEXT") {
         glGenFramebuffers = (PFNGLGENFRAMEBUFFERSPROC)realProc;
     } else if (procName == "glDeleteFramebuffers" || procName == "glDeleteFramebuffersEXT") {
@@ -313,29 +326,21 @@ void WINAPI OpenGLProxy::Hook_glLoadMatrixf(const GLfloat *m) {
                 s_modelviewMatrixCount, m[12], m[13], m[14]);
         }
 
-        // 3D Modelview Camera Interception
+        // 3D Modelview Camera Interception with Horizon Stabilization
         if (StereoRenderer::Instance().IsVREnabled()) {
             const auto& vrState = StereoRenderer::Instance().GetLatestState();
             const auto pass = StereoRenderer::Instance().GetCurrentPass();
 
-            // Column-major matrix multiplication: combinedView = m * eyeView
-            const float* eyeMat = (pass == StereoPass::RightEye) 
-                ? vrState.rightEyeView.m 
-                : vrState.leftEyeView.m;
-
-            GLfloat combinedView[16];
-            for (int r = 0; r < 4; ++r) {
-                for (int c = 0; c < 4; ++c) {
-                    combinedView[c * 4 + r] =
-                        m[0 * 4 + r] * eyeMat[c * 4 + 0] +
-                        m[1 * 4 + r] * eyeMat[c * 4 + 1] +
-                        m[2 * 4 + r] * eyeMat[c * 4 + 2] +
-                        m[3 * 4 + r] * eyeMat[c * 4 + 3];
-                }
-            }
+            GLfloat stabilizedView[16];
+            CameraHook::Instance().StabilizeViewMatrix(
+                stabilizedView, 
+                m, 
+                vrState, 
+                (pass == StereoPass::RightEye ? 2 : 1)
+            );
 
             if (real_glLoadMatrixf) {
-                real_glLoadMatrixf(combinedView);
+                real_glLoadMatrixf(stabilizedView);
                 return;
             }
         }
@@ -350,6 +355,47 @@ void WINAPI OpenGLProxy::Hook_glFrustum(GLdouble left, GLdouble right, GLdouble 
     VR_LOG_INFO("glFrustum called: L=%.2f R=%.2f B=%.2f T=%.2f Near=%.2f Far=%.2f", left, right, bottom, top, zNear, zFar);
     if (real_glFrustum) {
         real_glFrustum(left, right, bottom, top, zNear, zFar);
+    }
+}
+
+void WINAPI OpenGLProxy::Hook_glOrtho(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble zNear, GLdouble zFar) {
+    if (StereoRenderer::Instance().IsVREnabled()) {
+        const auto pass = StereoRenderer::Instance().GetCurrentPass();
+        double hudOffset = (right - left) * StereoRenderer::Instance().GetHudConvergenceOffset();
+        if (pass == StereoPass::LeftEye) {
+            left += hudOffset;
+            right += hudOffset;
+        } else if (pass == StereoPass::RightEye) {
+            left -= hudOffset;
+            right -= hudOffset;
+        }
+    }
+    if (real_glOrtho) {
+        real_glOrtho(left, right, bottom, top, zNear, zFar);
+    }
+}
+
+void WINAPI OpenGLProxy::Hook_glClear(GLbitfield mask) {
+    if (StereoRenderer::Instance().IsVREnabled()) {
+        StereoRenderer::Instance().OnClear(mask);
+    }
+    if (real_glClear) {
+        real_glClear(mask);
+    }
+}
+
+void WINAPI OpenGLProxy::Hook_glBindFramebuffer(GLenum target, GLuint framebuffer) {
+    if (StereoRenderer::Instance().IsVREnabled()) {
+        if (framebuffer == 0) {
+            GLuint eyeFbo = StereoRenderer::Instance().GetActiveEyeFbo();
+            if (eyeFbo && real_glBindFramebuffer) {
+                real_glBindFramebuffer(target, eyeFbo);
+                return;
+            }
+        }
+    }
+    if (real_glBindFramebuffer) {
+        real_glBindFramebuffer(target, framebuffer);
     }
 }
 

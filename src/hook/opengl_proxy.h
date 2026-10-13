@@ -63,6 +63,9 @@ public:
     static void WINAPI Hook_glMatrixMode(GLenum mode);
     static void WINAPI Hook_glLoadMatrixf(const GLfloat *m);
     static void WINAPI Hook_glFrustum(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble zNear, GLdouble zFar);
+    static void WINAPI Hook_glOrtho(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble zNear, GLdouble zFar);
+    static void WINAPI Hook_glClear(GLbitfield mask);
+    static void WINAPI Hook_glBindFramebuffer(GLenum target, GLuint framebuffer);
 
     // Matrix state inspection
     static GLenum GetCurrentMatrixMode();

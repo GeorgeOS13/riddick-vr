@@ -58,17 +58,19 @@ int main(int argc, char* argv[]) {
     RiddickVR::OpenXRManager xrManager;
     g_pManager = &xrManager;
 
+    if (validateOnly) {
+        std::string report;
+        bool valid = xrManager.Validate(report);
+        std::cout << report << std::endl;
+        xrManager.Shutdown();
+        ipcHost.Shutdown();
+        return valid ? 0 : 1;
+    }
+
     if (!xrManager.Initialize()) {
         std::cerr << "[Host] ERROR: Failed to initialize OpenXR Manager!\n";
         ipcHost.Shutdown();
         return 1;
-    }
-
-    if (validateOnly) {
-        std::cout << "[Host] OpenXR runtime validation SUCCESSFUL. Ready for VR.\n";
-        xrManager.Shutdown();
-        ipcHost.Shutdown();
-        return 0;
     }
 
     // Run VR loop

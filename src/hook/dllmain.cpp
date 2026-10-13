@@ -48,6 +48,14 @@ void WINAPI glFrustum(GLdouble left, GLdouble right, GLdouble bottom, GLdouble t
     RiddickVR::OpenGLProxy::Hook_glFrustum(left, right, bottom, top, zNear, zFar);
 }
 
+void WINAPI glOrtho(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble zNear, GLdouble zFar) {
+    RiddickVR::OpenGLProxy::Hook_glOrtho(left, right, bottom, top, zNear, zFar);
+}
+
+void WINAPI glClear(GLbitfield mask) {
+    RiddickVR::OpenGLProxy::Hook_glClear(mask);
+}
+
 } // extern "C"
 
 typedef BOOL (WINAPI *PFN_GdiSwapBuffers)(HDC);

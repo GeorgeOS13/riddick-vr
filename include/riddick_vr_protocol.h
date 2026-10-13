@@ -9,6 +9,14 @@
 
 #define RIDDICK_VR_PROTOCOL_VERSION 1
 
+constexpr uint32_t RIDDICK_VR_BTN_A           = 1 << 0;
+constexpr uint32_t RIDDICK_VR_BTN_B           = 1 << 1;
+constexpr uint32_t RIDDICK_VR_BTN_X           = 1 << 2;
+constexpr uint32_t RIDDICK_VR_BTN_Y           = 1 << 3;
+constexpr uint32_t RIDDICK_VR_BTN_STICK_LEFT  = 1 << 4;
+constexpr uint32_t RIDDICK_VR_BTN_STICK_RIGHT = 1 << 5;
+constexpr uint32_t RIDDICK_VR_BTN_MENU        = 1 << 6;
+
 #pragma pack(push, 4)
 
 struct RiddickVRMatrix4x4 {
@@ -26,6 +34,8 @@ struct RiddickVRQuaternion {
 struct RiddickVRTrackedPose {
     RiddickVRVector3 position;
     RiddickVRQuaternion orientation;
+    RiddickVRVector3 linearVelocity;
+    RiddickVRVector3 angularVelocity;
     bool isValid;
 };
 
@@ -55,6 +65,10 @@ struct RiddickVRSharedState {
     RiddickVRControllerInput leftController;
     RiddickVRControllerInput rightController;
     
+    // Haptic feedback from Hook -> Host
+    float leftHapticPulse;   // 0.0 to 1.0 amplitude
+    float rightHapticPulse;  // 0.0 to 1.0 amplitude
+    
     // Texture sharing parameters
     uint32_t renderWidth;
     uint32_t renderHeight;
@@ -70,3 +84,4 @@ struct RiddickVRSharedState {
 };
 
 #pragma pack(pop)
+

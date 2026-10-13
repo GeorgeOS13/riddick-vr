@@ -12,6 +12,9 @@ public:
     bool Initialize();
     void Update(const RiddickVRSharedState& vrState);
 
+    // Matrix injection and horizon stabilization
+    void StabilizeViewMatrix(float* outView, const float* inView, const RiddickVRSharedState& vrState, int eyePass);
+
     // Camera decoupling controls
     void SetDecoupleRoll(bool enable) { m_decoupleRoll = enable; }
     void SetDecouplePitch(bool enable) { m_decouplePitch = enable; }

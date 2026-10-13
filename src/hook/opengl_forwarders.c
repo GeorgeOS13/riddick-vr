@@ -27,7 +27,6 @@ DEFINE_FORWARDER(glBitmap)
 DEFINE_FORWARDER(glBlendFunc)
 DEFINE_FORWARDER(glCallList)
 DEFINE_FORWARDER(glCallLists)
-DEFINE_FORWARDER(glClear)
 DEFINE_FORWARDER(glClearAccum)
 DEFINE_FORWARDER(glClearColor)
 DEFINE_FORWARDER(glClearDepth)
@@ -204,7 +203,6 @@ DEFINE_FORWARDER(glNormal3iv)
 DEFINE_FORWARDER(glNormal3s)
 DEFINE_FORWARDER(glNormal3sv)
 DEFINE_FORWARDER(glNormalPointer)
-DEFINE_FORWARDER(glOrtho)
 DEFINE_FORWARDER(glPassThrough)
 DEFINE_FORWARDER(glPixelMapfv)
 DEFINE_FORWARDER(glPixelMapuiv)
@@ -389,7 +387,6 @@ void InitializeForwarders(HMODULE hRealDll) {
     LOAD_FORWARDER(glBlendFunc);
     LOAD_FORWARDER(glCallList);
     LOAD_FORWARDER(glCallLists);
-    LOAD_FORWARDER(glClear);
     LOAD_FORWARDER(glClearAccum);
     LOAD_FORWARDER(glClearColor);
     LOAD_FORWARDER(glClearDepth);
@@ -566,7 +563,6 @@ void InitializeForwarders(HMODULE hRealDll) {
     LOAD_FORWARDER(glNormal3s);
     LOAD_FORWARDER(glNormal3sv);
     LOAD_FORWARDER(glNormalPointer);
-    LOAD_FORWARDER(glOrtho);
     LOAD_FORWARDER(glPassThrough);
     LOAD_FORWARDER(glPixelMapfv);
     LOAD_FORWARDER(glPixelMapuiv);
