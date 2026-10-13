@@ -287,55 +287,12 @@ void WINAPI OpenGLProxy::Hook_glLoadMatrixf(const GLfloat *m) {
             VR_LOG_INFO("glLoadMatrixf [PROJECTION #%u]: [%.2f, %.2f, %.2f, %.2f] [%.2f, %.2f, %.2f, %.2f]",
                 s_projMatrixCount, m[0], m[5], m[10], m[14], m[1], m[2], m[3], m[15]);
         }
-
-        // Preserve 3D Perspective Projection intact for Starbreeze Engine
-        // Note: Starbreeze uses custom projection depth conventions (m[5] < 0, m[10] > 0)
-        // Overwriting them corrupts depth and shadow passes.
-        // 2D Orthographic HUD / UI Projection Interception (fabsf(m[15] - 1.0f) < 0.01f)
-        else if (StereoRenderer::Instance().IsVREnabled() && fabsf(m[15] - 1.0f) < 0.01f) {
-            const auto pass = StereoRenderer::Instance().GetCurrentPass();
-            float hudOffset = StereoRenderer::Instance().GetHudConvergenceOffset();
-
-            GLfloat hudProj[16];
-            memcpy(hudProj, m, sizeof(hudProj));
-
-            // Apply slight horizontal convergence parallax for stereoscopic depth (~1.8m virtual plane)
-            if (pass == StereoPass::LeftEye) {
-                hudProj[12] += hudOffset;
-            } else if (pass == StereoPass::RightEye) {
-                hudProj[12] -= hudOffset;
-            }
-
-            if (real_glLoadMatrixf) {
-                real_glLoadMatrixf(hudProj);
-                return;
-            }
-        }
     } else if (s_currentMatrixMode == 0x1700 /* GL_MODELVIEW */) {
         memcpy(s_lastView, m, sizeof(s_lastView));
         s_modelviewMatrixCount++;
         if (s_modelviewMatrixCount == 1 || s_modelviewMatrixCount % 300 == 0) {
             VR_LOG_INFO("glLoadMatrixf [MODELVIEW #%u]: Pos(%.2f, %.2f, %.2f)",
                 s_modelviewMatrixCount, m[12], m[13], m[14]);
-        }
-
-        // 3D Modelview Camera Interception with Horizon Stabilization
-        if (StereoRenderer::Instance().IsVREnabled()) {
-            const auto& vrState = StereoRenderer::Instance().GetLatestState();
-            const auto pass = StereoRenderer::Instance().GetCurrentPass();
-
-            GLfloat stabilizedView[16];
-            CameraHook::Instance().StabilizeViewMatrix(
-                stabilizedView, 
-                m, 
-                vrState, 
-                (pass == StereoPass::RightEye ? 2 : 1)
-            );
-
-            if (real_glLoadMatrixf) {
-                real_glLoadMatrixf(stabilizedView);
-                return;
-            }
         }
     }
 
@@ -352,26 +309,12 @@ void WINAPI OpenGLProxy::Hook_glFrustum(GLdouble left, GLdouble right, GLdouble 
 }
 
 void WINAPI OpenGLProxy::Hook_glOrtho(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble zNear, GLdouble zFar) {
-    if (StereoRenderer::Instance().IsVREnabled()) {
-        const auto pass = StereoRenderer::Instance().GetCurrentPass();
-        double hudOffset = (right - left) * StereoRenderer::Instance().GetHudConvergenceOffset();
-        if (pass == StereoPass::LeftEye) {
-            left += hudOffset;
-            right += hudOffset;
-        } else if (pass == StereoPass::RightEye) {
-            left -= hudOffset;
-            right -= hudOffset;
-        }
-    }
     if (real_glOrtho) {
         real_glOrtho(left, right, bottom, top, zNear, zFar);
     }
 }
 
 void WINAPI OpenGLProxy::Hook_glClear(GLbitfield mask) {
-    if (StereoRenderer::Instance().IsVREnabled()) {
-        StereoRenderer::Instance().OnClear(mask);
-    }
     if (real_glClear) {
         real_glClear(mask);
     }

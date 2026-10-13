@@ -418,8 +418,11 @@ void StereoRenderer::UnlockSharedTextures() {
 }
 
 void StereoRenderer::OnViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
-    m_windowWidth = width;
-    m_windowHeight = height;
+    // Only capture full-screen game window viewports, not small shadow map or reflection viewports
+    if (x == 0 && y == 0 && width >= 640 && height >= 480) {
+        m_windowWidth = width;
+        m_windowHeight = height;
+    }
 }
 
 void StereoRenderer::OnSwapBuffers(HDC hdc) {
@@ -572,11 +575,7 @@ GLuint StereoRenderer::GetActiveEyeFbo() const {
 }
 
 void StereoRenderer::OnClear(GLbitfield mask) {
-    if (!m_vrActive) return;
-    GLuint activeFbo = GetActiveEyeFbo();
-    if (activeFbo && OpenGLProxy::glBindFramebuffer) {
-        OpenGLProxy::glBindFramebuffer(0x8D40 /* GL_FRAMEBUFFER */, activeFbo);
-    }
+    // Intentionally no-op: let the game engine clear its own framebuffers, shadow maps, and stencil buffers
 }
 
 } // namespace RiddickVR
