@@ -1,5 +1,6 @@
 #include "camera_hook.h"
 #include "logging.h"
+#include "opengl_proxy.h"
 #include <cmath>
 
 namespace RiddickVR {
@@ -128,16 +129,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         cursorShowing = (ci.flags & CURSOR_SHOWING) != 0;
     }
 
+    // Auto-detect cutscenes and dialogue sequences via projection matrix:
+    // First-person gameplay uses proj[0] ~0.60 to 0.70.
+    // 3rd-person cutscenes, dialogues, and cinematic cameras use narrow telephoto lenses with proj[0] > 1.2f (e.g. 2.14f).
+    bool isCutsceneOrDialogue = false;
+    if (OpenGLProxy::HasInterceptedProjection()) {
+        const float* proj = OpenGLProxy::GetLastProjectionMatrix();
+        if (proj && proj[0] > 1.2f) {
+            isCutsceneOrDialogue = true;
+        }
+    }
+
     uint32_t btns = vrState.rightController.buttons | vrState.leftController.buttons;
     static uint32_t s_prevButtons = 0;
     static bool s_manualCinemaToggle = false;
 
-    // Toggle Cinema Screen Mode on Button Y (or auto-engage in menus when cursor is showing)
+    // Toggle Cinema Screen Mode on Button Y
     if ((btns & RIDDICK_VR_BTN_Y) && !(s_prevButtons & RIDDICK_VR_BTN_Y)) {
         s_manualCinemaToggle = !s_manualCinemaToggle;
-        VR_LOG_INFO("Cinema Screen Mode toggled: %s", s_manualCinemaToggle ? "ON (Virtual Screen)" : "OFF (Immersive 3D)");
+        VR_LOG_INFO("Cinema Screen Mode toggled manually: %s", s_manualCinemaToggle ? "ON (Virtual Screen)" : "OFF (Immersive 3D)");
     }
-    vrState.cinemaMode = cursorShowing || s_manualCinemaToggle;
+    vrState.cinemaMode = cursorShowing || isCutsceneOrDialogue || s_manualCinemaToggle;
 
     // 0. Head Tracking Look Input (HMD Orientation -> In-Game View Yaw & Pitch)
     // Only apply in-game look when not in cinema menu mode
@@ -261,6 +273,28 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         s_snapTurnArmed = true;
     }
 
+    // 3b. Dialogue & Menu Navigation (Right Thumbstick Y -> Up / Down Arrow Keys)
+    static bool s_stickYUpArmed = true, s_stickYDownArmed = true;
+    float stickY = vrState.rightController.thumbstickY;
+    if (stickY > 0.55f) {
+        if (s_stickYUpArmed) {
+            s_stickYUpArmed = false;
+            SendKeyTap(VK_UP);
+            vrState.rightHapticPulse = 0.25f;
+        }
+    } else {
+        s_stickYUpArmed = true;
+    }
+    if (stickY < -0.55f) {
+        if (s_stickYDownArmed) {
+            s_stickYDownArmed = false;
+            SendKeyTap(VK_DOWN);
+            vrState.rightHapticPulse = 0.25f;
+        }
+    } else {
+        s_stickYDownArmed = true;
+    }
+
     // 4. Physical Melee Combat Gestures (Jabs, Hooks, Uppercuts)
     static DWORD s_lastPunchTime = 0;
     DWORD now = GetTickCount();
@@ -339,18 +373,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         vrState.leftHapticPulse = 0.8f;
     }
 
-    // 7. Guard / Block Pose Detection (both hands raised in front of chin)
-    float guardHandDist = sqrtf(
-        powf(vrState.leftController.gripPose.position.x - vrState.rightController.gripPose.position.x, 2) +
-        powf(vrState.leftController.gripPose.position.y - vrState.rightController.gripPose.position.y, 2) +
-        powf(vrState.leftController.gripPose.position.z - vrState.rightController.gripPose.position.z, 2)
-    );
-
-    bool wantGuard = (guardHandDist < 0.28f) && 
-                     (vrState.leftController.gripPose.position.y > -0.20f) && 
-                     (vrState.rightController.gripPose.position.y > -0.20f);
-
-    // 8. Triggers & Grips
+    // 7. Aim & Block (Explicit & Deliberate via Left Trigger)
+    // Left Trigger -> Aim / Block (Right Click).
+    // Proximity hand heuristic removed so the player is never accidentally immobilized or stuck blocking!
     static bool s_leftTriggerDown = false, s_rightTriggerDown = false;
     static bool s_leftGripDown = false, s_rightGripDown = false;
 
@@ -362,11 +387,12 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         if (wantRightTrigger) vrState.rightHapticPulse = 0.4f;
     }
 
-    // Left Trigger OR Guard Pose -> Aim / Block (Right Click)
-    bool wantBlock = (vrState.leftController.trigger > 0.5f) || wantGuard;
+    // Left Trigger -> Aim / Block (Right Click)
+    bool wantBlock = (vrState.leftController.trigger > 0.5f);
     if (wantBlock != s_leftTriggerDown) {
         mouse_event(wantBlock ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
         s_leftTriggerDown = wantBlock;
+        if (wantBlock) vrState.leftHapticPulse = 0.3f;
     }
 
     // Left Grip -> Grab / Secondary Interact ('E')

@@ -1108,16 +1108,21 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
                 projViews[eye].pose.position = m_locatedViews[eye].pose.position;
                 projViews[eye].pose.orientation = RemoveRoll(m_locatedViews[eye].pose.orientation);
 
-                // Un-zoom in-game action FOV to match natural 1:1 real-world human scale
-                constexpr float FOV_UNZOOM_SCALE = 1.25f;
-                projViews[eye].fov.angleLeft = m_locatedViews[eye].fov.angleLeft * FOV_UNZOOM_SCALE;
-                projViews[eye].fov.angleRight = m_locatedViews[eye].fov.angleRight * FOV_UNZOOM_SCALE;
-                projViews[eye].fov.angleUp = m_locatedViews[eye].fov.angleUp * FOV_UNZOOM_SCALE;
-                projViews[eye].fov.angleDown = m_locatedViews[eye].fov.angleDown * FOV_UNZOOM_SCALE;
+                // Map active rendered viewport to headset FOV without letterbox bars
+                constexpr float srcAspect = 16.0f / 9.0f;
+                int32_t dstW = m_swapchains[eye].width;
+                int32_t dstH = static_cast<int32_t>(dstW / srcAspect);
+                if (dstH > static_cast<int32_t>(m_swapchains[eye].height)) {
+                    dstH = m_swapchains[eye].height;
+                    dstW = static_cast<int32_t>(dstH * srcAspect);
+                }
+                int32_t dstX = (m_swapchains[eye].width - dstW) / 2;
+                int32_t dstY = (m_swapchains[eye].height - dstH) / 2;
 
+                projViews[eye].fov = m_locatedViews[eye].fov;
                 projViews[eye].subImage.swapchain = m_swapchains[eye].handle;
-                projViews[eye].subImage.imageRect.offset = {0, 0};
-                projViews[eye].subImage.imageRect.extent = { (int32_t)m_swapchains[eye].width, (int32_t)m_swapchains[eye].height };
+                projViews[eye].subImage.imageRect.offset = {dstX, dstY};
+                projViews[eye].subImage.imageRect.extent = {dstW, dstH};
             }
 
             static bool s_wasCinemaMode = false;

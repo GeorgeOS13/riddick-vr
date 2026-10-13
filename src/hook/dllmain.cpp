@@ -94,6 +94,17 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         case DLL_PROCESS_ATTACH: {
             RawDebugLog("DllMain: DLL_PROCESS_ATTACH entered");
             DisableThreadLibraryCalls(hModule);
+
+            // Enable Per-Monitor V2 DPI awareness so Windows never downscales the game viewport
+            SetProcessDPIAware();
+            HMODULE hUser32 = GetModuleHandleA("user32.dll");
+            if (hUser32) {
+                typedef BOOL (WINAPI *PFN_SetProcessDpiAwarenessContext)(HANDLE);
+                auto setDpiContext = (PFN_SetProcessDpiAwarenessContext)GetProcAddress(hUser32, "SetProcessDpiAwarenessContext");
+                if (setDpiContext) {
+                    setDpiContext((HANDLE)-4 /* DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 */);
+                }
+            }
             
             RawDebugLog("DllMain: Initializing Logger");
             char logPath[MAX_PATH];
