@@ -218,6 +218,10 @@ static RiddickVRVector3 WorldToHmdLocal(const RiddickVRVector3& worldPos, const 
     return { dx, dy, dz };
 }
 
+// Adaptive physical crouching & two-handed stabilization state (ADR 0004 & 0005)
+static float s_standingEyeHeight = 0.0f;
+static bool s_twoHandedStabilizationActive = false;
+
 void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (!m_initialized || !vrState.vrActive) return;
 
@@ -295,6 +299,13 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 float mouseDeltaX = -deltaYaw * SENSITIVITY_YAW;
                 float mouseDeltaY = -deltaPitch * SENSITIVITY_PITCH;
 
+                // Two-Handed Firearm Stabilization (ADR 0005): dampens micro-tremors and aiming jitter
+                if (s_twoHandedStabilizationActive) {
+                    constexpr float STABILIZE_DAMPING = 0.65f;
+                    mouseDeltaX *= STABILIZE_DAMPING;
+                    mouseDeltaY *= STABILIZE_DAMPING;
+                }
+
                 s_accumulatedLookX += mouseDeltaX;
                 s_accumulatedLookY += mouseDeltaY;
 
@@ -312,21 +323,58 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         s_hasPrevHmdOrientation = false;
     }
 
-    // 1. Physical Crouch Detection
+    // 1. Adaptive Physical Crouch Detection & Dynamic Height Calibration (ADR 0004 & 0005)
     static bool s_isPhysicallyCrouched = false;
-    constexpr float CROUCH_THRESHOLD = -0.35f;
 
-    if (vrState.hmdPose.position.y < CROUCH_THRESHOLD) {
-        if (!s_isPhysicallyCrouched) {
-            s_isPhysicallyCrouched = true;
-            VR_LOG_INFO("Physical crouch engaged (Y: %.2fm)", vrState.hmdPose.position.y);
-            SendKey('C', true);
+    // Reset calibration on recenter request (e.g. via IPC flag)
+    if (vrState.shouldRecenter && vrState.hmdPose.isValid) {
+        s_standingEyeHeight = vrState.hmdPose.position.y;
+        VR_LOG_INFO("Standing eye height calibrated on recenter: %.2fm", s_standingEyeHeight);
+    }
+
+    if (vrState.hmdPose.isValid) {
+        float currentY = vrState.hmdPose.position.y;
+
+        // Initial calibration
+        if (s_standingEyeHeight <= 0.001f && currentY > 0.1f) {
+            s_standingEyeHeight = currentY;
+            VR_LOG_INFO("Initial standing eye height calibrated: %.2fm", s_standingEyeHeight);
         }
-    } else {
-        if (s_isPhysicallyCrouched) {
-            s_isPhysicallyCrouched = false;
-            VR_LOG_INFO("Physical crouch disengaged");
-            SendKey('C', false);
+
+        // Peak tracking when standing upright: adapt if player stands taller or adjusts headset
+        if (!s_isPhysicallyCrouched && currentY > s_standingEyeHeight) {
+            s_standingEyeHeight = currentY;
+        }
+
+        // Calculate height drop from calibrated standing height
+        float heightDrop = s_standingEyeHeight - currentY;
+        float heightRatio = (s_standingEyeHeight > 0.2f) ? (currentY / s_standingEyeHeight) : 1.0f;
+
+        // Crouch activation criteria:
+        // Ducks > 28cm below standing height OR falls below 78% of standing height
+        bool wantCrouch = false;
+        if (s_standingEyeHeight > 0.2f) {
+            if (s_isPhysicallyCrouched) {
+                // Hysteresis release buffer: remain crouched until rising within 18cm of standing height
+                wantCrouch = (heightDrop > 0.18f);
+            } else {
+                wantCrouch = (heightDrop > 0.28f) || (heightRatio < 0.78f);
+            }
+        } else {
+            // Fallback for zero-baseline tracking spaces
+            constexpr float FALLBACK_CROUCH_THRESHOLD = -0.28f;
+            constexpr float FALLBACK_RELEASE_THRESHOLD = -0.18f;
+            wantCrouch = s_isPhysicallyCrouched ? (currentY < FALLBACK_RELEASE_THRESHOLD) : (currentY < FALLBACK_CROUCH_THRESHOLD);
+        }
+
+        if (wantCrouch != s_isPhysicallyCrouched) {
+            s_isPhysicallyCrouched = wantCrouch;
+            VR_LOG_INFO("Adaptive physical crouch %s (Current Y: %.2fm, Standing Y: %.2fm, Drop: %.2fm)",
+                s_isPhysicallyCrouched ? "ENGAGED" : "DISENGAGED", currentY, s_standingEyeHeight, heightDrop);
+            SendKey('C', s_isPhysicallyCrouched);
+            if (s_isPhysicallyCrouched) {
+                vrState.leftHapticPulse = 0.2f;
+            }
         }
     }
 
@@ -518,6 +566,79 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         }
     }
 
+    // 5b. Two-Handed Firearm Stabilization (ADR 0005)
+    // Detect when player brings off-hand to steady the two-handed weapon:
+    // - Distance between controller grip poses < 25cm
+    // - Off-hand grip button held (leftController.grip > 0.45)
+    // - Not in boxer guard or weapon reload mode
+    float twoHandDist = sqrtf(
+        powf(vrState.leftController.gripPose.position.x - vrState.rightController.gripPose.position.x, 2) +
+        powf(vrState.leftController.gripPose.position.y - vrState.rightController.gripPose.position.y, 2) +
+        powf(vrState.leftController.gripPose.position.z - vrState.rightController.gripPose.position.z, 2)
+    );
+
+    bool isReloading = (now - s_lastReloadGestureTime <= 1100);
+    bool wantTwoHanded = (twoHandDist < 0.25f) &&
+                         (vrState.leftController.grip > 0.45f) &&
+                         !s_physicalBlockEngaged &&
+                         !isReloading;
+
+    if (wantTwoHanded != s_twoHandedStabilizationActive) {
+        s_twoHandedStabilizationActive = wantTwoHanded;
+        if (s_twoHandedStabilizationActive) {
+            VR_LOG_INFO("Two-Handed Firearm Stabilization ENGAGED (HandDist: %.2fm)", twoHandDist);
+            vrState.leftHapticPulse = 0.25f;  // Subtle haptic confirmation pulse
+            vrState.rightHapticPulse = 0.25f;
+        } else {
+            VR_LOG_INFO("Two-Handed Firearm Stabilization DISENGAGED");
+        }
+    }
+
+    // Apply exponential smoothing / spherical interpolation on weapon aim pose when two-handed
+    static RiddickVRTrackedPose s_stabilizedAimPose{};
+    static bool s_hasStabilizedPose = false;
+
+    if (vrState.rightController.aimPose.isValid) {
+        if (s_twoHandedStabilizationActive) {
+            if (!s_hasStabilizedPose) {
+                s_stabilizedAimPose = vrState.rightController.aimPose;
+                s_hasStabilizedPose = true;
+            } else {
+                constexpr float SMOOTH_ALPHA = 0.35f;
+                s_stabilizedAimPose.position.x += SMOOTH_ALPHA * (vrState.rightController.aimPose.position.x - s_stabilizedAimPose.position.x);
+                s_stabilizedAimPose.position.y += SMOOTH_ALPHA * (vrState.rightController.aimPose.position.y - s_stabilizedAimPose.position.y);
+                s_stabilizedAimPose.position.z += SMOOTH_ALPHA * (vrState.rightController.aimPose.position.z - s_stabilizedAimPose.position.z);
+
+                // SLERP / Normalized Lerp for aim orientation quaternion
+                float dot = s_stabilizedAimPose.orientation.x * vrState.rightController.aimPose.orientation.x +
+                            s_stabilizedAimPose.orientation.y * vrState.rightController.aimPose.orientation.y +
+                            s_stabilizedAimPose.orientation.z * vrState.rightController.aimPose.orientation.z +
+                            s_stabilizedAimPose.orientation.w * vrState.rightController.aimPose.orientation.w;
+
+                float qSign = (dot < 0.0f) ? -1.0f : 1.0f;
+                s_stabilizedAimPose.orientation.x += SMOOTH_ALPHA * (qSign * vrState.rightController.aimPose.orientation.x - s_stabilizedAimPose.orientation.x);
+                s_stabilizedAimPose.orientation.y += SMOOTH_ALPHA * (qSign * vrState.rightController.aimPose.orientation.y - s_stabilizedAimPose.orientation.y);
+                s_stabilizedAimPose.orientation.z += SMOOTH_ALPHA * (qSign * vrState.rightController.aimPose.orientation.z - s_stabilizedAimPose.orientation.z);
+                s_stabilizedAimPose.orientation.w += SMOOTH_ALPHA * (qSign * vrState.rightController.aimPose.orientation.w - s_stabilizedAimPose.orientation.w);
+
+                float qNorm = sqrtf(s_stabilizedAimPose.orientation.x * s_stabilizedAimPose.orientation.x +
+                                    s_stabilizedAimPose.orientation.y * s_stabilizedAimPose.orientation.y +
+                                    s_stabilizedAimPose.orientation.z * s_stabilizedAimPose.orientation.z +
+                                    s_stabilizedAimPose.orientation.w * s_stabilizedAimPose.orientation.w);
+                if (qNorm > 0.0001f) {
+                    s_stabilizedAimPose.orientation.x /= qNorm;
+                    s_stabilizedAimPose.orientation.y /= qNorm;
+                    s_stabilizedAimPose.orientation.z /= qNorm;
+                    s_stabilizedAimPose.orientation.w /= qNorm;
+                }
+
+                vrState.rightController.aimPose = s_stabilizedAimPose;
+            }
+        } else {
+            s_hasStabilizedPose = false;
+        }
+    }
+
     // 6. Eyeshine / Night Vision Temple Gesture (tapping side of head)
     static DWORD s_lastEyeshineGestureTime = 0;
     bool handNearHead = (vrState.rightController.gripPose.position.y > 0.08f && fabsf(vrState.rightController.gripPose.position.x) > 0.12f && vrState.rightController.grip > 0.5f) ||
@@ -568,8 +689,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         }
     }
 
-    // Left Grip -> Grab / Secondary Interact ('E')
-    bool wantLeftGrip = vrState.leftController.grip > 0.5f;
+    // Left Grip -> Grab / Secondary Interact ('E') (suppressed during two-handed stabilization)
+    bool wantLeftGrip = !s_twoHandedStabilizationActive && (vrState.leftController.grip > 0.5f);
     if (wantLeftGrip != s_leftGripDown) {
         SendKey('E', wantLeftGrip);
         s_leftGripDown = wantLeftGrip;
@@ -626,12 +747,16 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         SendKeyTap('C');
     }
 
-    // Right Thumbstick Click -> Recenter HMD & Cinema Screen
+    // Right Thumbstick Click -> Recenter HMD & Cinema Screen & Reset Standing Eye Height
     bool stickRight = (btns & RIDDICK_VR_BTN_STICK_RIGHT) != 0;
     bool prevStickRight = (s_prevButtons & RIDDICK_VR_BTN_STICK_RIGHT) != 0;
     if (stickRight && !prevStickRight) {
         vrState.shouldRecenter = true;
         s_hasPrevHmdOrientation = false;
+        if (vrState.hmdPose.isValid) {
+            s_standingEyeHeight = vrState.hmdPose.position.y;
+            VR_LOG_INFO("Right Stick Click: HMD recentered and standing eye height recalibrated to %.2fm", s_standingEyeHeight);
+        }
         vrState.rightHapticPulse = 0.6f;
     }
 

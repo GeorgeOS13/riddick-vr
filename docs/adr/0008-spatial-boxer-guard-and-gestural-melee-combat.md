@@ -93,11 +93,31 @@ Physical reloads are triggered via two natural motions:
 - 1100ms cooldown debounce prevents duplicate reloads.
 - Dispatches `SendKeyTap('R')`, triggering `ACTION_RELOAD` in the game engine with distinctive dual haptic confirmation ($0.55$ off-hand, $0.75$ dominant hand).
 
+### 6. Adaptive Physical Crouch & Dynamic Height Calibration (ADR 0004 & 0005)
+Replaces hardcoded crouch offsets with dynamic player eye height calibration:
+- **Standing Height Tracking:** On startup and standing upright, the system tracks peak natural eye height (`s_standingEyeHeight`).
+- **Recenter Reset:** Whenever HMD recentering is triggered (e.g. Right Stick Click or IPC reset flag), `s_standingEyeHeight` recalibrates to the active headset position.
+- **Engagement Threshold:** Physical crouch engages when the player ducks $> 28\text{cm}$ below their calibrated standing height (or drops below $78\%$ standing height).
+- **Hysteresis Buffer:** Crouch remains held until rising within $18\text{cm}$ of standing height, completely eliminating boundary jitter while crouch-walking or ducking behind cover.
+
+### 7. Two-Handed Firearm Aim Stabilization (ADR 0005)
+Detects two-handed weapon grip to steady long-range aiming:
+- **Grip Proximity:** Distance between controller grip poses $< 25\text{cm}$.
+- **Support Hand Grip:** Off-hand grip button held (`leftController.grip > 0.45`).
+- **Disambiguation:** Active only when not in boxer guard and not reloading.
+- **Damping & Filtering:**
+  - In-game look/aim delta is attenuated with a $0.65\times$ tremor damping factor.
+  - Spherical linear interpolation (SLERP) and exponential smoothing ($\alpha = 0.35$) are applied to the weapon aim pose.
+  - Off-hand 'E' interact input is suppressed while steadying the weapon.
+  - Delivers subtle dual haptic feedback ($0.25$ amplitude) upon engaging.
+
 ---
 
 ## Consequences
 
 ### Positive
+- **Universal Ergonomics:** Adaptive crouch accommodates tall players, seated play, and differing play spaces without manual configuration.
+- **Precision Aiming:** Two-handed rifle and sniper aiming removes micro-tremors and tracking noise.
 - **Rock-Solid Guard Stance:** Raising fists enters block mode consistently without stutter or accidental immobilization.
 - **Fluid Combat Flow:** Boxer guard transitions seamlessly into jabs, hooks, and uppercuts with zero input latency.
 - **Natural Firearms Handling:** Bringing hands together or grabbing at the waist reloads weapons intuitively without looking for controller buttons.
