@@ -260,6 +260,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     static float s_prevCtrlPitch = 0.0f;
     static float s_accumulatedLookX = 0.0f;
     static float s_accumulatedLookY = 0.0f;
+    static float s_lastHmdYaw = 0.0f;
 
     if (vrState.hmdPose.isValid && !vrState.cinemaMode) {
         float qx = vrState.hmdPose.orientation.x;
@@ -276,6 +277,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
             // Yaw (rotation around Y axis: left/right)
             float currentYaw = atan2f(2.0f * (qw * qy + qz * qx), 1.0f - 2.0f * (qx * qx + qy * qy));
+            s_lastHmdYaw = currentYaw;
 
             // Pitch (rotation around X axis: up/down)
             float sinPitch = 2.0f * (qw * qx - qy * qz);
@@ -486,6 +488,63 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             SendKey('C', s_isPhysicallyCrouched);
             if (s_isPhysicallyCrouched) {
                 vrState.leftHapticPulse = 0.2f;
+            }
+        }
+    }
+
+    // 1b. Adaptive Stealth Wall-Peeking & Dynamic Torso Leaning (ADR 0004 & 0010)
+    // Tracks horizontal head displacement relative to calibrated torso base origin:
+    // - Deadband [0, 0.38m]: Riddick's floor collision capsule remains safely behind wall cover while head peeks around corners
+    // - Lateral lean detection (|Lean_right| > 0.15m): Signals stealth corner peek stance with subtle tactile haptic cue (0.15)
+    // - Displacement > 0.38m: Torso origin smoothly tracks player translation to prevent roomscale detachment
+    static float s_torsoBaseX = 0.0f;
+    static float s_torsoBaseZ = 0.0f;
+    static bool s_hasTorsoBase = false;
+    static bool s_isStealthPeeking = false;
+
+    if (vrState.hmdPose.isValid) {
+        float hmdX = vrState.hmdPose.position.x;
+        float hmdZ = vrState.hmdPose.position.z;
+
+        if (!s_hasTorsoBase || vrState.shouldRecenter) {
+            s_torsoBaseX = hmdX;
+            s_torsoBaseZ = hmdZ;
+            s_hasTorsoBase = true;
+            s_isStealthPeeking = false;
+        } else {
+            // Horizontal displacement from torso base
+            float dispX = hmdX - s_torsoBaseX;
+            float dispZ = hmdZ - s_torsoBaseZ;
+            float horizDist = sqrtf(dispX * dispX + dispZ * dispZ);
+
+            // Decompose into lateral (right/left) and longitudinal (forward/back) lean using stabilized heading
+            float cosY = cosf(s_lastHmdYaw);
+            float sinY = sinf(s_lastHmdYaw);
+            // Right vector is (cosY, -sinY), Forward vector is (-sinY, -cosY)
+            float leanRight = dispX * cosY - dispZ * sinY;
+            float leanForward = -dispX * sinY - dispZ * cosY;
+
+            // Lateral corner peek detection threshold: 15cm lateral head shift
+            bool wantPeek = (fabsf(leanRight) > 0.15f);
+            if (wantPeek != s_isStealthPeeking) {
+                s_isStealthPeeking = wantPeek;
+                if (s_isStealthPeeking) {
+                    VR_LOG_INFO("Stealth Stance: CORNER WALL-PEEK engaged (LeanRight: %.2fm, LeanFwd: %.2fm, Crouched: %s)",
+                        leanRight, leanForward, s_isPhysicallyCrouched ? "YES" : "NO");
+                    vrState.leftHapticPulse = 0.15f; // Subtle stealth confirmation pulse
+                } else {
+                    VR_LOG_INFO("Stealth Stance: CORNER WALL-PEEK disengaged");
+                }
+            }
+
+            // Exceeding 38cm roomscale lean: softly slide torso origin along with player
+            constexpr float MAX_LEAN_RADIUS = 0.38f;
+            if (horizDist > MAX_LEAN_RADIUS) {
+                float excess = horizDist - MAX_LEAN_RADIUS;
+                float dirX = dispX / horizDist;
+                float dirZ = dispZ / horizDist;
+                s_torsoBaseX += dirX * excess;
+                s_torsoBaseZ += dirZ * excess;
             }
         }
     }

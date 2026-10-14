@@ -1094,6 +1094,7 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
         XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
         XrCompositionLayerQuad quadLayer{XR_TYPE_COMPOSITION_LAYER_QUAD};
         XrCompositionLayerQuad wristQuadLayer{XR_TYPE_COMPOSITION_LAYER_QUAD};
+        XrCompositionLayerQuad weaponAmmoQuadLayer{XR_TYPE_COMPOSITION_LAYER_QUAD};
         XrCompositionLayerProjectionView projViews[2] = {
             {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},
             {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}
@@ -1288,6 +1289,65 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
                         wristQuadLayer.size.height = 0.06f; // 6 cm gauntlet display height
 
                         layers.push_back((XrCompositionLayerBaseHeader*)&wristQuadLayer);
+                    }
+                }
+
+                // Diegetic Weapon Ammo Counter & Holo-Display on Right Hand Weapon Receiver (ADR 0010)
+                if (clientState.rightController.gripPose.isValid) {
+                    const auto& weaponPose = clientState.rightController.aimPose.isValid ?
+                        clientState.rightController.aimPose : clientState.rightController.gripPose;
+
+                    // Local offset on firearm receiver / slide backplate:
+                    // Aim pose: forward is -Z, Up is +Y, Right is +X.
+                    // Slide backplate is located along +Z (+0.06m) and slightly elevated along +Y (+0.025m)
+                    RiddickVRVector3 localOffset = { 0.0f, 0.025f, 0.060f };
+                    RiddickVRVector3 worldOffset = RotateVectorByQuat(localOffset, weaponPose.orientation);
+
+                    XrPosef ammoPose{};
+                    ammoPose.position.x = weaponPose.position.x + worldOffset.x;
+                    ammoPose.position.y = weaponPose.position.y + worldOffset.y;
+                    ammoPose.position.z = weaponPose.position.z + worldOffset.z;
+
+                    // Face rearward towards shooter (+Z in aim pose):
+                    // Rotate 180 degrees around Y axis so quad normal (+Z) points directly along aim pose +Z (towards shooter's eyes)
+                    // Q_rel = (0, 1, 0, 0)
+                    RiddickVRQuaternion qRel = { 0.0f, 1.0f, 0.0f, 0.0f };
+                    ammoPose.orientation = MultiplyQuaternions(weaponPose.orientation, qRel);
+
+                    // Aim / Sight alignment check: verify rear of receiver faces towards player's HMD
+                    RiddickVRQuaternion quadQuat = { ammoPose.orientation.x, ammoPose.orientation.y, ammoPose.orientation.z, ammoPose.orientation.w };
+                    RiddickVRVector3 normalWorld = RotateVectorByQuat({ 0.0f, 0.0f, 1.0f }, quadQuat);
+
+                    float toHmdX = m_locatedViews[0].pose.position.x - ammoPose.position.x;
+                    float toHmdY = m_locatedViews[0].pose.position.y - ammoPose.position.y;
+                    float toHmdZ = m_locatedViews[0].pose.position.z - ammoPose.position.z;
+                    float distSq = toHmdX * toHmdX + toHmdY * toHmdY + toHmdZ * toHmdZ;
+
+                    if (distSq > 0.0001f) {
+                        float invDist = 1.0f / sqrtf(distSq);
+                        float ammoGlanceDot = (normalWorld.x * toHmdX + normalWorld.y * toHmdY + normalWorld.z * toHmdZ) * invDist;
+
+                        // Display when rear receiver is facing player within ~70 degree viewing cone (dot > 0.35f)
+                        if (ammoGlanceDot > 0.35f) {
+                            weaponAmmoQuadLayer.layerFlags = 0;
+                            weaponAmmoQuadLayer.space = m_appSpace ? m_appSpace : (m_viewSpace ? m_viewSpace : XR_NULL_HANDLE);
+                            weaponAmmoQuadLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                            weaponAmmoQuadLayer.subImage.swapchain = m_swapchains[0].handle;
+
+                            // Crop bottom-right weapon ammo / clip indicator from swapchain
+                            int32_t ammoX = static_cast<int32_t>(m_swapchains[0].width * 0.75f);
+                            int32_t ammoY = static_cast<int32_t>(m_swapchains[0].height * 0.75f);
+                            int32_t ammoW = static_cast<int32_t>(m_swapchains[0].width * 0.23f);
+                            int32_t ammoH = static_cast<int32_t>(m_swapchains[0].height * 0.23f);
+                            weaponAmmoQuadLayer.subImage.imageRect.offset = { ammoX, ammoY };
+                            weaponAmmoQuadLayer.subImage.imageRect.extent = { ammoW, ammoH };
+
+                            weaponAmmoQuadLayer.pose = ammoPose;
+                            weaponAmmoQuadLayer.size.width = 0.055f;  // 5.5 cm weapon display width
+                            weaponAmmoQuadLayer.size.height = 0.040f; // 4.0 cm weapon display height
+
+                            layers.push_back((XrCompositionLayerBaseHeader*)&weaponAmmoQuadLayer);
+                        }
                     }
                 }
             }
