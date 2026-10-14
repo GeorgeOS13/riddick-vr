@@ -1286,6 +1286,36 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 vrState.leftHapticPulse = 0.95f; // Heavy bulkhead slam impact (120 Hz)
                 vrState.rightHapticPulse = 0.95f;
             }
+
+            // Sub-Level Mining Cart Handbrake & Throttle (ADR 0048)
+            static DWORD s_lastCartRumbleTime = 0;
+            bool rightAtCartLever = (rightLocal.z > -0.35f && rightLocal.z < -0.15f) && (vrState.rightController.grip > 0.50f);
+            if (rightAtCartLever) {
+                if (rVel.z < -0.35f) {
+                    SendKey('W', true); // Open cart throttle
+                    SendKey('S', false);
+                } else if (rVel.z > 0.35f) {
+                    SendKey('S', true); // Friction handbrake
+                    SendKey('W', false);
+                }
+                // Continuous rail shudder haptics
+                if (now - s_lastCartRumbleTime > 180) {
+                    s_lastCartRumbleTime = now;
+                    vrState.rightHapticPulse = 0.40f; // Steel wheel rail shudder (60 Hz)
+                }
+            }
+
+            // Heavy Mech Cockpit Canopy Slam (ADR 0049)
+            bool bothOverheadMech = (leftLocal.y > 0.20f && rightLocal.y > 0.20f) &&
+                                    (vrState.leftController.grip > 0.50f && vrState.rightController.grip > 0.50f) &&
+                                    (lVel.y < -0.45f && rVel.y < -0.45f);
+            if (bothOverheadMech && (now - s_lastEnvInteractTime > 800)) {
+                s_lastEnvInteractTime = now;
+                VR_LOG_INFO("Environmental Gesture: MECH COCKPIT CANOPY SLAMMED & SEALED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
+                SendKeyTap('E');
+                vrState.leftHapticPulse = 0.85f; // Pneumatic hermetic lock surge (120 Hz)
+                vrState.rightHapticPulse = 0.85f;
+            }
         }
     }
 
@@ -1490,6 +1520,53 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         }
     }
 
+    // Guard Subdue Chokehold & Silent Neck Snap (ADR 0047)
+    // Sneaking in crouch/prone with left arm wrapped across chest level (Z in [-0.35, -0.15]m, Y in [-0.20, +0.10]m) with Left Grip
+    static bool s_isChokeholding = false;
+    static DWORD s_lastChokeStruggleTime = 0;
+    bool inChokeholdZone = (s_isPhysicallyCrouched || s_isStealthPeeking || s_isDeepProne) &&
+                           s_leftGripDown && (leftLocal.z > -0.35f && leftLocal.z < -0.15f) &&
+                           (leftLocal.y > -0.20f && leftLocal.y < 0.10f) &&
+                           (fabsf(leftLocal.x) < 0.25f);
+    if (inChokeholdZone) {
+        if (!s_isChokeholding) {
+            s_isChokeholding = true;
+            VR_LOG_INFO("Stealth Takedown: REAR CHOKEHOLD GRAPPLE engaged");
+            vrState.leftHapticPulse = 0.45f; // Rhythmic struggle pulse (100 Hz)
+        }
+        if (now - s_lastChokeStruggleTime > 300) {
+            s_lastChokeStruggleTime = now;
+            vrState.leftHapticPulse = 0.40f;
+        }
+        // Cervical Twist Finisher: rapid lateral jerk of right hand (|rVel.x| > 0.80 m/s)
+        if (fabsf(rVel.x) > 0.80f || fabsf(rVel.y) > 0.80f) {
+            s_isChokeholding = false;
+            VR_LOG_INFO("Stealth Takedown: SILENT CERVICAL NECK SNAP FINISHER executed (Vx: %.2f m/s)", rVel.x);
+            mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+            mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+            vrState.rightHapticPulse = 0.95f; // Bone-cracking crunch (280 Hz)
+            vrState.leftHapticPulse = 0.95f;
+        }
+    } else {
+        if (s_isChokeholding) {
+            s_isChokeholding = false;
+            VR_LOG_INFO("Stealth Takedown: REAR CHOKEHOLD released");
+        }
+    }
+
+    // Inmate Bunk Mattress Stash Search (ADR 0050)
+    static DWORD s_lastBunkSearchTime = 0;
+    bool leftHoldingMattress = (s_isPhysicallyCrouched || s_isDeepProne) &&
+                               s_leftGripDown && (leftLocal.y > -0.55f && leftLocal.y < -0.25f);
+    bool rightSweepingUnder = (rightLocal.z < -0.30f) && (fabsf(rVel.x) > 0.35f);
+    if (leftHoldingMattress && rightSweepingUnder && (now - s_lastBunkSearchTime > 900)) {
+        s_lastBunkSearchTime = now;
+        VR_LOG_INFO("Environmental Gesture: INMATE BUNK MATTRESS STASH SEARCH (SweepVx: %.2f m/s)", rVel.x);
+        SendKeyTap('E');
+        vrState.rightHapticPulse = 0.60f; // Metallic discovery chime haptic (200 Hz)
+        vrState.leftHapticPulse = 0.30f;
+    }
+
     // Right Grip -> Weapon Reload ('R') (suppressed during ladder climb)
     bool wantRightGrip = !isClimbingActive && (vrState.rightController.grip > 0.5f);
     if (wantRightGrip != s_rightGripDown) {
@@ -1551,11 +1628,22 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     bool prevDualStick = prevStickLeft && prevStickRight;
 
     if (dualStick && !prevDualStick) {
-        VR_LOG_INFO("Cybernetic Uplink: EMERGENCY NEURAL EJECTION / DRONE DISCONNECT triggered (Dual-Stick Click)");
-        SendKeyTap(VK_ESCAPE);
-        SendKeyTap('E');
-        vrState.leftHapticPulse = 0.85f;  // Intense static burst (280 Hz)
-        vrState.rightHapticPulse = 0.85f;
+        bool dualGrip = (vrState.leftController.grip > 0.55f && vrState.rightController.grip > 0.55f);
+        if (dualGrip) {
+            // Emergency Mech Cockpit Purge / Canopy Blow (ADR 0049)
+            VR_LOG_INFO("Cockpit Systems: EMERGENCY MECH CANOPY BOLTS BLOWN / PILOT EJECTION");
+            SendKeyTap(VK_ESCAPE);
+            SendKeyTap('E');
+            SendKeyTap(VK_SPACE);
+            vrState.leftHapticPulse = 0.95f; // Explosive canopy bolt decompression
+            vrState.rightHapticPulse = 0.95f;
+        } else {
+            VR_LOG_INFO("Cybernetic Uplink: EMERGENCY NEURAL EJECTION / DRONE DISCONNECT triggered (Dual-Stick Click)");
+            SendKeyTap(VK_ESCAPE);
+            SendKeyTap('E');
+            vrState.leftHapticPulse = 0.85f;  // Intense static burst (280 Hz)
+            vrState.rightHapticPulse = 0.85f;
+        }
     } else {
         // Left Thumbstick Click -> Crouch Toggle ('C')
         if (stickLeft && !prevStickLeft) {

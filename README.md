@@ -77,6 +77,10 @@ Key technical choices, trade-offs, and implementation strategies are documented 
 | [**ADR-0044**](docs/adr/0044-manual-bulkhead-handwheel-spindle-cranking.md) | Manual Bulkhead Handwheel Spindle Cranking | Interactions: Circular tangential hand revolutions with 160Hz dogging ratchet clicks (0.45) |
 | [**ADR-0045**](docs/adr/0045-inmate-gambling-dice-shaking-and-roll-throwing.md) | Inmate Gambling Dice Shaking & Roll Throwing | Mini-Games: Cupped hand reciprocating shake rattle (160Hz, 0.30) and roll throw release |
 | [**ADR-0046**](docs/adr/0046-atmospheric-hull-rupture-and-emergency-blast-shield.md) | Decompression Rupture & Emergency Blast Shield | Narrative: Dual-hand overhead latch (Y > 0.25m) and downward pull (Vy < -0.5m/s) 0.95 slam |
+| [**ADR-0047**](docs/adr/0047-guard-subdue-chokehold-and-silent-neck-snap.md) | Guard Subdue Chokehold & Silent Neck Snap | Stealth: Rear chest chokehold (100Hz struggle) with lateral twist cervical snap (280Hz, 0.95) |
+| [**ADR-0048**](docs/adr/0048-mining-cart-handbrake-and-rail-shunting.md) | Mining Cart Handbrake & Rail Shunting | Locomotion: Lever push/pull throttle & braking with 60Hz steel wheel rail shudder (0.40) |
+| [**ADR-0049**](docs/adr/0049-heavy-mech-cockpit-canopy-and-seal-purge.md) | Heavy Mech Cockpit Canopy & Emergency Seal Purge | Vehicles: Overhead canopy slam down (0.85 surge) and dual-grip/stick emergency ejection |
+| [**ADR-0050**](docs/adr/0050-inmate-bunk-mattress-stash-search-and-shiv-concealment.md) | Inmate Bunk Mattress Stash Search & Contraband | Exploration: Crouched off-hand mattress lift with dominant under-bed sweep (200Hz chime) |
 
 ---
 
@@ -87,7 +91,7 @@ riddick-vr/
 ├── .github/
 │   └── ISSUE_TEMPLATE/       # Templates for bug reports and feature requests
 ├── docs/
-│   └── adr/                  # Architectural Decision Records (ADR 0001 - 0046)
+│   └── adr/                  # Architectural Decision Records (ADR 0001 - 0050)
 ├── include/
 │   └── riddick_vr_protocol.h # IPC shared state, poses, matrix, controller formats
 ├── src/
