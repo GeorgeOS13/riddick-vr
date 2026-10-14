@@ -816,11 +816,11 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         }
     }
 
-    // 6. Eyeshine / Night Vision Temple Gesture (tapping side of head)
+    // 7. Eyeshine / Night Vision Temple Gesture (tapping side of head)
     static DWORD s_lastEyeshineGestureTime = 0;
     bool handNearHead = (vrState.rightController.gripPose.position.y > 0.08f && fabsf(vrState.rightController.gripPose.position.x) > 0.12f && vrState.rightController.grip > 0.5f) ||
                         (vrState.leftController.gripPose.position.y > 0.08f && fabsf(vrState.leftController.gripPose.position.x) > 0.12f && vrState.leftController.grip > 0.5f);
-    if (handNearHead && now - s_lastEyeshineGestureTime > 1500) {
+    if (!isClimbingActive && handNearHead && now - s_lastEyeshineGestureTime > 1500) {
         s_lastEyeshineGestureTime = now;
         VR_LOG_INFO("Tactical Gesture: EYESHINE toggled");
         SendKeyTap('Q'); // Native Riddick Eyeshine key
@@ -829,7 +829,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         vrState.leftHapticPulse = 0.8f;
     }
 
-    // 7. Aim & Block (Unified Physical Boxer Guard + Left Trigger Aim/Block)
+    // 8. Aim & Block (Unified Physical Boxer Guard + Left Trigger Aim/Block)
     // In Riddick:
     // Right Mouse Button (ACTION_SECONDARYFIRE 241) = Guard / Block when unarmed/melee, Aim/Zoom when holding firearms.
     static bool s_rightTriggerDown = false;
@@ -867,23 +867,24 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         }
     }
 
-    // Left Grip -> Grab / Secondary Interact ('E') (suppressed during two-handed stabilization)
-    bool wantLeftGrip = !s_twoHandedStabilizationActive && (vrState.leftController.grip > 0.5f);
+    // 9. Left & Right Grip Mapping (Interactions, Climbing, Reload)
+    // Left Grip -> Grab / Secondary Interact ('E') (suppressed during ladder climb or two-handed stabilization)
+    bool wantLeftGrip = !isClimbingActive && !s_twoHandedStabilizationActive && (vrState.leftController.grip > 0.5f);
     if (wantLeftGrip != s_leftGripDown) {
         SendKey('E', wantLeftGrip);
         s_leftGripDown = wantLeftGrip;
         if (wantLeftGrip) vrState.leftHapticPulse = 0.3f;
     }
 
-    // Right Grip -> Weapon Reload ('R')
-    bool wantRightGrip = vrState.rightController.grip > 0.5f;
+    // Right Grip -> Weapon Reload ('R') (suppressed during ladder climb)
+    bool wantRightGrip = !isClimbingActive && (vrState.rightController.grip > 0.5f);
     if (wantRightGrip != s_rightGripDown) {
         SendKey('R', wantRightGrip);
         s_rightGripDown = wantRightGrip;
         if (wantRightGrip) vrState.rightHapticPulse = 0.5f;
     }
 
-    // 9. Face Buttons Mapping
+    // 10. Face Buttons Mapping
 
     // BUTTON A -> PRIMARY INTERACT / USE / TALK / OPEN / CLIMB / MENU CONFIRM / INTRO SKIP
     bool btnA = (btns & RIDDICK_VR_BTN_A) != 0;
