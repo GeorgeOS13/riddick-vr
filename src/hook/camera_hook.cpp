@@ -1951,6 +1951,28 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 vrState.rightHapticPulse = 0.85f; // Heavy iron rail clank & ground shudder (70 Hz)
             }
 
+            // Subterranean Mining Rail Turntable Manual Push Lever (ADR 0108)
+            static DWORD s_lastTurntablePushTime = 0;
+            static int s_turntablePushCount = 0;
+            bool handAtTurntableLever = (rightLocal.z > -0.45f && rightLocal.z < -0.16f) &&
+                                        (rightLocal.y > -0.40f && rightLocal.y < -0.05f) &&
+                                        (vrState.rightController.grip > 0.55f);
+            bool turntableTangentialPush = (fabsf(rVel.x) > 0.50f || fabsf(rVel.z) > 0.50f);
+            if (handAtTurntableLever && turntableTangentialPush && (now - s_lastTurntablePushTime > 250)) {
+                s_lastTurntablePushTime = now;
+                s_turntablePushCount++;
+                VR_LOG_INFO("Environmental Gesture: MINING RAIL TURNTABLE ROTATION STRIDE #%d (Speed: %.2f m/s)", s_turntablePushCount, rSpeed);
+                vrState.rightHapticPulse = 0.65f; // Heavy ball-bearing grinding rumble (55 Hz)
+                if (s_turntablePushCount >= 3) {
+                    s_turntablePushCount = 0;
+                    VR_LOG_INFO("Environmental Gesture: MINING RAIL TURNTABLE LOCKED INTO QUADRANT DETENT");
+                    SendKeyTap('E');
+                    SendKeyTap(VK_SPACE);
+                    SendKeyTap(VK_TAB);
+                    vrState.rightHapticPulse = 0.90f; // Concussive mechanical detent lock (80 Hz)
+                }
+            }
+
             // Dark Athena EVA Airlock Manual Handwheel Decompression Dogging (ADR 0078)
             static DWORD s_lastAirlockCrankTime = 0;
             static int s_airlockCrankCount = 0;
@@ -2125,6 +2147,22 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 if (rVel.y < -0.45f) vrState.rightHapticPulse = 0.70f; // Steel cable tension & relay click (160 Hz)
                 if (lVel.y < -0.45f) vrState.leftHapticPulse = 0.70f;
             }
+
+            // Dark Athena EVA Solar Flare Radiation Shelter Bulkhead Seal (ADR 0109)
+            static DWORD s_lastSolarBulkheadTime = 0;
+            bool bothOverheadRadiationBulkhead = (leftLocal.y > 0.22f && rightLocal.y > 0.22f) &&
+                                                 (leftLocal.z > -0.30f && leftLocal.z < 0.05f && rightLocal.z > -0.30f && rightLocal.z < 0.05f) &&
+                                                 (vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f);
+            bool violentDownwardBulkheadSlam = (lVel.y < -1.10f && rVel.y < -1.10f);
+            if (bothOverheadRadiationBulkhead && violentDownwardBulkheadSlam && (now - s_lastSolarBulkheadTime > 2500)) {
+                s_lastSolarBulkheadTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA SOLAR FLARE RADIATION SHELTER BULKHEAD SLAMMED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
+                SendKeyTap('E');
+                SendKeyTap('C');
+                SendKeyTap(VK_SPACE);
+                vrState.leftHapticPulse = 0.98f;  // Deep lead door structural impact shockwave (40 Hz)
+                vrState.rightHapticPulse = 0.98f;
+            }
         }
     }
 
@@ -2233,6 +2271,18 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         }
     } else {
         s_triggerHoldStartTime = 0;
+    }
+
+    // Heavy Mech Rotary Chaingun Dual-Hand Recoil Compensation (ADR 0107)
+    static DWORD s_lastRecoilCompTime = 0;
+    bool isDualHandBracedChaingun = s_twoHandedStabilizationActive && (vrState.rightController.trigger > 0.80f) && (vrState.leftController.grip > 0.60f);
+    if (isDualHandBracedChaingun && (s_triggerHoldStartTime != 0) && (now - s_triggerHoldStartTime > 300)) {
+        if (now - s_lastRecoilCompTime > 90) {
+            s_lastRecoilCompTime = now;
+            vrState.rightHapticPulse = 0.65f; // Mechanical bolt cycling (160 Hz)
+            vrState.leftHapticPulse = 0.70f;  // Heavy hydraulic chassis counter-torque (110 Hz)
+            s_recoilKickPitch *= 0.35f;       // Active kinematic muzzle climb clamp
+        }
     }
 
     // Security Tranq Gun Tactile Capacitor Charging (ADR 0039)
@@ -2515,6 +2565,20 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         SendKeyTap('E');
         vrState.rightHapticPulse = 0.60f; // Metallic discovery chime haptic (200 Hz)
         vrState.leftHapticPulse = 0.30f;
+    }
+
+    // Inmate Bunk Shiv Sheath Concealment Under Mattress Frame (ADR 0110)
+    static DWORD s_lastBunkConcealTime = 0;
+    bool leftLiftingMattress = (s_isPhysicallyCrouched || s_isDeepProne) &&
+                               s_leftGripDown && (leftLocal.y > -0.45f && leftLocal.y < -0.15f);
+    bool rightThrustingIntoSlat = (rightLocal.z > -0.42f && rightLocal.z < -0.14f) && (rVel.z < -0.65f);
+    if (leftLiftingMattress && rightThrustingIntoSlat && (now - s_lastBunkConcealTime > 1500)) {
+        s_lastBunkConcealTime = now;
+        VR_LOG_INFO("Environmental Gesture: INMATE BUNK SHIV SHEATH CONCEALED UNDER MATTRESS FRAME (Vz: %.2f m/s)", rVel.z);
+        SendKeyTap('3'); // Holster / stow shiv weapon
+        SendKeyTap('E');
+        vrState.leftHapticPulse = 0.35f;  // Mattress wire tension hum (120 Hz)
+        vrState.rightHapticPulse = 0.60f; // Spring-steel sheath latch click (240 Hz)
     }
 
     // Right Grip -> Weapon Reload ('R') (suppressed during ladder climb)
