@@ -1292,8 +1292,10 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
                         wristQuadLayer.subImage.swapchain = m_swapchains[0].handle;
 
                         // Crop upper-left health box and stealth eyeshine status region from swapchain
-                        int32_t hudW = static_cast<int32_t>(m_swapchains[0].width * 0.26f);
-                        int32_t hudH = static_cast<int32_t>(m_swapchains[0].height * 0.16f);
+                        float cropW = clientState.eyeshineActive ? 0.28f : 0.26f;
+                        float cropH = clientState.eyeshineActive ? 0.18f : 0.16f;
+                        int32_t hudW = static_cast<int32_t>(m_swapchains[0].width * cropW);
+                        int32_t hudH = static_cast<int32_t>(m_swapchains[0].height * cropH);
                         wristQuadLayer.subImage.imageRect.offset = { 0, 0 };
                         wristQuadLayer.subImage.imageRect.extent = { hudW, hudH };
 

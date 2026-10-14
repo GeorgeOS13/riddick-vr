@@ -937,13 +937,15 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         }
     }
 
-    // 6c. Spatial Weapon Holstering & Physical Inventory Gestures (ADR 0015)
+    // 6c. Spatial Weapon Holstering & Physical Inventory Gestures (ADR 0015 & 0021)
     // - Right Hand Over-Shoulder (Y > 0.15m, Z > -0.05m, grip > 0.50): Equips / Holsters Primary Weapon ('1')
+    // - Right Hand Chest Bandolier (Y in [-0.22, 0.05], |X| < 0.14, Z > -0.25, grip > 0.50): Equips Grenades ('4')
     // - Right Hand Hip Draw (Y < -0.32m, X > 0.14m, grip > 0.50): Equips / Holsters Sidearm / Pistol ('2')
     // - Left Hand Hip Draw (Y < -0.32m, X < -0.14m, grip > 0.50): Equips / Draws Melee Blades / Ulaks ('3')
     static DWORD s_lastHolsterTime = 0;
     if (!isClimbingActive && !s_physicalBlockEngaged && !s_twoHandedStabilizationActive && (now - s_lastHolsterTime > 900)) {
         bool rightOverShoulder = (rightLocal.y > 0.15f && rightLocal.z > -0.05f && vrState.rightController.grip > 0.50f);
+        bool rightAtChest = (rightLocal.y >= -0.22f && rightLocal.y <= 0.05f && fabsf(rightLocal.x) < 0.14f && rightLocal.z > -0.25f && vrState.rightController.grip > 0.50f);
         bool rightAtHip = (rightLocal.y < -0.32f && rightLocal.x > 0.14f && vrState.rightController.grip > 0.50f);
         bool leftAtHip = (leftLocal.y < -0.32f && leftLocal.x < -0.14f && vrState.leftController.grip > 0.50f);
 
@@ -952,6 +954,11 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             VR_LOG_INFO("Holster Gesture: PRIMARY WEAPON slot toggled (Over-Shoulder)");
             SendKeyTap('1');
             vrState.rightHapticPulse = 0.75f; // Solid mechanical latch pulse
+        } else if (rightAtChest) {
+            s_lastHolsterTime = now;
+            VR_LOG_INFO("Holster Gesture: TACTICAL GRENADE slot toggled (Chest Bandolier)");
+            SendKeyTap('4');
+            vrState.rightHapticPulse = 0.65f; // Grenade bandolier snap pulse
         } else if (rightAtHip) {
             s_lastHolsterTime = now;
             VR_LOG_INFO("Holster Gesture: SIDEARM / PISTOL slot toggled (Right Hip)");
@@ -962,6 +969,33 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             VR_LOG_INFO("Holster Gesture: MELEE / ULAK slot toggled (Left Hip)");
             SendKeyTap('3');
             vrState.leftHapticPulse = 0.70f; // Metallic blade unsheathe pulse
+        }
+    }
+
+    // 6e. Tactical Grenade Priming & Pin-Pulling Gesture (ADR 0021)
+    // Bringing off-hand to right hand (< 16cm) with Left Grip pulls the grenade pin (mouse LMB Down cook)
+    static bool s_grenadePrimed = false;
+    static DWORD s_lastPinPullTime = 0;
+    if (!isClimbingActive && !s_physicalBlockEngaged && !s_twoHandedStabilizationActive) {
+        float handProximity = sqrtf(
+            powf(leftLocal.x - rightLocal.x, 2) +
+            powf(leftLocal.y - rightLocal.y, 2) +
+            powf(leftLocal.z - rightLocal.z, 2)
+        );
+
+        if (!s_grenadePrimed && handProximity < 0.16f && vrState.leftController.grip > 0.50f && (now - s_lastPinPullTime > 1200)) {
+            s_lastPinPullTime = now;
+            s_grenadePrimed = true;
+            VR_LOG_INFO("Tactical Gesture: GRENADE PIN PULLED / PRIMED (Hand Proximity: %.2fm)", handProximity);
+            mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0); // Begin throw cook
+            vrState.leftHapticPulse = 0.75f; // Sharp metallic cotter pin friction (180 Hz)
+            vrState.rightHapticPulse = 0.50f;
+        } else if (s_grenadePrimed && (rSpeed > 1.2f || vrState.rightController.trigger < 0.20f)) {
+            // Throw release: dynamic forward arm swing or releasing right hand
+            s_grenadePrimed = false;
+            VR_LOG_INFO("Tactical Gesture: GRENADE LAUNCHED / THROWN (Speed: %.2f m/s)", rSpeed);
+            mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+            vrState.rightHapticPulse = 0.60f; // Throw release impulse
         }
     }
 
@@ -1050,6 +1084,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             vrState.leftHapticPulse = 0.75f; // Mechanical click pulse
         }
     }
+
+    vrState.eyeshineActive = s_eyeshineActive;
+    vrState.flashlightActive = s_flashlightActive;
 
     // 8. Aim & Block (Unified Physical Boxer Guard + Left Trigger Aim/Block)
     // In Riddick:

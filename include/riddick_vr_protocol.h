@@ -80,6 +80,9 @@ struct RiddickVRSharedState {
     bool shouldRecenter;
     bool clientConnected;
     bool cinemaMode;         // Cinema screen mode for menus & cutscenes
+    bool eyeshineActive;     // Riddick Eyeshine night vision mode active (ADR 0022)
+    bool flashlightActive;   // Tactical shoulder flashlight active
+    uint16_t reservedFlags;  // 4-byte alignment padding
     uint32_t clientFrameCount;
     uint32_t heartbeatTimestamp;
 };
