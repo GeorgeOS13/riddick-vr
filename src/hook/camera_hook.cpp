@@ -1056,6 +1056,29 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         }
     }
 
+    // 6a-2. Inmate Toothbrush Shank Whittling & Rapid Friction Sharpening (ADR 0068)
+    static DWORD s_lastWhittleStrokeTime = 0;
+    static int s_whittleStrokeCount = 0;
+    bool crouchedForWhittle = (s_isPhysicallyCrouched || s_isDeepProne);
+    bool dominantNearFloor = (rightLocal.y < -0.45f && rightLocal.z > -0.45f && rightLocal.z < -0.15f);
+    bool grippingShank = (vrState.rightController.grip > 0.50f);
+    bool fastFrictionStroke = (fabsf(rVel.x) > 0.65f);
+    if (crouchedForWhittle && dominantNearFloor && grippingShank && fastFrictionStroke && !s_physicalBlockEngaged) {
+        if (now - s_lastWhittleStrokeTime > 180) {
+            s_lastWhittleStrokeTime = now;
+            s_whittleStrokeCount++;
+            VR_LOG_INFO("Physical Gesture: TOOTHBRUSH SHANK WHITTLING STROKE #%d (SpeedX: %.2f m/s)", s_whittleStrokeCount, rVel.x);
+            vrState.rightHapticPulse = 0.50f; // Abrasive concrete grinding pulse (200 Hz)
+            if (s_whittleStrokeCount >= 5) {
+                s_whittleStrokeCount = 0;
+                VR_LOG_INFO("Physical Gesture: IMPROVISED SHIV RAZOR TIP HONED / EQUIPPED");
+                SendKeyTap('E');
+                SendKeyTap('3'); // Equip shank slot
+                vrState.rightHapticPulse = 0.70f; // Hone completion resonance (260 Hz)
+            }
+        }
+    }
+
     // 6b. Two-Handed Firearm Stabilization (ADR 0005)
     // Detect when player brings off-hand to steady the two-handed weapon:
     // - Distance between controller grip poses < 25cm
@@ -1552,6 +1575,94 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('E');
                 SendKeyTap('Q'); // Thermal diversion signal
                 vrState.rightHapticPulse = 0.75f; // Pressurized jet stream vibration (130 Hz)
+            }
+
+            // Overhead Vent Hatch Dual-Palm Upward Shove (ADR 0067)
+            bool hmdLookingUp = (s_lastHmdPitch > 0.45f);
+            bool bothOverheadHatch = (leftLocal.y > 0.25f && rightLocal.y > 0.25f) &&
+                                     (leftLocal.z > -0.25f && leftLocal.z < 0.10f && rightLocal.z > -0.25f && rightLocal.z < 0.10f);
+            bool bothPalmsUp = (vrState.leftController.grip < 0.60f && vrState.rightController.grip < 0.60f);
+            bool bothShovingUp = (lVel.y > 0.85f && rVel.y > 0.85f);
+            if (hmdLookingUp && bothOverheadHatch && bothPalmsUp && bothShovingUp && (now - s_lastEnvInteractTime > 800)) {
+                s_lastEnvInteractTime = now;
+                VR_LOG_INFO("Environmental Gesture: OVERHEAD VENT HATCH SHOVED OPEN (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                vrState.leftHapticPulse = 0.80f; // Spring-loaded latch pop & metal resonance (160 Hz)
+                vrState.rightHapticPulse = 0.80f;
+            }
+
+            // Cryo-Chamber Emergency Oxygen Mask Quick-Don Stance (ADR 0069)
+            static DWORD s_maskHoldStartTime = 0;
+            static DWORD s_lastMaskEquipTime = 0;
+            bool handAtMouth = (leftLocal.z > -0.20f && leftLocal.z < -0.05f) &&
+                               (leftLocal.y > -0.18f && leftLocal.y < 0.06f) &&
+                               (fabsf(leftLocal.x) < 0.12f);
+            bool grippingMask = (vrState.leftController.grip > 0.50f);
+            if (handAtMouth && grippingMask) {
+                if (s_maskHoldStartTime == 0) {
+                    s_maskHoldStartTime = now;
+                } else if ((now - s_maskHoldStartTime >= 150) && (now - s_lastMaskEquipTime > 1500)) {
+                    s_lastMaskEquipTime = now;
+                    VR_LOG_INFO("Environmental Gear: EMERGENCY REBREATHER / OXYGEN MASK CLAMPED TO FACE (Y: %.2fm)", leftLocal.y);
+                    SendKeyTap('E'); // Seal environmental rebreather
+                    vrState.leftHapticPulse = 0.65f; // Pneumatic seal whoosh & inhalation pulse (110 Hz)
+                }
+            } else {
+                s_maskHoldStartTime = 0;
+            }
+
+            // Automated Turret Manual Traversal Handwheel Slew (ADR 0070)
+            static DWORD s_lastTurretGearRumble = 0;
+            static bool s_turretSteeringActive = false;
+            bool bothAtTurretStation = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && rightLocal.z > -0.42f && rightLocal.z < -0.16f) &&
+                                       (leftLocal.y > -0.30f && leftLocal.y < 0.10f && rightLocal.y > -0.30f && rightLocal.y < 0.10f);
+            bool dualGrippingTurret = (vrState.leftController.grip > 0.55f && vrState.rightController.grip > 0.55f);
+            float spadeGripDist = fabsf(leftLocal.x - rightLocal.x);
+            bool validSpadeWidth = (spadeGripDist >= 0.25f && spadeGripDist <= 0.48f);
+
+            if (bothAtTurretStation && dualGrippingTurret && validSpadeWidth) {
+                s_turretSteeringActive = true;
+                float dZ = leftLocal.z - rightLocal.z;
+                float avgY = 0.5f * (leftLocal.y + rightLocal.y);
+
+                // Azimuth / Yaw Slew (Left/Right)
+                if (dZ > 0.08f) {
+                    SendKey('D', true);
+                    SendKey('A', false);
+                } else if (dZ < -0.08f) {
+                    SendKey('A', true);
+                    SendKey('D', false);
+                } else {
+                    SendKey('A', false);
+                    SendKey('D', false);
+                }
+
+                // Elevation / Pitch Slew (Up/Down)
+                if (avgY > 0.05f) {
+                    SendKey(VK_UP, true);
+                    SendKey(VK_DOWN, false);
+                } else if (avgY < -0.18f) {
+                    SendKey(VK_DOWN, true);
+                    SendKey(VK_UP, false);
+                } else {
+                    SendKey(VK_UP, false);
+                    SendKey(VK_DOWN, false);
+                }
+
+                // Turret Hydraulic Gear Train Haptics
+                bool isMovingTurret = (fabsf(dZ) > 0.08f) || (avgY > 0.05f || avgY < -0.18f);
+                if (isMovingTurret && (now - s_lastTurretGearRumble > 160)) {
+                    s_lastTurretGearRumble = now;
+                    vrState.leftHapticPulse = 0.45f; // Deep gear train meshing rumble (55 Hz)
+                    vrState.rightHapticPulse = 0.45f;
+                }
+            } else if (s_turretSteeringActive) {
+                s_turretSteeringActive = false;
+                SendKey('A', false);
+                SendKey('D', false);
+                SendKey(VK_UP, false);
+                SendKey(VK_DOWN, false);
             }
         }
     }
