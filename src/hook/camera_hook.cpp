@@ -1135,6 +1135,26 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         }
     }
 
+    // Sustained Automatic Fire & Mech Rotary Cannon Haptic Feedback (ADR 0024):
+    static DWORD s_triggerHoldStartTime = 0;
+    static DWORD s_lastCyclicFireHaptic = 0;
+    if (wantRightTrigger) {
+        if (s_triggerHoldStartTime == 0) {
+            s_triggerHoldStartTime = now;
+        } else if (now - s_triggerHoldStartTime > 150) {
+            // Automatic fire / Rotary chaingun cycling every 90ms
+            if (now - s_lastCyclicFireHaptic > 90) {
+                s_lastCyclicFireHaptic = now;
+                vrState.rightHapticPulse = 0.68f;
+                if (s_twoHandedStabilizationActive) {
+                    vrState.leftHapticPulse = 0.42f; // Foregrip cyclic transmission
+                }
+            }
+        }
+    } else {
+        s_triggerHoldStartTime = 0;
+    }
+
     // Block / Aim: Engaged physically via Boxer Guard pose OR manually via Left Trigger
     bool wantBlock = s_physicalBlockEngaged || (vrState.leftController.trigger > 0.5f);
     s_isAimingOrBlocking = wantBlock;
@@ -1215,15 +1235,23 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         if (btnA) vrState.rightHapticPulse = 0.4f;
     }
 
-    // BUTTON B -> JUMP (Space) / BACK / DISMISS / ESCAPE / CANCEL
+    // BUTTON B -> JUMP (Space) / PHYSICAL CROUCH-JUMP (Space + C) / BACK / DISMISS / ESCAPE / CANCEL
     bool btnB = (btns & RIDDICK_VR_BTN_B) != 0;
     bool prevBtnB = (s_prevButtons & RIDDICK_VR_BTN_B) != 0;
     if (btnB != prevBtnB) {
-        SendKey(VK_SPACE, btnB);      // Jump in gameplay
+        if (btnB && s_isPhysicallyCrouched) {
+            // Physical Crouch-Jump / High Ledge Clearance (ADR 0025)
+            VR_LOG_INFO("Movement Stance: PHYSICAL CROUCH-JUMP / MANTLE CLEARANCE executed");
+            SendKey('C', true);
+            SendKey(VK_SPACE, true);
+            vrState.rightHapticPulse = 0.45f;
+        } else {
+            SendKey(VK_SPACE, btnB);      // Jump in gameplay
+        }
         SendKey(VK_ESCAPE, btnB);     // Dismiss popups / menus / smokes
         SendKey(VK_BACK, btnB);       // Back in Cube UI
         SendKey(VK_TAB, btnB);        // Dismiss Cube PDA
-        if (btnB) vrState.rightHapticPulse = 0.3f;
+        if (btnB && !s_isPhysicallyCrouched) vrState.rightHapticPulse = 0.3f;
     }
 
     // BUTTON X -> OFF-HAND INTERACT ('E') & CROUCH TOGGLE ('C') & CONFIRM

@@ -54,6 +54,8 @@ Key technical choices, trade-offs, and implementation strategies are documented 
 | [**ADR-0021**](docs/adr/0021-spatial-tactical-grenade-priming-and-pin-pulling.md) | Tactical Grenade Priming & Pin-Pulling | Weapons: Chest bandolier equip, two-handed pin-pulling, and throw release |
 | [**ADR-0022**](docs/adr/0022-diegetic-eyeshine-anti-glare-and-photopic-adaptation.md) | Diegetic Eyeshine Photopic Adaptation & IPC Sync | Visuals & UI: 4-byte aligned state synchronization and gauntlet expansion |
 | [**ADR-0023**](docs/adr/0023-heavy-scar-gun-and-turret-dual-hand-steering.md) | Heavy SCAR Gun Mine Detonation & Holstering | Gunplay: Low-spine holster draw and off-hand clench air mine detonation |
+| [**ADR-0024**](docs/adr/0024-heavy-mech-exoskeleton-and-sustained-rotary-fire.md) | Heavy Mech Exoskeleton & Sustained Rotary Fire | Combat & Haptics: Multi-band cyclic 90ms rotary recoil and foregrip transmission |
+| [**ADR-0025**](docs/adr/0025-physical-crouch-jump-and-clearance-dynamics.md) | Physical Crouch-Jump & Clearance Dynamics | Movement: Coordinated knee-tuck clearance (+0.40m) into overhead vents |
 
 ---
 
@@ -64,7 +66,7 @@ riddick-vr/
 ├── .github/
 │   └── ISSUE_TEMPLATE/       # Templates for bug reports and feature requests
 ├── docs/
-│   └── adr/                  # Architectural Decision Records (ADR 0001 - 0023)
+│   └── adr/                  # Architectural Decision Records (ADR 0001 - 0025)
 ├── include/
 │   └── riddick_vr_protocol.h # IPC shared state, poses, matrix, controller formats
 ├── src/
