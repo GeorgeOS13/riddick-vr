@@ -111,6 +111,28 @@ Detects two-handed weapon grip to steady long-range aiming:
   - Off-hand 'E' interact input is suppressed while steadying the weapon.
   - Delivers subtle dual haptic feedback ($0.25$ amplitude) upon engaging.
 
+### 8. Decoupled Motion Controller Aim Steering
+To bridge the gap between traditional screen-centered mouse aiming and VR 6DOF motion controller weapon pointing:
+- **Relative Coordinate Mapping:**
+  The relative orientation between the HMD and weapon aim controller is calculated:
+  $$Q_{rel} = Q_{hmd}^{-1} \times Q_{ctrl}$$
+  The forward gaze vector $(0, 0, -1)$ rotated by $Q_{rel}$ yields the controller line-of-sight in HMD view space:
+  $$fwdX = -2(w_{rel} y_{rel} + x_{rel} z_{rel})$$
+  $$fwdY = 2(w_{rel} x_{rel} - y_{rel} z_{rel})$$
+  $$fwdZ = -(1 - 2(x_{rel}^2 + y_{rel}^2))$$
+  The relative horizontal and vertical aim angles are extracted:
+  $$\theta_{yaw} = \text{atan2}(2(w_{rel} y_{rel} + z_{rel} x_{rel}), 1 - 2(x_{rel}^2 + y_{rel}^2))$$
+  $$\theta_{pitch} = \text{asin}(\text{clamp}(fwdY, -1, 1))$$
+- **Aim Steering & Elastic Center Pull:**
+  The frame-to-frame controller angular velocity ($\Delta_{ctrl}$) and angular displacement from center ($\theta$) are blended into mouse look:
+  $$\text{combinedYaw} = \Delta_{headYaw} + \Delta_{ctrlYaw} \cdot W_{aim} + \theta_{yaw} \cdot W_{pull}$$
+  $$\text{combinedPitch} = \Delta_{headPitch} + \Delta_{ctrlPitch} \cdot W_{aim} + \theta_{pitch} \cdot W_{pull}$$
+- **Dynamic Weighting & Disambiguation:**
+  - **ADS / Two-Handed Stabilization:** $W_{aim} = 0.75$, $W_{pull} = 0.08$. High-precision aiming pulls the crosshair directly along the weapon barrel.
+  - **Hip Fire:** $W_{aim} = 0.35$, $W_{pull} = 0.03$. Subtle steering allowing loose natural weapon pointing.
+  - **Center Deadzone:** A $\pm 2.0^\circ$ ($0.035\text{ rad}$) deadzone prevents slow camera creeping when weapons are rested forward.
+  - **Combat State Suppression:** When boxer guard (`s_physicalBlockEngaged`) or tactical reload gestures (`isReloading`) are active, $W_{aim}$ and $W_{pull}$ are completely zeroed ($0.0$), preventing erratic crosshair deflection while defending or reloading.
+
 ---
 
 ## Consequences
@@ -118,6 +140,7 @@ Detects two-handed weapon grip to steady long-range aiming:
 ### Positive
 - **Universal Ergonomics:** Adaptive crouch accommodates tall players, seated play, and differing play spaces without manual configuration.
 - **Precision Aiming:** Two-handed rifle and sniper aiming removes micro-tremors and tracking noise.
+- **Intuitive VR Gunplay:** Decoupled controller aim steering allows natural independent hand aiming, smoothly pulling the crosshair to the weapon's physical line-of-sight.
 - **Rock-Solid Guard Stance:** Raising fists enters block mode consistently without stutter or accidental immobilization.
 - **Fluid Combat Flow:** Boxer guard transitions seamlessly into jabs, hooks, and uppercuts with zero input latency.
 - **Natural Firearms Handling:** Bringing hands together or grabbing at the waist reloads weapons intuitively without looking for controller buttons.
