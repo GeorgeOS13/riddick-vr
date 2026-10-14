@@ -870,7 +870,41 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                       (lVel.y < -1.30f && rVel.y < -1.30f) &&
                                       (vrState.rightController.trigger > 0.60f && vrState.leftController.trigger > 0.60f);
 
-            if (twoHandedBatonSlam) {
+            // Mining Core Heavy Ore Sledgehammer Two-Handed Overhead Crush (ADR 0102)
+            float handsDistSledge = sqrtf(
+                powf(leftLocal.x - rightLocal.x, 2) +
+                powf(leftLocal.y - rightLocal.y, 2) +
+                powf(leftLocal.z - rightLocal.z, 2)
+            );
+            bool dualSledgeOverhead = (handsDistSledge < 0.40f) &&
+                                      (leftLocal.y > 0.28f && rightLocal.y > 0.28f) &&
+                                      (vrState.leftController.grip > 0.55f && vrState.rightController.grip > 0.55f) &&
+                                      (lVel.y < -1.40f && rVel.y < -1.40f);
+
+            // Inmate Shiv Jugular Carotid Arterial Slash (ADR 0099)
+            bool crouchedForStealth = (s_isPhysicallyCrouched || s_isDeepProne);
+            bool atThroatCorridor = (rightLocal.y > -0.12f && rightLocal.y < 0.16f) &&
+                                    (rightLocal.z > -0.34f && rightLocal.z < -0.10f) &&
+                                    (vrState.rightController.grip > 0.50f);
+            bool carotidSlice = (fabsf(rVel.x) > 1.25f);
+            bool stealthCarotidSlash = crouchedForStealth && atThroatCorridor && carotidSlice;
+
+            if (dualSledgeOverhead) {
+                VR_LOG_INFO("Physical Gesture: HEAVY ORE SLEDGEHAMMER OVERHEAD CRUSH (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
+                SendKey('S', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('S', false);
+                vrState.rightHapticPulse = 0.98f; // Catastrophic blunt fracture shockwave (80 Hz)
+                vrState.leftHapticPulse = 0.98f;
+            } else if (stealthCarotidSlash) {
+                VR_LOG_INFO("Physical Stealth: CAROTID ARTERIAL JUGULAR SLASH (SpeedX: %.2f m/s, Ry: %.2f)", rVel.x, rightLocal.y);
+                SendKey('W', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('W', false);
+                vrState.rightHapticPulse = 0.95f; // Arterial release incision & spray (260 Hz)
+            } else if (twoHandedBatonSlam) {
                 VR_LOG_INFO("Physical Gesture: TWO-HANDED STUN BATON DEFIBRILLATOR SLAM (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
                 SendKey('S', true);
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
@@ -1214,6 +1248,21 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         SendKeyTap('E');
         SendKeyTap(VK_TAB);
         vrState.rightHapticPulse = 0.45f; // Cloth pocket rustle confirmation (180 Hz)
+    }
+
+    // 6a-7. Security Guard Taser Wire Snip & Circuit Disarm (ADR 0101)
+    static DWORD s_lastTaserSnipTime = 0;
+    bool handAtChestCables = (fabsf(rightLocal.x) < 0.15f) &&
+                             (rightLocal.y > -0.18f && rightLocal.y < 0.10f) &&
+                             (rightLocal.z > -0.24f && rightLocal.z < -0.05f) &&
+                             (vrState.rightController.grip > 0.50f);
+    bool wireShearSlice = (fabsf(rVel.x) > 0.90f);
+    if (handAtChestCables && wireShearSlice && !s_physicalBlockEngaged && (now - s_lastTaserSnipTime > 1200)) {
+        s_lastTaserSnipTime = now;
+        VR_LOG_INFO("Tactical Defense: GUARD TASER WIRE SNIPPED / CIRCUIT GROUNDED (Vx: %.2f m/s)", rVel.x);
+        SendKeyTap('E');
+        SendKeyTap('3'); // Ground discharge into shiv blade
+        vrState.rightHapticPulse = 0.75f; // Dielectric wire shear snap (220 Hz)
     }
 
     // 6b. Two-Handed Firearm Stabilization (ADR 0005)
@@ -2001,6 +2050,21 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_RETURN);
                 vrState.leftHapticPulse = 0.50f; // Electronic card read chirp (220 Hz)
                 vrState.rightHapticPulse = 0.80f; // Heavy magnetic breaker disconnect thud (120 Hz)
+            }
+
+            // Dark Athena Fusion Reactor Core Rod Manual Insertion (ADR 0100 - Century Milestone!)
+            static DWORD s_lastReactorRodInsertTime = 0;
+            bool bothGrippingRod = (twoHandDist < 0.32f) && (vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f);
+            bool rodElevated = (leftLocal.y > 0.15f && rightLocal.y > 0.15f);
+            bool rodPlunge = (rVel.z < -1.15f && lVel.z < -1.15f && rVel.y < -0.80f && lVel.y < -0.80f);
+            if (bothGrippingRod && rodElevated && rodPlunge && (now - s_lastReactorRodInsertTime > 3000)) {
+                s_lastReactorRodInsertTime = now;
+                VR_LOG_INFO("Environmental Gesture: FUSION REACTOR CORE ROD MANUAL INSERTION (Lz: %.2f, Rz: %.2f, Ly: %.2f, Ry: %.2f)", lVel.z, rVel.z, lVel.y, rVel.y);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap(VK_RETURN);
+                vrState.leftHapticPulse = 0.98f; // Catastrophic magnetic confinement shockwave (45 Hz)
+                vrState.rightHapticPulse = 0.98f;
             }
         }
     }
