@@ -59,6 +59,8 @@ Key technical choices, trade-offs, and implementation strategies are documented 
 | [**ADR-0026**](docs/adr/0026-physical-pipe-and-club-blunt-force-leverage.md) | Two-Handed Heavy Pipe & Blunt Overhead Slams | Combat: Simultaneous downward arm swing (Vy < -1.30 m/s) concussive slam |
 | [**ADR-0027**](docs/adr/0027-tactical-off-hand-flashlight-harries-technique.md) | Tactical Flashlight & Harries Shooting Stance | Gunplay: Crossed-wrist stabilization (alpha = 0.22) in pitch-black corridors |
 | [**ADR-0028**](docs/adr/0028-cryo-hibernation-capsule-emergency-release.md) | Cryo-Pod Emergency Canopy Seal Ejection | Narrative: Dual-palm forward shove (Vz < -0.28 m/s) decompression breakout |
+| [**ADR-0029**](docs/adr/0029-diegetic-collectible-inspection-cigarette-packs-and-bounty-cards.md) | Diegetic Collectible Inspection: Cigarette Packs & Cards | Interactions: Off-hand eye-level inspection (Y > -0.05m, Z > -0.32m) with 180Hz buzz |
+| [**ADR-0030**](docs/adr/0030-laser-tripwire-dynamic-crouch-limbo-evasion.md) | Laser Tripwire Limbo Evasion & Prone Crawl Pacing | Stealth: Head drop > 48cm deep prone posture with 600ms crawl heartbeat |
 
 ---
 
@@ -69,7 +71,7 @@ riddick-vr/
 ├── .github/
 │   └── ISSUE_TEMPLATE/       # Templates for bug reports and feature requests
 ├── docs/
-│   └── adr/                  # Architectural Decision Records (ADR 0001 - 0028)
+│   └── adr/                  # Architectural Decision Records (ADR 0001 - 0030)
 ├── include/
 │   └── riddick_vr_protocol.h # IPC shared state, poses, matrix, controller formats
 ├── src/
@@ -145,6 +147,8 @@ The script automatically produces:
   - *Biometric Scanners:* Extend index finger and poke forward into scanner plane.
   - *NanoMED Health Stations:* Press flat open palm against dispenser pad for soothing bio-restoration.
 * **Physical Object Throwing & Body Dragging:** Squeeze Left Grip to pick up objects/bodies; release during arm swing ($> 1.2\text{ m/s}$) to throw; haul while crouched for heavy drag friction resistance.
+* **Diegetic Collectible Inspection:** Bring off-hand holding cigarette packs or bounty cards up to eye level ($Y > -0.05\text{ m}, Z > -0.32\text{ m}$) with Left Grip to inspect fine detail with $180\text{ Hz}$ tactile buzz.
+* **Laser Tripwire Deep Prone Limbo:** Duck lower than $48\text{ cm}$ below standing eye-height to drop into deep prone crawl, slipping beneath laser grids with rhythmic $600\text{ ms}$ stealth crawl pulses.
 * **Tactical Eyeshine & Flashlight:** Tap right temple with grip to toggle Eyeshine (`Q`); tap left shoulder to toggle flashlight (`F`).
 
 ---

@@ -444,6 +444,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
     // 1. Adaptive Physical Crouch Detection & Dynamic Height Calibration (ADR 0004 & 0005)
     static bool s_isPhysicallyCrouched = false;
+    static bool s_isDeepProne = false;
     static bool s_eyeshineActive = false;
     static bool s_flashlightActive = false;
 
@@ -495,6 +496,24 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             SendKey('C', s_isPhysicallyCrouched);
             if (s_isPhysicallyCrouched) {
                 vrState.leftHapticPulse = 0.2f;
+            }
+        }
+
+        // Deep Prone / Laser Tripwire Limbo Evasion (ADR 0030)
+        bool wantProne = false;
+        if (s_standingEyeHeight > 0.2f) {
+            wantProne = (heightDrop > 0.48f) || (heightRatio < 0.65f);
+        } else {
+            wantProne = (currentY < -0.45f);
+        }
+
+        if (wantProne != s_isDeepProne) {
+            s_isDeepProne = wantProne;
+            if (s_isDeepProne) {
+                VR_LOG_INFO("Stealth Stance: DEEP PRONE / LASER TRIPWIRE LIMBO engaged (Current Y: %.2fm, Drop: %.2fm)", currentY, heightDrop);
+                vrState.leftHapticPulse = 0.25f;
+            } else {
+                VR_LOG_INFO("Stealth Stance: DEEP PRONE disengaged");
             }
         }
     }
@@ -647,6 +666,13 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (wantS != s_sPressed) { SendKey('S', wantS); s_sPressed = wantS; }
     if (wantA != s_aPressed) { SendKey('A', wantA); s_aPressed = wantA; }
     if (wantD != s_dPressed) { SendKey('D', wantD); s_dPressed = wantD; }
+
+    // Prone crawl pacing (ADR 0030): rhythmic tactile crawl heartbeat in deep prone
+    static DWORD s_lastPronePulseTime = 0;
+    if (s_isDeepProne && (wantW || wantS || wantA || wantD) && (now - s_lastPronePulseTime > 600)) {
+        s_lastPronePulseTime = now;
+        vrState.leftHapticPulse = 0.15f; // Subtle stealth crawl pulse (85 Hz)
+    }
 
     // 4. Smooth & Snap Turning (Right Thumbstick X)
     static bool s_snapTurnArmed = true;
@@ -1238,6 +1264,18 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         if (moveMagnitude > 0.25f && (now - s_lastDragPulseTime > 450)) {
             s_lastDragPulseTime = now;
             vrState.leftHapticPulse = 0.38f; // Low-frequency drag friction rumble (85 Hz)
+        }
+    }
+
+    // Diegetic Collectible Inspection: Cigarette Packs & Bounty Cards (ADR 0029)
+    // Holding item in off-hand up to eye level (Y > -0.05m, Z > -0.32m) engages inspection
+    static bool s_inspectingItem = false;
+    bool wantInspect = s_leftGripDown && (leftLocal.y > -0.05f && leftLocal.z > -0.32f);
+    if (wantInspect != s_inspectingItem) {
+        s_inspectingItem = wantInspect;
+        if (s_inspectingItem) {
+            VR_LOG_INFO("Diegetic Interaction: COLLECTIBLE INSPECTION / CIGARETTE PACK (Eye Level: %.2fm)", leftLocal.y);
+            vrState.leftHapticPulse = 0.25f; // Tactile inspection buzz (180 Hz)
         }
     }
 
