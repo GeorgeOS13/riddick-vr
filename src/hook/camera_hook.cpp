@@ -785,6 +785,14 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         bool isEyeGougeRiposte = s_currentBlockEngaged &&
             (rVel.z < -1.10f && rVel.y > 1.05f && rightLocal.y > 0.04f);
 
+        // Security Guard Riot Shield Baton Wedge Pry & Disarm (ADR 0111)
+        bool bothAtShieldZone = (rightLocal.z > -0.42f && rightLocal.z < -0.16f && leftLocal.z > -0.42f && leftLocal.z < -0.16f) &&
+                                (rightLocal.y > -0.20f && rightLocal.y < 0.20f && leftLocal.y > -0.20f && leftLocal.y < 0.20f);
+        bool shieldGrippedAndWedged = (vrState.leftController.grip > 0.60f) &&
+                                      (vrState.rightController.trigger > 0.50f || vrState.rightController.grip > 0.60f);
+        bool opposingShieldWrench = (lVel.x < -0.90f || lVel.y < -0.80f) && (rVel.x > 0.90f || rVel.y > 0.80f);
+        bool isShieldPryDisarm = bothAtShieldZone && shieldGrippedAndWedged && opposingShieldWrench;
+
         if (dualRifleStrip) {
             s_lastPunchTime = now;
             VR_LOG_INFO("Physical Counter: GUARD RIFLE STRIP & MAG EJECTION DISARM (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
@@ -794,6 +802,15 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             SendKeyTap('1'); // Equip stripped firearm
             vrState.rightHapticPulse = 0.95f; // Receiver wrenching shockwave (280 Hz)
             vrState.leftHapticPulse = 0.95f;
+        } else if (isShieldPryDisarm) {
+            s_lastPunchTime = now;
+            VR_LOG_INFO("Physical Counter: RIOT SHIELD WEDGE PRY & DISARM (Lx: %.2f, Rx: %.2f)", lVel.x, rVel.x);
+            SendKeyTap('E');
+            mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+            mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+            SendKeyTap('1'); // Seize weapon slot
+            vrState.leftHapticPulse = 0.95f; // Metallic shear crack (280 Hz)
+            vrState.rightHapticPulse = 0.95f;
         } else if (isEyeGougeRiposte) {
             s_lastPunchTime = now;
             VR_LOG_INFO("Physical Counter: INMATE SHIV EYE-GOUGE RIPOSTE (Rz: %.2f, Ry: %.2f, Ey: %.2f)", rVel.z, rVel.y, rightLocal.y);
@@ -1460,6 +1477,28 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         }
     }
 
+    // Heavy Mining Pneumatic Jackhammer Dual-Handle Ground Chisel (ADR 0113)
+    static DWORD s_lastGroundChiselTime = 0;
+    float dxJackhammer = leftLocal.x - rightLocal.x;
+    float dyJackhammer = leftLocal.y - rightLocal.y;
+    float dzJackhammer = leftLocal.z - rightLocal.z;
+    float distJackhammer = sqrtf(dxJackhammer * dxJackhammer + dyJackhammer * dyJackhammer + dzJackhammer * dzJackhammer);
+
+    bool dualHandleGrip = (distJackhammer >= 0.22f && distJackhammer <= 0.45f) &&
+                          (leftLocal.y > -0.45f && leftLocal.y < -0.05f && rightLocal.y > -0.45f && rightLocal.y < -0.05f) &&
+                          (vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f);
+    bool violentDownwardChiselPlunge = (lVel.y < -1.15f && rVel.y < -1.15f);
+    if (dualHandleGrip && violentDownwardChiselPlunge && (now - s_lastGroundChiselTime > 2000)) {
+        s_lastGroundChiselTime = now;
+        VR_LOG_INFO("Environmental Gesture: MINING PNEUMATIC JACKHAMMER GROUND CHISEL PLUNGE (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
+        SendKeyTap('S');
+        SendKeyTap(VK_SPACE);
+        mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+        mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+        vrState.leftHapticPulse = 0.98f;  // Seismic percussive hammer strike (50 Hz)
+        vrState.rightHapticPulse = 0.98f;
+    }
+
     // 6c. Spatial Weapon Holstering & Physical Inventory Gestures (ADR 0015, 0021, 0023, 0038)
     // - Right Hand Over-Shoulder (Y > 0.15m, Z > -0.05m, grip > 0.50): Equips / Holsters Primary Weapon ('1')
     // - Right Hand Chest Bandolier (Y in [-0.22, 0.05], |X| < 0.14, Z > -0.25, grip > 0.50): Equips Grenades ('4')
@@ -1630,6 +1669,29 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 vrState.leftHapticPulse = 0.80f; // Pneumatic decompression surge
                 vrState.rightHapticPulse = 0.80f;
+            }
+
+            // Cryo-Chamber Defrost Thermal Cycle Override Keypad Punch (ADR 0112)
+            static DWORD s_lastDefrostTapTime = 0;
+            static int s_defrostTapCount = 0;
+            bool handAtDefrostKeypad = ((rightLocal.z > -0.38f && rightLocal.z < -0.15f && rightLocal.y > -0.15f && rightLocal.y < 0.20f && fabsf(rightLocal.x) < 0.22f && vrState.rightController.trigger < 0.20f && vrState.rightController.grip < 0.35f) ||
+                                        (leftLocal.z > -0.38f && leftLocal.z < -0.15f && leftLocal.y > -0.15f && leftLocal.y < 0.20f && fabsf(leftLocal.x) < 0.22f && vrState.leftController.trigger < 0.20f && vrState.leftController.grip < 0.35f));
+            bool defrostPoke = (rVel.z < -0.32f || lVel.z < -0.32f);
+            if (handAtDefrostKeypad && defrostPoke && (now - s_lastDefrostTapTime > 220)) {
+                s_lastDefrostTapTime = now;
+                s_defrostTapCount++;
+                VR_LOG_INFO("Environmental Gesture: CRYO-CHAMBER DEFROST KEYPAD TAP #%d", s_defrostTapCount);
+                if (rVel.z < -0.32f) vrState.rightHapticPulse = 0.45f; // Membrane click (260 Hz)
+                if (lVel.z < -0.32f) vrState.leftHapticPulse = 0.45f;
+                if (s_defrostTapCount >= 3) {
+                    s_defrostTapCount = 0;
+                    VR_LOG_INFO("Environmental Gesture: CRYO DEFROST CYCLE INITIATED / THERMAL BYPASS CONFIRMED");
+                    SendKeyTap('E');
+                    SendKeyTap(VK_RETURN);
+                    SendKeyTap('Q');
+                    vrState.rightHapticPulse = 0.70f; // Confirmation chime (180 Hz)
+                    vrState.leftHapticPulse = 0.70f;
+                }
             }
 
             // Ventilation Duct Screw Fastener Unthreading (ADR 0036)
@@ -1991,6 +2053,30 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     VR_LOG_INFO("Environmental Gesture: EVA AIRLOCK BULKHEAD DOGGED SHUT / HERMETIC REPRESSURIZATION TRIGGERED");
                     SendKeyTap('E');
                     vrState.leftHapticPulse = 0.85f; // Hermetic clamp thud & seal hiss (100 Hz)
+                    vrState.rightHapticPulse = 0.85f;
+                }
+            }
+
+            // Dark Athena EVA Solar Array Orientation Manual Hand Crank (ADR 0114)
+            static DWORD s_lastSolarArrayCrankTime = 0;
+            static int s_solarArrayCrankCount = 0;
+            bool bothAtSolarTruss = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && rightLocal.z > -0.42f && rightLocal.z < -0.16f) &&
+                                    (leftLocal.y > -0.15f && leftLocal.y < 0.25f && rightLocal.y > -0.15f && rightLocal.y < 0.25f) &&
+                                    (vrState.leftController.grip > 0.50f && vrState.rightController.grip > 0.50f);
+            float solarCrankSpeed = sqrtf(rVel.x * rVel.x + rVel.y * rVel.y);
+            if (bothAtSolarTruss && solarCrankSpeed > 0.50f && (now - s_lastSolarArrayCrankTime > 240)) {
+                s_lastSolarArrayCrankTime = now;
+                s_solarArrayCrankCount++;
+                VR_LOG_INFO("Environmental Gesture: EVA SOLAR ARRAY SPINDLE REVOLUTION #%d (Speed: %.2f m/s)", s_solarArrayCrankCount, solarCrankSpeed);
+                vrState.leftHapticPulse = 0.50f;
+                vrState.rightHapticPulse = 0.50f; // Planetary gear teeth click (150 Hz)
+                if (s_solarArrayCrankCount >= 3) {
+                    s_solarArrayCrankCount = 0;
+                    VR_LOG_INFO("Environmental Gesture: SOLAR ARRAY ORIENTATION ACHIEVED / AUXILIARY POWER RESTORED");
+                    SendKeyTap('E');
+                    SendKeyTap(VK_RETURN);
+                    SendKeyTap('W');
+                    vrState.leftHapticPulse = 0.85f;  // Electromagnetic solar collector lock hum (90 Hz)
                     vrState.rightHapticPulse = 0.85f;
                 }
             }
