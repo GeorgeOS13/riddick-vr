@@ -922,6 +922,34 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         }
     }
 
+    // 6c. Spatial Weapon Holstering & Physical Inventory Gestures (ADR 0015)
+    // - Right Hand Over-Shoulder (Y > 0.15m, Z > -0.05m, grip > 0.50): Equips / Holsters Primary Weapon ('1')
+    // - Right Hand Hip Draw (Y < -0.32m, X > 0.14m, grip > 0.50): Equips / Holsters Sidearm / Pistol ('2')
+    // - Left Hand Hip Draw (Y < -0.32m, X < -0.14m, grip > 0.50): Equips / Draws Melee Blades / Ulaks ('3')
+    static DWORD s_lastHolsterTime = 0;
+    if (!isClimbingActive && !s_physicalBlockEngaged && !s_twoHandedStabilizationActive && (now - s_lastHolsterTime > 900)) {
+        bool rightOverShoulder = (rightLocal.y > 0.15f && rightLocal.z > -0.05f && vrState.rightController.grip > 0.50f);
+        bool rightAtHip = (rightLocal.y < -0.32f && rightLocal.x > 0.14f && vrState.rightController.grip > 0.50f);
+        bool leftAtHip = (leftLocal.y < -0.32f && leftLocal.x < -0.14f && vrState.leftController.grip > 0.50f);
+
+        if (rightOverShoulder) {
+            s_lastHolsterTime = now;
+            VR_LOG_INFO("Holster Gesture: PRIMARY WEAPON slot toggled (Over-Shoulder)");
+            SendKeyTap('1');
+            vrState.rightHapticPulse = 0.75f; // Solid mechanical latch pulse
+        } else if (rightAtHip) {
+            s_lastHolsterTime = now;
+            VR_LOG_INFO("Holster Gesture: SIDEARM / PISTOL slot toggled (Right Hip)");
+            SendKeyTap('2');
+            vrState.rightHapticPulse = 0.65f; // Leather holster draw pulse
+        } else if (leftAtHip) {
+            s_lastHolsterTime = now;
+            VR_LOG_INFO("Holster Gesture: MELEE / ULAK slot toggled (Left Hip)");
+            SendKeyTap('3');
+            vrState.leftHapticPulse = 0.70f; // Metallic blade unsheathe pulse
+        }
+    }
+
     // 7. Tactical Eyeshine & Flashlight Gestures (ADR 0012)
     // - Right Hand Temple Tap (Y > 0.08m, X > 0.12m): Toggles Eyeshine / Night Vision ('Q') with 0.85 haptic pulse
     // - Left Hand Shoulder/Temple Tap (Y > 0.06m, X < -0.12m): Toggles Tactical Shoulder Flashlight ('F') with 0.75 haptic pulse
