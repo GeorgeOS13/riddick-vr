@@ -765,6 +765,21 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             const auto& activeVel = (rSpeed > lSpeed) ? rVel : lVel;
             const auto& activeLocal = (rSpeed > lSpeed) ? rightLocal : leftLocal;
 
+            // Dual-Hand Riot Shield Concussive Bash (ADR 0052)
+            bool dualShieldBash = s_twoHandedStabilizationActive &&
+                                  (rVel.z < -1.15f && lVel.z < -1.15f) &&
+                                  (rightLocal.z < -0.18f && leftLocal.z < -0.18f);
+
+            // Dual-Hand Riot Shield Ballistic Plant (ADR 0052)
+            bool dualShieldPlant = s_twoHandedStabilizationActive &&
+                                   (lVel.y < -0.75f && rVel.y < -0.75f) &&
+                                   (lVel.z < -0.35f && rVel.z < -0.35f);
+
+            // Inmate Pit Brawl Stool / Chair Blunt Weapon Heavy Smash (ADR 0054)
+            bool dualStoolHeavySmash = (vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f) &&
+                                       (fabsf(leftLocal.x - rightLocal.x) < 0.38f) &&
+                                       (lSpeed > 1.35f && rSpeed > 1.35f);
+
             // Pit Fighting Arena Dual-Palm Concussive Shove (ADR 0041)
             bool dualPalmShove = (rVel.z < -1.10f && lVel.z < -1.10f) &&
                                  (rightLocal.z < -0.15f && leftLocal.z < -0.15f) &&
@@ -779,7 +794,30 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                     (vrState.leftController.grip > 0.45f && vrState.rightController.grip > 0.45f) &&
                                     (lVel.y < -1.30f && rVel.y < -1.30f);
 
-            if (dualPalmShove) {
+            if (dualShieldBash) {
+                VR_LOG_INFO("Physical Gesture: RIOT SHIELD CONCUSSIVE BASH (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
+                SendKey('W', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('W', false);
+                vrState.rightHapticPulse = 0.95f; // Shield rim blunt shockwave (140 Hz)
+                vrState.leftHapticPulse = 0.95f;
+            } else if (dualShieldPlant) {
+                VR_LOG_INFO("Physical Gesture: RIOT SHIELD BALLISTIC DECK PLANT (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
+                SendKey('C', true); // Crouch lock cover stance
+                SendKey(VK_SPACE, true);
+                SendKey(VK_SPACE, false);
+                vrState.rightHapticPulse = 0.75f; // Deck clamp thud (80 Hz)
+                vrState.leftHapticPulse = 0.75f;
+            } else if (dualStoolHeavySmash) {
+                VR_LOG_INFO("Physical Gesture: INMATE STOOL / BLUNT WEAPON HEAVY SMASH (LSpd: %.2f, RSpd: %.2f)", lSpeed, rSpeed);
+                SendKey('S', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('S', false);
+                vrState.rightHapticPulse = 0.95f; // Bone-shattering blunt fracture (120 Hz)
+                vrState.leftHapticPulse = 0.95f;
+            } else if (dualPalmShove) {
                 VR_LOG_INFO("Physical Gesture: PIT FIGHTING ARENA DUAL-PALM CONCUSSIVE SHOVE (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
                 SendKey('W', true);
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
@@ -1314,6 +1352,57 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 VR_LOG_INFO("Environmental Gesture: MECH COCKPIT CANOPY SLAMMED & SEALED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
                 SendKeyTap('E');
                 vrState.leftHapticPulse = 0.85f; // Pneumatic hermetic lock surge (120 Hz)
+                vrState.rightHapticPulse = 0.85f;
+            }
+
+            // Cryo-Pod Cryo-Glass Condensation Wipe & Frost Scraping (ADR 0051)
+            static DWORD s_lastGlassWipeTime = 0;
+            bool rightNearGlass = (rightLocal.z > -0.40f && rightLocal.z < -0.15f) &&
+                                  (rightLocal.y > -0.20f && rightLocal.y < 0.25f) &&
+                                  (vrState.rightController.grip < 0.60f);
+            float rightWipeSpeed = sqrtf(rVel.x * rVel.x + rVel.y * rVel.y);
+            if (rightNearGlass && rightWipeSpeed > 0.40f && (now - s_lastGlassWipeTime > 160)) {
+                s_lastGlassWipeTime = now;
+                VR_LOG_INFO("Environmental Gesture: CRYO-GLASS CONDENSATION WIPE / FROST SCRAPE (Speed: %.2f m/s)", rightWipeSpeed);
+                SendKeyTap('E');
+                vrState.rightHapticPulse = 0.35f; // Squeaking glass friction micro-haptic (240 Hz)
+            }
+
+            // Subterranean High-Pressure Steam Pipe Wheel Valve Release (ADR 0053)
+            static DWORD s_lastSteamValveTurnTime = 0;
+            static int s_steamValveRotations = 0;
+            bool rightAtSteamValve = (rightLocal.z > -0.42f && rightLocal.z < -0.18f) &&
+                                     (rightLocal.y > -0.10f && rightLocal.y < 0.30f) &&
+                                     (vrState.rightController.grip > 0.55f);
+            float steamValveSpeed = sqrtf(rVel.x * rVel.x + rVel.y * rVel.y);
+            if (rightAtSteamValve && steamValveSpeed > 0.45f && (now - s_lastSteamValveTurnTime > 220)) {
+                s_lastSteamValveTurnTime = now;
+                s_steamValveRotations++;
+                VR_LOG_INFO("Environmental Gesture: STEAM PIPE WHEEL VALVE ROTATION #%d (Speed: %.2f m/s)", s_steamValveRotations, steamValveSpeed);
+                vrState.rightHapticPulse = 0.50f; // Metal valve friction tick (160 Hz)
+                if (s_steamValveRotations >= 3) {
+                    s_steamValveRotations = 0;
+                    VR_LOG_INFO("Environmental Gesture: HIGH-PRESSURE STEAM VALVE POPPED / SCALDING DIVERSION RELEASED");
+                    SendKeyTap('E');
+                    SendKeyTap('Q'); // Thermal diversion signal
+                    vrState.rightHapticPulse = 0.70f; // Sustained pneumatic steam vibration (110 Hz)
+                }
+            }
+
+            // Inmate Pit Brawl Stool / Chair Blunt Weapon Wrench (ADR 0054)
+            static DWORD s_lastStoolWrenchTime = 0;
+            bool bothLowAtStool = (leftLocal.y > -0.70f && leftLocal.y < -0.30f) &&
+                                  (rightLocal.y > -0.70f && rightLocal.y < -0.30f) &&
+                                  (leftLocal.z > -0.45f && leftLocal.z < -0.15f) &&
+                                  (rightLocal.z > -0.45f && rightLocal.z < -0.15f) &&
+                                  (vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f);
+            bool bothYankingUp = (lVel.y > 1.05f && rVel.y > 1.05f);
+            if (bothLowAtStool && bothYankingUp && (now - s_lastStoolWrenchTime > 1000)) {
+                s_lastStoolWrenchTime = now;
+                VR_LOG_INFO("Environmental Gesture: INMATE BRAWL STOOL WRENCHED FROM FLOOR (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
+                SendKeyTap('E');
+                SendKeyTap('1'); // Equip improvised heavy melee slot
+                vrState.leftHapticPulse = 0.85f; // Shearing bolt crack (200 Hz)
                 vrState.rightHapticPulse = 0.85f;
             }
         }

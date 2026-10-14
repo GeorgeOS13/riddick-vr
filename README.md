@@ -185,6 +185,14 @@ The script automatically produces:
 * **Bulkhead Handwheel Spindle:** Grip manual door wheel and crank in circular tangential revolutions ($|V| > 0.50\text{ m/s}$) for $160\text{ Hz}$ dogging ratchet clicks ($0.45$).
 * **Inmate Gambling Dice Mini-Games:** Cup hand with grip held ($0.40 - 0.85$) and shake ($> 0.70\text{ m/s}$) for $160\text{ Hz}$ rattling bone haptics ($0.30$); release forward to roll.
 * **Emergency Blast Shield Slam:** Raise both hands overhead ($Y > 0.25\text{ m}$) at bulkhead station and slam down hard ($V_y < -0.50\text{ m/s}$) for dual $0.95$ impact slam.
+* **Guard Subdue Chokehold & Silent Neck Snap:** Sneak in crouch/prone with left arm across guard neck ($Z \in [-0.35, -0.15]\text{ m}, Y \in [-0.20, 0.10]\text{ m}$) with Left Grip held ($100\text{ Hz}$ struggle); jerk dominant hand laterally ($|V_x| > 0.80\text{ m/s}$) for $280\text{ Hz}$ ($0.95$) silent cervical neck snap.
+* **Sub-Level Mining Cart Handbrake & Throttle:** Grip cart brake lever ($Z \in [-0.35, -0.15]\text{ m}$) and push/pull ($|V_z| > 0.35\text{ m/s}$) to toggle throttle/handbrake (`W`/`S`) with $60\text{ Hz}$ rail shudder ($0.40$).
+* **Heavy Mech Cockpit Canopy Slam & Purge:** Reach overhead in mech cockpit ($Y > 0.20\text{ m}$) and slam down ($V_y < -0.45\text{ m/s}$) to seal hermetic armor canopy; click dual thumbsticks with both grips held to blow canopy bolts ($0.95$).
+* **Inmate Bunk Mattress Stash Search:** Crouch and lift bunk mattress with off-hand while sweeping dominant hand under bed frame ($|V_x| > 0.35\text{ m/s}$) to discover hidden shivs and contraband with $200\text{ Hz}$ ($0.60$) discovery chime.
+* **Cryo-Pod Cryo-Glass Condensation Wipe:** Sweep open palm/gauntlet across frosted observation glass ($|V| > 0.40\text{ m/s}$) for $240\text{ Hz}$ ($0.35$) squeaking glass friction micro-haptics and progressive mist clearing.
+* **Dual-Hand Riot Shield Plant & Bash:** In two-handed stance, plunge controllers downward ($V_y < -0.75\text{ m/s}$) to plant shield into deck grating (`C` + `Space`, $80\text{ Hz}$ clamp); thrust both hands forward ($V_z < -1.15\text{ m/s}$) for concussive Shield Bash (`LMB`, $0.95$ shockwave).
+* **Subterranean Steam Pipe Wheel Valve:** Grip industrial wheel valve ($Z \in [-0.42, -0.18]\text{ m}$) and crank 3 revolutions ($|V| > 0.45\text{ m/s}$) to vent high-pressure scalding steam (`E` + `Q`) with sustained $110\text{ Hz}$ ($0.70$) pneumatic hissing.
+* **Inmate Pit Brawl Stool Wrench & Smash:** Crouch near bolted metal furniture, grip with both hands ($> 0.60$), and yank upward violently ($V_y > 1.05\text{ m/s}$) to rip stool from deck rivets (`E` + Slot '1', $0.85$ crack); two-handed swings ($|V| > 1.35\text{ m/s}$) deliver bone-crushing blunt smashes (`LMB`, dual $0.95$).
 * **Tactical Eyeshine & Flashlight:** Tap right temple with grip to toggle Eyeshine (`Q`); tap left shoulder to toggle flashlight (`F`).
 
 ---
