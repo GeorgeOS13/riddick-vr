@@ -1316,6 +1316,29 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         vrState.leftHapticPulse = 0.45f; // Crisp micro-switch click (180 Hz)
     }
 
+    // Dark Athena Drone Optical Sensor Scramble Laser Strike (ADR 0103)
+    static DWORD s_laserScrambleDwellStart = 0;
+    static DWORD s_lastLaserScrambleTime = 0;
+    bool droneSensorAimLock = (rightLocal.z > -0.45f && rightLocal.z < -0.18f) &&
+                              (rightLocal.y > -0.10f && rightLocal.y < 0.30f) &&
+                              (fabsf(rSpeed) < 0.20f);
+    bool laserEngaged = (vrState.leftController.trigger > 0.50f);
+    if (s_twoHandedStabilizationActive && laserEngaged && droneSensorAimLock) {
+        if (s_laserScrambleDwellStart == 0) {
+            s_laserScrambleDwellStart = now;
+        } else if ((now - s_laserScrambleDwellStart > 500) && (now - s_lastLaserScrambleTime > 1600)) {
+            s_lastLaserScrambleTime = now;
+            s_laserScrambleDwellStart = 0;
+            VR_LOG_INFO("Tactical Firearm: DRONE OPTICAL SENSOR SCRAMBLED VIA COHERENT LASER (Rz: %.2f, Ry: %.2f)", rightLocal.z, rightLocal.y);
+            SendKeyTap('F');
+            SendKeyTap('E');
+            vrState.leftHapticPulse = 0.65f; // Optic overload pop (240 Hz)
+            vrState.rightHapticPulse = 0.65f;
+        }
+    } else {
+        s_laserScrambleDwellStart = 0;
+    }
+
     // Apply exponential smoothing / spherical interpolation on weapon aim pose when two-handed
     if (vrState.rightController.aimPose.isValid) {
         if (s_twoHandedStabilizationActive) {
@@ -2066,6 +2089,42 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 vrState.leftHapticPulse = 0.98f; // Catastrophic magnetic confinement shockwave (45 Hz)
                 vrState.rightHapticPulse = 0.98f;
             }
+
+            // Subterranean Hydroponics Nutrient Dispenser Pressure Plunger (ADR 0105)
+            static DWORD s_lastPlungerStrokeTime = 0;
+            static int s_plungerStrokeCount = 0;
+            bool handAtPlungerPump = ((rightLocal.z > -0.38f && rightLocal.z < -0.14f && rightLocal.y > -0.15f && rightLocal.y < 0.25f && vrState.rightController.grip > 0.50f) ||
+                                      (leftLocal.z > -0.38f && leftLocal.z < -0.14f && leftLocal.y > -0.15f && leftLocal.y < 0.25f && vrState.leftController.grip > 0.50f));
+            bool plungerPlunge = (rVel.y < -0.45f || lVel.y < -0.45f);
+            if (handAtPlungerPump && plungerPlunge && (now - s_lastPlungerStrokeTime > 220)) {
+                s_lastPlungerStrokeTime = now;
+                s_plungerStrokeCount++;
+                VR_LOG_INFO("Environmental Gesture: HYDROPONIC NUTRIENT PLUNGER STROKE #%d (Vy: %.2f)", s_plungerStrokeCount, (rVel.y < lVel.y) ? rVel.y : lVel.y);
+                if (rVel.y < -0.45f) vrState.rightHapticPulse = 0.60f; // Hydraulic displacement slosh (110 Hz)
+                if (lVel.y < -0.45f) vrState.leftHapticPulse = 0.60f;
+                if (s_plungerStrokeCount >= 3) {
+                    s_plungerStrokeCount = 0;
+                    VR_LOG_INFO("Environmental Gesture: NUTRIENT ACCUMULATOR RELIEF VALVE CLEARED / IRRIGATION RESTORED");
+                    SendKeyTap('E');
+                    SendKeyTap('Q');
+                    vrState.leftHapticPulse = 0.75f; // Relief valve clack (220 Hz)
+                    vrState.rightHapticPulse = 0.75f;
+                }
+            }
+
+            // Dark Athena Cargo Bay Magnetic Crane Remote Pendant Snatch (ADR 0106)
+            static DWORD s_lastCranePendantTime = 0;
+            bool handAtOverheadPendant = ((rightLocal.y > 0.18f && rightLocal.z > -0.32f && rightLocal.z < -0.05f && vrState.rightController.grip > 0.55f) ||
+                                          (leftLocal.y > 0.18f && leftLocal.z > -0.32f && leftLocal.z < -0.05f && vrState.leftController.grip > 0.55f));
+            bool pendantDownwardHaul = (rVel.y < -0.45f || lVel.y < -0.45f);
+            if (handAtOverheadPendant && pendantDownwardHaul && (now - s_lastCranePendantTime > 2000)) {
+                s_lastCranePendantTime = now;
+                VR_LOG_INFO("Environmental Gesture: CARGO GANTRY CRANE PENDANT SNATCHED & HAULED (Vy: %.2f)", (rVel.y < lVel.y) ? rVel.y : lVel.y);
+                SendKeyTap('E');
+                SendKeyTap('W'); // Engage gantry remote bridge
+                if (rVel.y < -0.45f) vrState.rightHapticPulse = 0.70f; // Steel cable tension & relay click (160 Hz)
+                if (lVel.y < -0.45f) vrState.leftHapticPulse = 0.70f;
+            }
         }
     }
 
@@ -2297,6 +2356,48 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
         vrState.leftHapticPulse = 0.65f; // Dual wide-arc particulate scatter pulses (180 Hz)
         vrState.rightHapticPulse = 0.65f;
+    }
+
+    // Inmate Pit Brawl Dirt / Ash Two-Handed Fan Clench & Burst (ADR 0104)
+    static DWORD s_lastFanClenchBurstTime = 0;
+    static DWORD s_fanClenchStartTime = 0;
+    static bool s_handsWereClenchedChest = false;
+
+    float dxHandsFan = leftLocal.x - rightLocal.x;
+    float dyHandsFan = leftLocal.y - rightLocal.y;
+    float dzHandsFan = leftLocal.z - rightLocal.z;
+    float distHandsFan = sqrtf(dxHandsFan * dxHandsFan + dyHandsFan * dyHandsFan + dzHandsFan * dzHandsFan);
+
+    bool handsAtChest = (leftLocal.y > -0.25f && leftLocal.y < 0.05f) &&
+                        (rightLocal.y > -0.25f && rightLocal.y < 0.05f) &&
+                        (distHandsFan < 0.18f);
+    bool bothFanGripsClenched = (vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f);
+
+    if (handsAtChest && bothFanGripsClenched && !s_physicalBlockEngaged) {
+        if (!s_handsWereClenchedChest) {
+            s_handsWereClenchedChest = true;
+            s_fanClenchStartTime = now;
+            vrState.leftHapticPulse = 0.45f;  // Friction grind during clench (200 Hz)
+            vrState.rightHapticPulse = 0.45f;
+        }
+    } else if (s_handsWereClenchedChest) {
+        // Evaluate burst if fists were clenched together recently
+        if (now - s_fanClenchStartTime < 800) {
+            bool explosiveFanOutward = (lVel.x < -1.10f && rVel.x > 1.10f);
+            if (explosiveFanOutward && (now - s_lastFanClenchBurstTime > 2000)) {
+                s_lastFanClenchBurstTime = now;
+                VR_LOG_INFO("Combat Dirty Tactic: DIRT/ASH TWO-HANDED FAN CLENCH & BURST (Lx: %.2f, Rx: %.2f)", lVel.x, rVel.x);
+                SendKeyTap('E');
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKeyTap(VK_TAB);
+                vrState.leftHapticPulse = 0.70f;  // Wide particulate cloud rush (175 Hz)
+                vrState.rightHapticPulse = 0.70f;
+            }
+        }
+        if (!bothFanGripsClenched || distHandsFan > 0.35f) {
+            s_handsWereClenchedChest = false;
+        }
     }
 
     // Inmate Pit Brawl Dirt / Ash Eye Recovery Blink Gesture (ADR 0073)
