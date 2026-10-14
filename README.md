@@ -56,6 +56,9 @@ Key technical choices, trade-offs, and implementation strategies are documented 
 | [**ADR-0023**](docs/adr/0023-heavy-scar-gun-and-turret-dual-hand-steering.md) | Heavy SCAR Gun Mine Detonation & Holstering | Gunplay: Low-spine holster draw and off-hand clench air mine detonation |
 | [**ADR-0024**](docs/adr/0024-heavy-mech-exoskeleton-and-sustained-rotary-fire.md) | Heavy Mech Exoskeleton & Sustained Rotary Fire | Combat & Haptics: Multi-band cyclic 90ms rotary recoil and foregrip transmission |
 | [**ADR-0025**](docs/adr/0025-physical-crouch-jump-and-clearance-dynamics.md) | Physical Crouch-Jump & Clearance Dynamics | Movement: Coordinated knee-tuck clearance (+0.40m) into overhead vents |
+| [**ADR-0026**](docs/adr/0026-physical-pipe-and-club-blunt-force-leverage.md) | Two-Handed Heavy Pipe & Blunt Overhead Slams | Combat: Simultaneous downward arm swing (Vy < -1.30 m/s) concussive slam |
+| [**ADR-0027**](docs/adr/0027-tactical-off-hand-flashlight-harries-technique.md) | Tactical Flashlight & Harries Shooting Stance | Gunplay: Crossed-wrist stabilization (alpha = 0.22) in pitch-black corridors |
+| [**ADR-0028**](docs/adr/0028-cryo-hibernation-capsule-emergency-release.md) | Cryo-Pod Emergency Canopy Seal Ejection | Narrative: Dual-palm forward shove (Vz < -0.28 m/s) decompression breakout |
 
 ---
 
@@ -66,7 +69,7 @@ riddick-vr/
 ├── .github/
 │   └── ISSUE_TEMPLATE/       # Templates for bug reports and feature requests
 ├── docs/
-│   └── adr/                  # Architectural Decision Records (ADR 0001 - 0025)
+│   └── adr/                  # Architectural Decision Records (ADR 0001 - 0028)
 ├── include/
 │   └── riddick_vr_protocol.h # IPC shared state, poses, matrix, controller formats
 ├── src/

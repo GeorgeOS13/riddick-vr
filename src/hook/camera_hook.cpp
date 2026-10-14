@@ -444,6 +444,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
     // 1. Adaptive Physical Crouch Detection & Dynamic Height Calibration (ADR 0004 & 0005)
     static bool s_isPhysicallyCrouched = false;
+    static bool s_eyeshineActive = false;
+    static bool s_flashlightActive = false;
 
     // Reset calibration on recenter request (e.g. via IPC flag)
     if (vrState.shouldRecenter && vrState.hmdPose.isValid) {
@@ -722,7 +724,21 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             const auto& activeVel = (rSpeed > lSpeed) ? rVel : lVel;
             const auto& activeLocal = (rSpeed > lSpeed) ? rightLocal : leftLocal;
 
-            if (dualCrossSlash) {
+            // Two-Handed Overhead Pipe Slam / Heavy Club Crushing Strike (ADR 0026)
+            bool dualOverheadSlam = (leftLocal.y > 0.10f && rightLocal.y > 0.10f) &&
+                                    (vrState.leftController.grip > 0.45f && vrState.rightController.grip > 0.45f) &&
+                                    (lVel.y < -1.30f && rVel.y < -1.30f);
+
+            if (dualOverheadSlam) {
+                VR_LOG_INFO("Physical Gesture: TWO-HANDED OVERHEAD CRUSHING SLAM / PIPE STRIKE (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
+                SendKey('S', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('S', false);
+
+                vrState.rightHapticPulse = 0.95f; // Heavy blunt concussive shockwave (120 Hz)
+                vrState.leftHapticPulse = 0.95f;
+            } else if (dualCrossSlash) {
                 VR_LOG_INFO("Physical Gesture: DUAL ULAK SCISSOR CROSS-SLASH (Rx: %.2f, Lx: %.2f)", rVel.x, lVel.x);
                 SendKey('A', true);
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
@@ -878,8 +894,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     );
 
     bool isReloading = (now - s_lastReloadGestureTime <= 1100);
-    bool wantTwoHanded = (twoHandDist < 0.25f) &&
-                         (vrState.leftController.grip > 0.45f) &&
+    bool isHarriesStance = s_flashlightActive && (twoHandDist < 0.18f) && (vrState.leftController.grip > 0.35f);
+    bool wantTwoHanded = (((twoHandDist < 0.25f) && (vrState.leftController.grip > 0.45f)) || isHarriesStance) &&
                          !s_physicalBlockEngaged &&
                          !isReloading &&
                          !isClimbingActive;
@@ -887,9 +903,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (wantTwoHanded != s_twoHandedStabilizationActive) {
         s_twoHandedStabilizationActive = wantTwoHanded;
         if (s_twoHandedStabilizationActive) {
-            VR_LOG_INFO("Two-Handed Firearm Stabilization ENGAGED (HandDist: %.2fm)", twoHandDist);
-            vrState.leftHapticPulse = 0.25f;  // Subtle haptic confirmation pulse
-            vrState.rightHapticPulse = 0.25f;
+            VR_LOG_INFO("Two-Handed Firearm Stabilization ENGAGED (%s, HandDist: %.2fm)",
+                isHarriesStance ? "Tactical Harries Flashlight Stance" : "Foregrip Hold", twoHandDist);
+            vrState.leftHapticPulse = isHarriesStance ? 0.35f : 0.25f;  // Subtle haptic confirmation pulse
+            vrState.rightHapticPulse = isHarriesStance ? 0.35f : 0.25f;
         } else {
             VR_LOG_INFO("Two-Handed Firearm Stabilization DISENGAGED");
         }
@@ -902,10 +919,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_stabilizedAimPose = vrState.rightController.aimPose;
                 s_hasStabilizedPose = true;
             } else {
-                constexpr float SMOOTH_ALPHA = 0.35f;
-                s_stabilizedAimPose.position.x += SMOOTH_ALPHA * (vrState.rightController.aimPose.position.x - s_stabilizedAimPose.position.x);
-                s_stabilizedAimPose.position.y += SMOOTH_ALPHA * (vrState.rightController.aimPose.position.y - s_stabilizedAimPose.position.y);
-                s_stabilizedAimPose.position.z += SMOOTH_ALPHA * (vrState.rightController.aimPose.position.z - s_stabilizedAimPose.position.z);
+                float smoothAlpha = isHarriesStance ? 0.22f : 0.35f;
+                s_stabilizedAimPose.position.x += smoothAlpha * (vrState.rightController.aimPose.position.x - s_stabilizedAimPose.position.x);
+                s_stabilizedAimPose.position.y += smoothAlpha * (vrState.rightController.aimPose.position.y - s_stabilizedAimPose.position.y);
+                s_stabilizedAimPose.position.z += smoothAlpha * (vrState.rightController.aimPose.position.z - s_stabilizedAimPose.position.z);
 
                 // SLERP / Normalized Lerp for aim orientation quaternion
                 float dot = s_stabilizedAimPose.orientation.x * vrState.rightController.aimPose.orientation.x +
@@ -914,10 +931,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                             s_stabilizedAimPose.orientation.w * vrState.rightController.aimPose.orientation.w;
 
                 float qSign = (dot < 0.0f) ? -1.0f : 1.0f;
-                s_stabilizedAimPose.orientation.x += SMOOTH_ALPHA * (qSign * vrState.rightController.aimPose.orientation.x - s_stabilizedAimPose.orientation.x);
-                s_stabilizedAimPose.orientation.y += SMOOTH_ALPHA * (qSign * vrState.rightController.aimPose.orientation.y - s_stabilizedAimPose.orientation.y);
-                s_stabilizedAimPose.orientation.z += SMOOTH_ALPHA * (qSign * vrState.rightController.aimPose.orientation.z - s_stabilizedAimPose.orientation.z);
-                s_stabilizedAimPose.orientation.w += SMOOTH_ALPHA * (qSign * vrState.rightController.aimPose.orientation.w - s_stabilizedAimPose.orientation.w);
+                s_stabilizedAimPose.orientation.x += smoothAlpha * (qSign * vrState.rightController.aimPose.orientation.x - s_stabilizedAimPose.orientation.x);
+                s_stabilizedAimPose.orientation.y += smoothAlpha * (qSign * vrState.rightController.aimPose.orientation.y - s_stabilizedAimPose.orientation.y);
+                s_stabilizedAimPose.orientation.z += smoothAlpha * (qSign * vrState.rightController.aimPose.orientation.z - s_stabilizedAimPose.orientation.z);
+                s_stabilizedAimPose.orientation.w += smoothAlpha * (qSign * vrState.rightController.aimPose.orientation.w - s_stabilizedAimPose.orientation.w);
 
                 float qNorm = sqrtf(s_stabilizedAimPose.orientation.x * s_stabilizedAimPose.orientation.x +
                                     s_stabilizedAimPose.orientation.y * s_stabilizedAimPose.orientation.y +
@@ -1078,6 +1095,19 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('E');
                 vrState.leftHapticPulse = 0.50f; // Bio-restorative soothing haptic wave
             }
+
+            // Cryo-Pod / Hibernation Canopy Emergency Seal Ejection (Dual Palm Push - ADR 0028)
+            bool bothHandsPushing = (leftLocal.z < -0.22f && rightLocal.z < -0.22f) &&
+                                    (lVel.z < -0.28f && rVel.z < -0.28f) &&
+                                    (vrState.leftController.trigger < 0.30f && vrState.rightController.trigger < 0.30f);
+            if (bothHandsPushing) {
+                s_lastEnvInteractTime = now;
+                VR_LOG_INFO("Environmental Gesture: CRYO-POD / HIBERNATION CANOPY EMERGENCY EJECTION (Lz: %.2f, Rz: %.2f)", lVel.z, rVel.z);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                vrState.leftHapticPulse = 0.80f; // Pneumatic decompression surge
+                vrState.rightHapticPulse = 0.80f;
+            }
         }
     }
 
@@ -1086,8 +1116,6 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // - Left Hand Shoulder/Temple Tap (Y > 0.06m, X < -0.12m): Toggles Tactical Shoulder Flashlight ('F') with 0.75 haptic pulse
     static DWORD s_lastEyeshineTime = 0;
     static DWORD s_lastFlashlightTime = 0;
-    static bool s_eyeshineActive = false;
-    static bool s_flashlightActive = false;
 
     if (!isClimbingActive) {
         // Right Hand -> Eyeshine Night Vision
