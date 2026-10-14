@@ -705,6 +705,22 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         }
     }
 
+    // Dark Athena EVA Micro-Thruster Jetpack Burst (ADR 0098)
+    static DWORD s_lastJetpackBurstTime = 0;
+    bool handsBehindHips = (leftLocal.z > -0.06f && rightLocal.z > -0.06f) &&
+                          (fabsf(leftLocal.x) > 0.16f && fabsf(rightLocal.x) > 0.16f) &&
+                          (leftLocal.y > -0.35f && leftLocal.y < -0.05f && rightLocal.y > -0.35f && rightLocal.y < -0.05f);
+    bool bothTriggersJetpack = (vrState.leftController.trigger > 0.65f && vrState.rightController.trigger > 0.65f);
+    if (handsBehindHips && bothTriggersJetpack && !isClimbingActive && (now - s_lastJetpackBurstTime > 300)) {
+        s_lastJetpackBurstTime = now;
+        VR_LOG_INFO("EVA Spacewalk: COLD-GAS MICRO-THRUSTERS FIRED (Lz: %.2f, Rz: %.2f)", leftLocal.z, rightLocal.z);
+        SendKeyTap(VK_SPACE);
+        SendKey('W', true);
+        SendKey('W', false);
+        vrState.leftHapticPulse = 0.65f; // Pneumatic gas jet thrust rumble (130 Hz)
+        vrState.rightHapticPulse = 0.65f;
+    }
+
     // 4. Smooth & Snap Turning (Right Thumbstick X)
     static bool s_snapTurnArmed = true;
     float stickX = vrState.rightController.thumbstickX;
@@ -1181,6 +1197,25 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         vrState.leftHapticPulse = 0.65f;  // Arm tissue injection feedback
     }
 
+    // 6a-6. Inmate Pit Brawl Dirt / Ash Pocket Concealment (ADR 0096)
+    static DWORD s_lastGritScoopTime = 0;
+    static bool s_hasScoopedGrit = false;
+    bool crouchedNearGround = (s_isPhysicallyCrouched || s_isDeepProne) && (rightLocal.y < -0.45f);
+    bool gritFloorScoop = crouchedNearGround && (vrState.rightController.grip > 0.50f) && (rVel.z > 0.35f);
+    if (gritFloorScoop && !s_hasScoopedGrit && (now - s_lastGritScoopTime > 1500)) {
+        s_hasScoopedGrit = true;
+        s_lastGritScoopTime = now;
+        VR_LOG_INFO("Physical Stealth: PIT BRAWL DIRT / ASH SCOOPED FROM FLOOR (Ry: %.2f, Rz: %.2f)", rightLocal.y, rVel.z);
+        vrState.rightHapticPulse = 0.35f; // Abrasive grit sifting pulse (140 Hz)
+    }
+    if (s_hasScoopedGrit && (rightLocal.y > -0.38f && rightLocal.y < -0.15f && fabsf(rightLocal.x) > 0.12f)) {
+        s_hasScoopedGrit = false;
+        VR_LOG_INFO("Physical Stealth: PIT BRAWL GRIT CONCEALED IN WAIST POCKET");
+        SendKeyTap('E');
+        SendKeyTap(VK_TAB);
+        vrState.rightHapticPulse = 0.45f; // Cloth pocket rustle confirmation (180 Hz)
+    }
+
     // 6b. Two-Handed Firearm Stabilization (ADR 0005)
     // Detect when player brings off-hand to steady the two-handed weapon:
     // - Distance between controller grip poses < 25cm
@@ -1325,6 +1360,22 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         }
     } else {
         s_shotgunPumpRackedBack = false;
+    }
+
+    // Heavy Riot Shotgun Breaching Hinge Blast & Kick (ADR 0095)
+    static DWORD s_lastShotgunBreachTime = 0;
+    bool pointBlankLock = (rightLocal.z > -0.38f && rightLocal.z < -0.16f) && (fabsf(rightLocal.y) < 0.15f);
+    bool breachForwardThrust = (rVel.z < -1.20f && lVel.z < -1.20f);
+    bool triggerBreachPull = (vrState.rightController.trigger > 0.80f);
+    if (s_twoHandedStabilizationActive && pointBlankLock && breachForwardThrust && triggerBreachPull && (now - s_lastShotgunBreachTime > 1800)) {
+        s_lastShotgunBreachTime = now;
+        VR_LOG_INFO("Physical Gunplay: SHOTGUN BREACHING BLAST & DOOR KICK (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
+        mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+        mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+        SendKeyTap('W');
+        SendKeyTap(VK_SPACE);
+        vrState.rightHapticPulse = 0.98f; // Point-blank concussive muzzle blast (90 Hz)
+        vrState.leftHapticPulse = 0.98f;
     }
 
     // 6h. Mining Core Pneumatic Rock Drill & Industrial Jackhammer Rumble (ADR 0037)
@@ -1932,6 +1983,24 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 if (rVel.z > 0.85f) vrState.rightHapticPulse = 0.90f; // Inductive arc shudder (240 Hz)
                 if (lVel.z > 0.85f) vrState.leftHapticPulse = 0.90f;
+            }
+
+            // Subterranean Cryo-Stasis Chamber Biometric Bypass Override (ADR 0097)
+            static DWORD s_lastCryoOverrideTime = 0;
+            bool leftAtUpperTerminal = (leftLocal.y > 0.08f && leftLocal.y < 0.32f) &&
+                                       (leftLocal.z > -0.38f && leftLocal.z < -0.14f) &&
+                                       (vrState.leftController.grip > 0.50f);
+            bool rightAtLowerBreaker = (rightLocal.y > -0.28f && rightLocal.y < 0.04f) &&
+                                       (rightLocal.z > -0.38f && rightLocal.z < -0.14f) &&
+                                       (vrState.rightController.grip > 0.50f);
+            bool breakerYankDown = (rVel.y < -0.50f) && (lSpeed < 0.25f);
+            if (leftAtUpperTerminal && rightAtLowerBreaker && breakerYankDown && (now - s_lastCryoOverrideTime > 2000)) {
+                s_lastCryoOverrideTime = now;
+                VR_LOG_INFO("Environmental Gesture: CRYO-STASIS BIOMETRIC BYPASS OVERRIDE (Ry: %.2f, Ly: %.2f)", rVel.y, leftLocal.y);
+                SendKeyTap('E');
+                SendKeyTap(VK_RETURN);
+                vrState.leftHapticPulse = 0.50f; // Electronic card read chirp (220 Hz)
+                vrState.rightHapticPulse = 0.80f; // Heavy magnetic breaker disconnect thud (120 Hz)
             }
         }
     }
