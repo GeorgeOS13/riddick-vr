@@ -1252,6 +1252,40 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('E');
                 vrState.rightHapticPulse = 0.45f; // Mechanical ratchet tooth click (160 Hz)
             }
+
+            // Tactical Circuit Breaker Sabotage & Power Box Lever (ADR 0043)
+            bool rightAtBreakerBox = (rightLocal.z > -0.45f && rightLocal.z < -0.20f) && (vrState.rightController.grip > 0.50f) && (rVel.y < -0.40f);
+            bool leftAtBreakerBox = (leftLocal.z > -0.45f && leftLocal.z < -0.20f) && (vrState.leftController.grip > 0.50f) && (lVel.y < -0.40f);
+            if ((rightAtBreakerBox || leftAtBreakerBox) && (now - s_lastEnvInteractTime > 800)) {
+                s_lastEnvInteractTime = now;
+                VR_LOG_INFO("Environmental Gesture: CIRCUIT BREAKER SABOTAGE / POWER CUT executed (Vy: %.2f)", rightAtBreakerBox ? rVel.y : lVel.y);
+                SendKeyTap('E');
+                if (rightAtBreakerBox) vrState.rightHapticPulse = 0.80f; // Heavy mechanical contactor snap (140 Hz)
+                if (leftAtBreakerBox) vrState.leftHapticPulse = 0.80f;
+            }
+
+            // Manual Bulkhead Handwheel Spindle Cranking (ADR 0044)
+            static DWORD s_lastWheelCrankTime = 0;
+            bool rightAtWheel = (rightLocal.z > -0.45f && rightLocal.z < -0.22f) && (vrState.rightController.grip > 0.50f);
+            float wheelTangentialSpeed = sqrtf(rVel.x * rVel.x + rVel.y * rVel.y);
+            if (rightAtWheel && wheelTangentialSpeed > 0.50f && (now - s_lastWheelCrankTime > 250)) {
+                s_lastWheelCrankTime = now;
+                VR_LOG_INFO("Environmental Gesture: BULKHEAD HANDWHEEL CRANKING (Speed: %.2f m/s)", wheelTangentialSpeed);
+                SendKeyTap('E');
+                vrState.rightHapticPulse = 0.45f; // Hydraulic dogging ratchet click (160 Hz)
+            }
+
+            // Atmospheric Decompression Blast Shield Overhead Pull (ADR 0046)
+            bool bothHandsOverhead = (leftLocal.y > 0.25f && rightLocal.y > 0.25f);
+            bool bothGrippingShield = (vrState.leftController.grip > 0.50f && vrState.rightController.grip > 0.50f);
+            bool bothPullingShieldDown = (lVel.y < -0.50f && rVel.y < -0.50f);
+            if (bothHandsOverhead && bothGrippingShield && bothPullingShieldDown && (now - s_lastEnvInteractTime > 800)) {
+                s_lastEnvInteractTime = now;
+                VR_LOG_INFO("Environmental Gesture: EMERGENCY BLAST SHIELD LOWERED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
+                SendKeyTap('E');
+                vrState.leftHapticPulse = 0.95f; // Heavy bulkhead slam impact (120 Hz)
+                vrState.rightHapticPulse = 0.95f;
+            }
         }
     }
 
@@ -1395,6 +1429,14 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             vrState.leftHapticPulse = 0.35f; // Object grab latch
         }
         s_leftGripDown = wantLeftGrip;
+    }
+
+    // Inmate Gambling Dice Shaking & Roll Throwing (ADR 0045)
+    static DWORD s_lastDiceRattleTime = 0;
+    bool cuppedLeftHand = (vrState.leftController.grip > 0.40f && vrState.leftController.grip < 0.85f);
+    if (cuppedLeftHand && lSpeed > 0.70f && !s_physicalBlockEngaged && (now - s_lastDiceRattleTime > 120)) {
+        s_lastDiceRattleTime = now;
+        vrState.leftHapticPulse = 0.30f; // Rapid bone-on-bone dice rattle micro-tap (160 Hz)
     }
 
     // Kinematic Body / Heavy Object Drag Resistance (ADR 0020):

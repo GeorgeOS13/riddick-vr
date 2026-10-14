@@ -73,6 +73,10 @@ Key technical choices, trade-offs, and implementation strategies are documented 
 | [**ADR-0040**](docs/adr/0040-dark-athena-eva-spacewalk-magnetic-boots-and-airlocks.md) | Dark Athena EVA Spacewalk Magnetic Boots & Airlocks | Locomotion: Alternating magnetic sole clamp thuds (75Hz) across exterior ship hulls |
 | [**ADR-0041**](docs/adr/0041-pit-fighting-arena-ring-ropes-and-concussive-shoves.md) | Pit Fighting Arena Ring Ropes & Concussive Shoves | Combat: Dual-palm forward thrust concussive shove with 0.85 spring boundary recoil |
 | [**ADR-0042**](docs/adr/0042-sniper-rifle-diegetic-eye-relief-and-bipod-bracing.md) | Sniper Rifle Diegetic Eye Relief & Bipod Bracing | Gunplay: Close eye relief (< 16cm) aim dampening (alpha = 0.12) and bipod lock (alpha = 0.05) |
+| [**ADR-0043**](docs/adr/0043-tactical-circuit-breaker-sabotage-and-power-box-lever.md) | Circuit Breaker Sabotage & Power Box Lever | Stealth: Wall breaker contact and downward pull (Vy < -0.40m/s) with 0.80 contactor clack |
+| [**ADR-0044**](docs/adr/0044-manual-bulkhead-handwheel-spindle-cranking.md) | Manual Bulkhead Handwheel Spindle Cranking | Interactions: Circular tangential hand revolutions with 160Hz dogging ratchet clicks (0.45) |
+| [**ADR-0045**](docs/adr/0045-inmate-gambling-dice-shaking-and-roll-throwing.md) | Inmate Gambling Dice Shaking & Roll Throwing | Mini-Games: Cupped hand reciprocating shake rattle (160Hz, 0.30) and roll throw release |
+| [**ADR-0046**](docs/adr/0046-atmospheric-hull-rupture-and-emergency-blast-shield.md) | Decompression Rupture & Emergency Blast Shield | Narrative: Dual-hand overhead latch (Y > 0.25m) and downward pull (Vy < -0.5m/s) 0.95 slam |
 
 ---
 
@@ -83,7 +87,7 @@ riddick-vr/
 ├── .github/
 │   └── ISSUE_TEMPLATE/       # Templates for bug reports and feature requests
 ├── docs/
-│   └── adr/                  # Architectural Decision Records (ADR 0001 - 0042)
+│   └── adr/                  # Architectural Decision Records (ADR 0001 - 0046)
 ├── include/
 │   └── riddick_vr_protocol.h # IPC shared state, poses, matrix, controller formats
 ├── src/
@@ -173,6 +177,10 @@ The script automatically produces:
 * **EVA Spacewalk Magnetic Boots:** Moving across exterior hull surfaces generates alternating magnetic sole clamping thuds ($0.35$ at $75\text{ Hz}$) locking Riddick to the deck in deep space.
 * **Pit Fighting Arena Concussive Shove:** Thrust both fists/palms forward simultaneously ($V_z < -1.10\text{ m/s}$) to stagger opponents with $0.85$ spring boundary shockwaves.
 * **Sniper Rifle Diegetic Eye Relief & Bipod:** Bring scope close to eye ($< 16\text{ cm}$) for precision dampening ($\alpha = 0.12$); rest off-hand steady against railings for rock-solid bipod lock ($\alpha = 0.05$).
+* **Circuit Breaker Lever Sabotage:** Grip wall breaker lever ($Z \in [-0.45, -0.20]\text{ m}$) and yank downward ($V_y < -0.40\text{ m/s}$) to kill sector power with $0.80$ mechanical clack.
+* **Bulkhead Handwheel Spindle:** Grip manual door wheel and crank in circular tangential revolutions ($|V| > 0.50\text{ m/s}$) for $160\text{ Hz}$ dogging ratchet clicks ($0.45$).
+* **Inmate Gambling Dice Mini-Games:** Cup hand with grip held ($0.40 - 0.85$) and shake ($> 0.70\text{ m/s}$) for $160\text{ Hz}$ rattling bone haptics ($0.30$); release forward to roll.
+* **Emergency Blast Shield Slam:** Raise both hands overhead ($Y > 0.25\text{ m}$) at bulkhead station and slam down hard ($V_y < -0.50\text{ m/s}$) for dual $0.95$ impact slam.
 * **Tactical Eyeshine & Flashlight:** Tap right temple with grip to toggle Eyeshine (`Q`); tap left shoulder to toggle flashlight (`F`).
 
 ---
