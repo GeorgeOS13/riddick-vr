@@ -1064,13 +1064,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         }
     }
 
-    // 9. Left & Right Grip Mapping (Interactions, Climbing, Reload)
-    // Left Grip -> Grab / Secondary Interact ('E') (suppressed during ladder climb or two-handed stabilization)
+    // 9. Left & Right Grip Mapping (Interactions, Physical Throwing, Climbing, Reload - ADR 0017)
+    // Left Grip -> Grab / Secondary Interact ('E') / Physical Object Throwing
     bool wantLeftGrip = !isClimbingActive && !s_twoHandedStabilizationActive && (vrState.leftController.grip > 0.5f);
     if (wantLeftGrip != s_leftGripDown) {
-        SendKey('E', wantLeftGrip);
+        if (!wantLeftGrip && s_leftGripDown) {
+            // Evaluated at moment of release:
+            // Fast throwing motion (lSpeed > 1.2 m/s) launches carried object forward!
+            if (lSpeed > 1.2f) {
+                VR_LOG_INFO("Physical Gesture: OBJECT THROW / PROPULSION executed (Speed: %.2f m/s, Vel: [%.2f, %.2f, %.2f])",
+                    lSpeed, lVel.x, lVel.y, lVel.z);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                vrState.leftHapticPulse = 0.60f; // Tactile release impulse
+            } else {
+                SendKey('E', false); // Gentle drop at feet
+            }
+        } else {
+            SendKey('E', true);
+            vrState.leftHapticPulse = 0.35f; // Object grab latch
+        }
         s_leftGripDown = wantLeftGrip;
-        if (wantLeftGrip) vrState.leftHapticPulse = 0.3f;
     }
 
     // Right Grip -> Weapon Reload ('R') (suppressed during ladder climb)
