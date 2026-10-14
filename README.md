@@ -193,6 +193,10 @@ The script automatically produces:
 * **Dual-Hand Riot Shield Plant & Bash:** In two-handed stance, plunge controllers downward ($V_y < -0.75\text{ m/s}$) to plant shield into deck grating (`C` + `Space`, $80\text{ Hz}$ clamp); thrust both hands forward ($V_z < -1.15\text{ m/s}$) for concussive Shield Bash (`LMB`, $0.95$ shockwave).
 * **Subterranean Steam Pipe Wheel Valve:** Grip industrial wheel valve ($Z \in [-0.42, -0.18]\text{ m}$) and crank 3 revolutions ($|V| > 0.45\text{ m/s}$) to vent high-pressure scalding steam (`E` + `Q`) with sustained $110\text{ Hz}$ ($0.70$) pneumatic hissing.
 * **Inmate Pit Brawl Stool Wrench & Smash:** Crouch near bolted metal furniture, grip with both hands ($> 0.60$), and yank upward violently ($V_y > 1.05\text{ m/s}$) to rip stool from deck rivets (`E` + Slot '1', $0.85$ crack); two-handed swings ($|V| > 1.35\text{ m/s}$) deliver bone-crushing blunt smashes (`LMB`, dual $0.95$).
+* **Tactical Riot Baton Electric Arc Shock:** Squeeze dominant trigger ($> 0.60$) during forward thrust ($V_z < -0.90\text{ m/s}$) to channel high-voltage capacitor current with $260\text{ Hz}$ ($0.90$) electrical sizzle shockwave.
+* **Inmate Shiv Boot Sheath Draw:** Reach down to inside calf/ankle ($Y < -0.60\text{ m}, X \in [-0.25, 0.0]\text{ m}$) while crouched or prone and grip to draw/holster concealed shiv (Slot '3') with $160\text{ Hz}$ ($0.45$) sheath friction click.
+* **Cargo Crane Hydraulic Console Steering:** Grasp gantry crane levers ($Z \in [-0.40, -0.15]\text{ m}, Y \in [-0.35, -0.05]\text{ m}$) with grip held; push/pull and throw laterally to drive boom/trolley (`W`/`S`/`A`/`D`) with $50\text{ Hz}$ ($0.35$) hydraulic rumble.
+* **Security Drone EMP Overload & Chassis Snap:** Grapple stunned security drone collar ($Z \in [-0.45, -0.20]\text{ m}$) with both grips clenched ($> 0.65$) and twist opposing hands violently ($|\Delta V_y| > 1.20\text{ m/s}$) to snap cybernetic spine (`LMB` + `'E'`) with dual $0.95$ ($280\text{ Hz}$) EMP arc burst.
 * **Tactical Eyeshine & Flashlight:** Tap right temple with grip to toggle Eyeshine (`Q`); tap left shoulder to toggle flashlight (`F`).
 
 ---

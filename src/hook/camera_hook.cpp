@@ -765,6 +765,13 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             const auto& activeVel = (rSpeed > lSpeed) ? rVel : lVel;
             const auto& activeLocal = (rSpeed > lSpeed) ? rightLocal : leftLocal;
 
+            // Security Drone EMP Overload & Chassis Snap (ADR 0058)
+            bool dualGrappleDrone = (rightLocal.z < -0.20f && leftLocal.z < -0.20f) &&
+                                    (rightLocal.z > -0.45f && leftLocal.z > -0.45f) &&
+                                    (vrState.rightController.grip > 0.65f && vrState.leftController.grip > 0.65f);
+            bool dualTorqueSnap = (fabsf(lVel.y - rVel.y) > 1.20f) || (fabsf(lVel.x - rVel.x) > 1.20f);
+            bool droneEmpSnap = dualGrappleDrone && dualTorqueSnap;
+
             // Dual-Hand Riot Shield Concussive Bash (ADR 0052)
             bool dualShieldBash = s_twoHandedStabilizationActive &&
                                   (rVel.z < -1.15f && lVel.z < -1.15f) &&
@@ -794,7 +801,14 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                     (vrState.leftController.grip > 0.45f && vrState.rightController.grip > 0.45f) &&
                                     (lVel.y < -1.30f && rVel.y < -1.30f);
 
-            if (dualShieldBash) {
+            if (droneEmpSnap) {
+                VR_LOG_INFO("Physical Combat: SECURITY DRONE EMP OVERLOAD & CHASSIS SNAP (TorqueRelY: %.2f)", fabsf(lVel.y - rVel.y));
+                SendKeyTap('E');
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                vrState.rightHapticPulse = 0.95f; // Mechanical spine crunch & EMP arc wave (280 Hz)
+                vrState.leftHapticPulse = 0.95f;
+            } else if (dualShieldBash) {
                 VR_LOG_INFO("Physical Gesture: RIOT SHIELD CONCUSSIVE BASH (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
                 SendKey('W', true);
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
@@ -899,14 +913,24 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 if (rSpeed > lSpeed) vrState.rightHapticPulse = 0.9f;
                 else vrState.leftHapticPulse = 0.9f;
             } else {
-                VR_LOG_INFO("Physical Gesture: STRAIGHT PUNCH / LUNGING BLADE THRUST detected (Speed: %.2f m/s)", (rSpeed > lSpeed) ? rSpeed : lSpeed);
-                SendKey('W', true);
-                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey('W', false);
+                bool isBatonArcJab = (vrState.rightController.trigger > 0.60f);
+                if (isBatonArcJab) {
+                    VR_LOG_INFO("Physical Gesture: RIOT BATON ELECTRIC ARC SHOCK & JAB (Speed: %.2f m/s)", rSpeed);
+                    SendKey('W', true);
+                    mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                    mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                    SendKey('W', false);
+                    vrState.rightHapticPulse = 0.90f; // High-voltage arc discharge sizzle (260 Hz)
+                } else {
+                    VR_LOG_INFO("Physical Gesture: STRAIGHT PUNCH / LUNGING BLADE THRUST detected (Speed: %.2f m/s)", (rSpeed > lSpeed) ? rSpeed : lSpeed);
+                    SendKey('W', true);
+                    mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                    mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                    SendKey('W', false);
 
-                if (rSpeed > lSpeed) vrState.rightHapticPulse = 0.9f;
-                else vrState.leftHapticPulse = 0.9f;
+                    if (rSpeed > lSpeed) vrState.rightHapticPulse = 0.9f;
+                    else vrState.leftHapticPulse = 0.9f;
+                }
             }
         }
     }
@@ -1129,6 +1153,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         bool rightLowSpine = (rightLocal.y < -0.30f && rightLocal.z > -0.05f && fabsf(rightLocal.x) < 0.15f && vrState.rightController.grip > 0.50f);
         bool rightAtHip = (rightLocal.y < -0.32f && rightLocal.x > 0.14f && vrState.rightController.grip > 0.50f);
         bool leftAtHip = (leftLocal.y < -0.32f && leftLocal.x < -0.14f && vrState.leftController.grip > 0.50f);
+        bool leftAtBootSheath = (leftLocal.y < -0.60f && leftLocal.x >= -0.25f && leftLocal.x <= 0.0f && vrState.leftController.grip > 0.50f);
+        bool rightAtBootSheath = (rightLocal.y < -0.60f && rightLocal.x >= -0.25f && rightLocal.x <= 0.0f && vrState.rightController.grip > 0.50f);
         bool rightAtAnkle = (rightLocal.y < -0.65f && vrState.rightController.grip > 0.50f);
         bool leftAtAnkle = (leftLocal.y < -0.65f && vrState.leftController.grip > 0.50f);
 
@@ -1147,6 +1173,12 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             VR_LOG_INFO("Holster Gesture: HEAVY WEAPON / SCAR GUN slot toggled (Low Spine)");
             SendKeyTap('5');
             vrState.rightHapticPulse = 0.85f; // Heavy industrial magnetic clamp pulse
+        } else if ((s_isPhysicallyCrouched || s_isDeepProne) && (leftAtBootSheath || rightAtBootSheath)) {
+            s_lastHolsterTime = now;
+            VR_LOG_INFO("Holster Gesture: CONCEALED SHIV DRAWN FROM BOOT SHEATH (Y: %.2fm)", leftAtBootSheath ? leftLocal.y : rightLocal.y);
+            SendKeyTap('3'); // Equip shiv/knife slot
+            if (leftAtBootSheath) vrState.leftHapticPulse = 0.45f; // Leather boot sheath friction click (160 Hz)
+            if (rightAtBootSheath) vrState.rightHapticPulse = 0.45f;
         } else if ((s_isPhysicallyCrouched || s_isDeepProne) && (rightAtAnkle || leftAtAnkle)) {
             s_lastHolsterTime = now;
             VR_LOG_INFO("Holster Gesture: CONTRABAND ANKLE BOOT POUCH accessed (HandY: %.2fm)", rightAtAnkle ? rightLocal.y : leftLocal.y);
@@ -1404,6 +1436,32 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('1'); // Equip improvised heavy melee slot
                 vrState.leftHapticPulse = 0.85f; // Shearing bolt crack (200 Hz)
                 vrState.rightHapticPulse = 0.85f;
+            }
+
+            // Heavy Automated Cargo Crane Lever Console Steering (ADR 0057)
+            static DWORD s_lastCraneRumbleTime = 0;
+            bool rightAtCraneConsole = (rightLocal.z > -0.40f && rightLocal.z < -0.15f) &&
+                                       (rightLocal.y > -0.35f && rightLocal.y < -0.05f) &&
+                                       (vrState.rightController.grip > 0.50f);
+            if (rightAtCraneConsole) {
+                if (rVel.z < -0.30f) {
+                    SendKey('W', true); // Boom forward
+                    SendKey('S', false);
+                } else if (rVel.z > 0.30f) {
+                    SendKey('S', true); // Boom backward
+                    SendKey('W', false);
+                }
+                if (rVel.x < -0.30f) {
+                    SendKey('A', true); // Trolley left
+                    SendKey('D', false);
+                } else if (rVel.x > 0.30f) {
+                    SendKey('D', true); // Trolley right
+                    SendKey('A', false);
+                }
+                if (now - s_lastCraneRumbleTime > 200) {
+                    s_lastCraneRumbleTime = now;
+                    vrState.rightHapticPulse = 0.35f; // Heavy hydraulic motor rumble (50 Hz)
+                }
             }
         }
     }
