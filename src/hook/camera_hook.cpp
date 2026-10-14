@@ -262,6 +262,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     static float s_accumulatedLookY = 0.0f;
     static float s_lastHmdYaw = 0.0f;
     static float s_lastHmdPitch = 0.0f;
+    static float s_lastHmdDeltaYaw = 0.0f;
     static float s_recoilKickPitch = 0.0f;
 
     if (vrState.hmdPose.isValid && !vrState.cinemaMode) {
@@ -308,6 +309,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
                 s_prevHmdYaw = currentYaw;
                 s_prevHmdPitch = currentPitch;
+                s_lastHmdDeltaYaw = deltaYaw;
 
                 // Decoupled Motion Controller Aim Steering:
                 // Extract relative orientation between HMD and weapon aim controller: Q_rel = Q_hmd^-1 * Q_ctrl
@@ -1664,6 +1666,33 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_UP, false);
                 SendKey(VK_DOWN, false);
             }
+
+            // Cargo Bay Container Hydraulic Lock Latch Lever (ADR 0072)
+            static DWORD s_lastContainerLatchTime = 0;
+            bool rightAtContainer = (rightLocal.z > -0.42f && rightLocal.z < -0.16f) &&
+                                    (rightLocal.y > -0.25f && rightLocal.y < 0.15f) &&
+                                    (vrState.rightController.grip > 0.50f);
+            bool containerLeverThrow = (rVel.y > 0.70f || fabsf(rVel.x) > 0.70f);
+            if (rightAtContainer && containerLeverThrow && (now - s_lastContainerLatchTime > 900)) {
+                s_lastContainerLatchTime = now;
+                VR_LOG_INFO("Environmental Gesture: CARGO CONTAINER HYDRAULIC LOCK UNLATCHED (Vy: %.2f, Vx: %.2f)", rVel.y, rVel.x);
+                SendKeyTap('E');
+                vrState.rightHapticPulse = 0.85f; // Heavy hydraulic seal snap & mechanical clunk (100 Hz)
+            }
+
+            // Subterranean Cryo-Nitrogen Coolant Valve Venting Diversion (ADR 0074)
+            static DWORD s_lastCryoCoolantVentTime = 0;
+            bool rightAtCryoValve = (rightLocal.z > -0.42f && rightLocal.z < -0.16f) &&
+                                    (rightLocal.y > -0.20f && rightLocal.y < 0.25f) &&
+                                    (vrState.rightController.grip > 0.50f);
+            bool cryoStrike = (rSpeed > 1.05f || fabsf(rVel.x) > 0.80f);
+            if (rightAtCryoValve && cryoStrike && (now - s_lastCryoCoolantVentTime > 1200)) {
+                s_lastCryoCoolantVentTime = now;
+                VR_LOG_INFO("Environmental Gesture: CRYO-NITROGEN COOLANT VALVE POPPED / SUB-ZERO PLUME RELEASED");
+                SendKeyTap('E');
+                SendKeyTap('Q'); // Thermal diversion signal
+                vrState.rightHapticPulse = 0.85f; // Crystalline ice fracture crack (260 Hz)
+            }
         }
     }
 
@@ -1692,6 +1721,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             VR_LOG_INFO("Tactical Gesture: SHOULDER FLASHLIGHT %s (Left Shoulder Tap)", s_flashlightActive ? "ACTIVATED" : "DEACTIVATED");
             SendKeyTap('F'); // Native Riddick Flashlight key
             vrState.leftHapticPulse = 0.75f; // Mechanical click pulse
+        }
+
+        // Tactical Radio Transceiver Intercept / Eavesdropping (ADR 0071)
+        static DWORD s_radioHoldStartTime = 0;
+        static DWORD s_lastRadioInterceptTime = 0;
+        bool rightAtEar = (rightLocal.x > 0.16f && rightLocal.y > 0.05f && rightLocal.y < 0.22f && rightLocal.z > -0.15f && rightLocal.z < 0.08f);
+        bool leftAtEar = (leftLocal.x < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.22f && leftLocal.z > -0.15f && leftLocal.z < 0.08f);
+        bool earGripHeld = (rightAtEar && vrState.rightController.grip > 0.50f) || (leftAtEar && vrState.leftController.grip > 0.50f);
+
+        if (earGripHeld) {
+            if (s_radioHoldStartTime == 0) {
+                s_radioHoldStartTime = now;
+            } else if ((now - s_radioHoldStartTime >= 120) && (now - s_lastRadioInterceptTime > 1200)) {
+                s_lastRadioInterceptTime = now;
+                VR_LOG_INFO("Tactical Intercept: GUARD RADIO TRANSCEIVER EAVESDROPPING ENGAGED");
+                SendKeyTap(VK_TAB); // PDA / Tactical audio channel
+                if (rightAtEar) vrState.rightHapticPulse = 0.40f; // Squelch burst (220 Hz)
+                if (leftAtEar) vrState.leftHapticPulse = 0.40f;
+            }
+        } else {
+            s_radioHoldStartTime = 0;
         }
     }
 
@@ -1829,6 +1879,25 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
         mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
         vrState.rightHapticPulse = 0.50f; // Fine particulate scatter burst (180 Hz)
+    }
+
+    // Inmate Pit Brawl Dirt / Ash Eye Recovery Blink Gesture (ADR 0073)
+    static DWORD s_lastEyeRecoveryTime = 0;
+    bool rightWipingEyes = (rightLocal.z > -0.22f && rightLocal.z < -0.05f) &&
+                           (rightLocal.y > -0.05f && rightLocal.y < 0.10f) &&
+                           (fabsf(rVel.x) > 0.50f);
+    bool leftWipingEyes = (leftLocal.z > -0.22f && leftLocal.z < -0.05f) &&
+                          (leftLocal.y > -0.05f && leftLocal.y < 0.10f) &&
+                          (fabsf(lVel.x) > 0.50f);
+    bool rapidHeadShake = (fabsf(s_lastHmdDeltaYaw) > 0.15f);
+
+    if ((rightWipingEyes || leftWipingEyes || rapidHeadShake) && (now - s_lastEyeRecoveryTime > 1200)) {
+        s_lastEyeRecoveryTime = now;
+        VR_LOG_INFO("Combat Defense: CORNEAL BLINK / DIRT WIPED FROM EYES (%s)",
+            rapidHeadShake ? "Rapid Head Shake" : "Forearm Eye Wipe");
+        SendKeyTap(VK_SPACE); // Visual overlay recovery accelerator
+        vrState.rightHapticPulse = 0.30f; // Fine corneal blink micro-haptic (180 Hz)
+        vrState.leftHapticPulse = 0.30f;
     }
 
     // Kinematic Body / Heavy Object Drag Resistance (ADR 0020):
