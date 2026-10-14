@@ -1154,6 +1154,17 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         }
     }
 
+    // Security Guard DNA Biometric Weapon Grip Shock Suppression (ADR 0083)
+    static DWORD s_lastDnaSuppressionTime = 0;
+    bool insulatedTapeWrap = (twoHandDist < 0.15f) && (vrState.leftController.grip > 0.60f);
+    if (insulatedTapeWrap && !s_physicalBlockEngaged && (now - s_lastDnaSuppressionTime > 1500)) {
+        s_lastDnaSuppressionTime = now;
+        VR_LOG_INFO("Tactical Firearm: GUARD DNA BIOMETRIC CIRCUIT SUPPRESSED WITH INSULATED GAUNTLET (Dist: %.2fm)", twoHandDist);
+        SendKeyTap('E'); // Suppress/bypass DNA lock circuit
+        vrState.leftHapticPulse = 0.40f; // Neutralized low hum (80 Hz)
+        vrState.rightHapticPulse = 0.40f;
+    }
+
     // Apply exponential smoothing / spherical interpolation on weapon aim pose when two-handed
     if (vrState.rightController.aimPose.isValid) {
         if (s_twoHandedStabilizationActive) {
@@ -1798,6 +1809,21 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 if (vrState.rightController.grip > 0.50f) vrState.rightHapticPulse = 0.50f; // Aerosol propellant hiss (160 Hz)
                 if (vrState.leftController.grip > 0.50f) vrState.leftHapticPulse = 0.50f;
             }
+
+            // Subterranean Ventilation Axial Fan Blade Jamming Bar (ADR 0084)
+            static DWORD s_lastFanJamTime = 0;
+            bool bothAtFanRotor = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && rightLocal.z > -0.42f && rightLocal.z < -0.16f) &&
+                                  (leftLocal.y > -0.15f && leftLocal.y < 0.25f && rightLocal.y > -0.15f && rightLocal.y < 0.25f) &&
+                                  (vrState.leftController.grip > 0.50f && vrState.rightController.grip > 0.50f);
+            bool fanJamThrust = (lVel.z < -1.10f || rVel.z < -1.10f);
+            if (bothAtFanRotor && fanJamThrust && (now - s_lastFanJamTime > 1200)) {
+                s_lastFanJamTime = now;
+                VR_LOG_INFO("Environmental Gesture: VENTILATION AXIAL FAN BLADES JAMMED (Lz: %.2f, Rz: %.2f)", lVel.z, rVel.z);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                vrState.leftHapticPulse = 0.95f; // Shearing metal turbine arrest impact (120 Hz)
+                vrState.rightHapticPulse = 0.95f;
+            }
         }
     }
 
@@ -1847,6 +1873,20 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
         } else {
             s_radioHoldStartTime = 0;
+        }
+
+        // EVA Spacewalk Solar Radiation Shield Visor Downward Pull (ADR 0086)
+        static DWORD s_lastSolarVisorTime = 0;
+        bool rightAtBrow = (rightLocal.y > 0.18f && rightLocal.z > -0.18f && rightLocal.z < 0.05f && fabsf(rightLocal.x) < 0.20f && vrState.rightController.grip > 0.50f);
+        bool leftAtBrow = (leftLocal.y > 0.18f && leftLocal.z > -0.18f && leftLocal.z < 0.05f && fabsf(leftLocal.x) < 0.20f && vrState.leftController.grip > 0.50f);
+        bool visorPullDown = (rightAtBrow && rVel.y < -0.55f) || (leftAtBrow && lVel.y < -0.55f);
+
+        if (visorPullDown && (now - s_lastSolarVisorTime > 1200)) {
+            s_lastSolarVisorTime = now;
+            VR_LOG_INFO("Orbital EVA Gesture: POLARIZED SOLAR RADIATION VISOR PULLED DOWN");
+            SendKeyTap('Q'); // Toggle optical tint filter
+            if (rightAtBrow) vrState.rightHapticPulse = 0.65f; // Solid mechanical visor latch click (150 Hz)
+            if (leftAtBrow) vrState.leftHapticPulse = 0.65f;
         }
     }
 
@@ -1999,6 +2039,22 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
         mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
         vrState.rightHapticPulse = 0.50f; // Fine particulate scatter burst (180 Hz)
+    }
+
+    // Inmate Pit Brawl Sand / Ash Throw Two-Handed Fan Scatter (ADR 0085)
+    static DWORD s_lastFanScatterTime = 0;
+    bool bothHandsLowSand = (s_isPhysicallyCrouched || s_isDeepProne) &&
+                            (leftLocal.y < -0.40f && rightLocal.y < -0.40f) &&
+                            (vrState.leftController.grip < 0.45f && vrState.rightController.grip < 0.45f);
+    bool fanScatterOutward = (lVel.x < -0.80f && rVel.x > 0.80f) && (lVel.y > 0.40f || rVel.y > 0.40f);
+    if (bothHandsLowSand && fanScatterOutward && (now - s_lastFanScatterTime > 1400)) {
+        s_lastFanScatterTime = now;
+        VR_LOG_INFO("Combat Dirty Tactic: DUAL-HANDED SAND / ASH FAN SCATTER (Lx: %.2f, Rx: %.2f)", lVel.x, rVel.x);
+        SendKeyTap('E');
+        mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+        mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+        vrState.leftHapticPulse = 0.65f; // Dual wide-arc particulate scatter pulses (180 Hz)
+        vrState.rightHapticPulse = 0.65f;
     }
 
     // Inmate Pit Brawl Dirt / Ash Eye Recovery Blink Gesture (ADR 0073)
