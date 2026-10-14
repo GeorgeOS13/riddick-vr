@@ -676,6 +676,19 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         vrState.leftHapticPulse = 0.15f; // Subtle stealth crawl pulse (85 Hz)
     }
 
+    // EVA Spacewalk Magnetic Boots Stride Cadence (ADR 0040)
+    static DWORD s_lastMagBootStepTime = 0;
+    static bool s_magBootLeftFoot = false;
+    if (!s_isPhysicallyCrouched && !s_isDeepProne && !isClimbingActive && (wantW || wantS || wantA || wantD) && (now - s_lastMagBootStepTime > 520)) {
+        s_lastMagBootStepTime = now;
+        s_magBootLeftFoot = !s_magBootLeftFoot;
+        if (s_magBootLeftFoot) {
+            vrState.leftHapticPulse = 0.35f; // Low-frequency magnetic boot lock (75 Hz)
+        } else {
+            vrState.rightHapticPulse = 0.35f;
+        }
+    }
+
     // 4. Smooth & Snap Turning (Right Thumbstick X)
     static bool s_snapTurnArmed = true;
     float stickX = vrState.rightController.thumbstickX;
@@ -752,6 +765,11 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             const auto& activeVel = (rSpeed > lSpeed) ? rVel : lVel;
             const auto& activeLocal = (rSpeed > lSpeed) ? rightLocal : leftLocal;
 
+            // Pit Fighting Arena Dual-Palm Concussive Shove (ADR 0041)
+            bool dualPalmShove = (rVel.z < -1.10f && lVel.z < -1.10f) &&
+                                 (rightLocal.z < -0.15f && leftLocal.z < -0.15f) &&
+                                 (vrState.rightController.grip > 0.40f && vrState.leftController.grip > 0.40f);
+
             // Vent Duct Pipe Hang & Death-From-Above Aerial Drop Ambush (ADR 0033)
             bool isLookingDown = (s_lastHmdPitch < -0.70f); // Looking steeply downward (< -40 deg) from ledge/duct
             bool isDownwardPlunge = (activeVel.y < -1.10f);
@@ -761,7 +779,15 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                     (vrState.leftController.grip > 0.45f && vrState.rightController.grip > 0.45f) &&
                                     (lVel.y < -1.30f && rVel.y < -1.30f);
 
-            if (isLookingDown && isDownwardPlunge) {
+            if (dualPalmShove) {
+                VR_LOG_INFO("Physical Gesture: PIT FIGHTING ARENA DUAL-PALM CONCUSSIVE SHOVE (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
+                SendKey('W', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('W', false);
+                vrState.rightHapticPulse = 0.85f; // Elastic ring boundary / concussive shockwave (140 Hz)
+                vrState.leftHapticPulse = 0.85f;
+            } else if (isLookingDown && isDownwardPlunge) {
                 VR_LOG_INFO("Physical Gesture: DEATH-FROM-ABOVE AERIAL TAKEDOWN / DROP AMBUSH (Pitch: %.2f rad, Vy: %.2f m/s)", s_lastHmdPitch, activeVel.y);
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
@@ -971,6 +997,20 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_hasStabilizedPose = true;
             } else {
                 float smoothAlpha = isHarriesStance ? 0.22f : 0.35f;
+
+                // Sniper Rifle Diegetic Eye Relief & Bipod Bracing (ADR 0042)
+                float scopeEyeDist = sqrtf(
+                    powf(rightLocal.x, 2) +
+                    powf(rightLocal.y, 2) +
+                    powf(rightLocal.z, 2)
+                );
+                if (scopeEyeDist < 0.16f) {
+                    smoothAlpha = 0.12f; // High-precision eye relief stabilization
+                    if (lSpeed < 0.08f) {
+                        smoothAlpha = 0.05f; // Bipod railing bench-rest lock
+                    }
+                }
+
                 s_stabilizedAimPose.position.x += smoothAlpha * (vrState.rightController.aimPose.position.x - s_stabilizedAimPose.position.x);
                 s_stabilizedAimPose.position.y += smoothAlpha * (vrState.rightController.aimPose.position.y - s_stabilizedAimPose.position.y);
                 s_stabilizedAimPose.position.z += smoothAlpha * (vrState.rightController.aimPose.position.z - s_stabilizedAimPose.position.z);
@@ -1285,6 +1325,29 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         }
     } else {
         s_triggerHoldStartTime = 0;
+    }
+
+    // Security Tranq Gun Tactile Capacitor Charging (ADR 0039)
+    static DWORD s_tranqChargeStartTime = 0;
+    static bool s_isChargingTranq = false;
+    bool isAimingStance = (vrState.leftController.trigger > 0.40f) || s_twoHandedStabilizationActive;
+    if (isAimingStance && vrState.rightController.trigger > 0.35f && vrState.rightController.trigger < 0.90f) {
+        if (!s_isChargingTranq) {
+            s_isChargingTranq = true;
+            s_tranqChargeStartTime = now;
+        }
+        DWORD chargeElapsed = now - s_tranqChargeStartTime;
+        float chargeRatio = (chargeElapsed < 800) ? (chargeElapsed / 800.0f) : 1.0f;
+        vrState.rightHapticPulse = 0.20f + 0.50f * chargeRatio; // Escalating electrostatic capacitor hum (80 -> 260 Hz)
+    } else {
+        if (s_isChargingTranq) {
+            s_isChargingTranq = false;
+            DWORD chargeTotal = now - s_tranqChargeStartTime;
+            if (chargeTotal > 450) {
+                VR_LOG_INFO("Tactical Weapon: TRANQ GUN PEAK CHARGE DART DISCHARGED (Charge: %ums)", chargeTotal);
+                vrState.rightHapticPulse = 0.85f; // Electric discharge snap (280 Hz)
+            }
+        }
     }
 
     // Block / Aim: Engaged physically via Boxer Guard pose OR manually via Left Trigger

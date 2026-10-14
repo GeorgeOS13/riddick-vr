@@ -69,6 +69,10 @@ Key technical choices, trade-offs, and implementation strategies are documented 
 | [**ADR-0036**](docs/adr/0036-ventilation-duct-screw-fastener-unthreading.md) | Vent Duct Screw Fastener Unthreading | Interactions: Grate corner contact and wrist twist ratchet unthreading (160Hz click) |
 | [**ADR-0037**](docs/adr/0037-mining-core-pneumatic-drill-and-seismic-haptics.md) | Mining Core Pneumatic Rock Drill Seismic Haptics | Tools & Haptics: Dual-trigger industrial hammering with cyclic 65Hz seismic shockwaves |
 | [**ADR-0038**](docs/adr/0038-contraband-smuggling-and-ankle-pouch-inventory.md) | Contraband Smuggling & Ankle Pouch Inventory | Inventory & Stealth: Crouched reaching down to boot (Y < -0.65m) to stash/retrieve contraband |
+| [**ADR-0039**](docs/adr/0039-security-tranq-gun-tactile-charging-and-stun-darts.md) | Security Tranq Gun Tactile Charging & Stun Darts | Weapons: Escalating electrostatic hum (80Hz to 260Hz) and 0.85 electrical discharge snap |
+| [**ADR-0040**](docs/adr/0040-dark-athena-eva-spacewalk-magnetic-boots-and-airlocks.md) | Dark Athena EVA Spacewalk Magnetic Boots & Airlocks | Locomotion: Alternating magnetic sole clamp thuds (75Hz) across exterior ship hulls |
+| [**ADR-0041**](docs/adr/0041-pit-fighting-arena-ring-ropes-and-concussive-shoves.md) | Pit Fighting Arena Ring Ropes & Concussive Shoves | Combat: Dual-palm forward thrust concussive shove with 0.85 spring boundary recoil |
+| [**ADR-0042**](docs/adr/0042-sniper-rifle-diegetic-eye-relief-and-bipod-bracing.md) | Sniper Rifle Diegetic Eye Relief & Bipod Bracing | Gunplay: Close eye relief (< 16cm) aim dampening (alpha = 0.12) and bipod lock (alpha = 0.05) |
 
 ---
 
@@ -79,7 +83,7 @@ riddick-vr/
 ├── .github/
 │   └── ISSUE_TEMPLATE/       # Templates for bug reports and feature requests
 ├── docs/
-│   └── adr/                  # Architectural Decision Records (ADR 0001 - 0038)
+│   └── adr/                  # Architectural Decision Records (ADR 0001 - 0042)
 ├── include/
 │   └── riddick_vr_protocol.h # IPC shared state, poses, matrix, controller formats
 ├── src/
@@ -165,6 +169,10 @@ The script automatically produces:
 * **Vent Fastener Unthreading:** Contact vent corners with tool/shiv and twist wrist counter-clockwise ($|V_x| > 0.45\text{ m/s}$) to pop corner screws with $160\text{ Hz}$ ratchet clicks.
 * **Mining Core Pneumatic Drill:** Hold both triggers in two-handed stance to unleash heavy industrial rock-shattering percussion with cyclic $65\text{ Hz}$ seismic vibrations ($0.95$).
 * **Contraband Ankle Boot Holster:** Reach down to ankle boot ($Y < -0.65\text{ m}$) while crouched or prone to access concealed contraband pouch with $140\text{ Hz}$ fabric rustle.
+* **Security Tranq Gun Capacitor Charge:** In aiming stance, hold trigger partially down ($0.35 - 0.90$) to build electrostatic voltage ($80\text{ Hz} \to 260\text{ Hz}$); release to fire high-voltage stun dart with $0.85$ discharge snap.
+* **EVA Spacewalk Magnetic Boots:** Moving across exterior hull surfaces generates alternating magnetic sole clamping thuds ($0.35$ at $75\text{ Hz}$) locking Riddick to the deck in deep space.
+* **Pit Fighting Arena Concussive Shove:** Thrust both fists/palms forward simultaneously ($V_z < -1.10\text{ m/s}$) to stagger opponents with $0.85$ spring boundary shockwaves.
+* **Sniper Rifle Diegetic Eye Relief & Bipod:** Bring scope close to eye ($< 16\text{ cm}$) for precision dampening ($\alpha = 0.12$); rest off-hand steady against railings for rock-solid bipod lock ($\alpha = 0.05$).
 * **Tactical Eyeshine & Flashlight:** Tap right temple with grip to toggle Eyeshine (`Q`); tap left shoulder to toggle flashlight (`F`).
 
 ---
