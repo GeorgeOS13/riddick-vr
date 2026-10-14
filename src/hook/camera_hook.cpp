@@ -261,6 +261,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     static float s_accumulatedLookX = 0.0f;
     static float s_accumulatedLookY = 0.0f;
     static float s_lastHmdYaw = 0.0f;
+    static float s_lastHmdPitch = 0.0f;
     static float s_recoilKickPitch = 0.0f;
 
     if (vrState.hmdPose.isValid && !vrState.cinemaMode) {
@@ -288,6 +289,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             } else {
                 currentPitch = asinf(sinPitch);
             }
+            s_lastHmdPitch = currentPitch;
 
             if (!s_hasPrevHmdOrientation || vrState.shouldRecenter) {
                 s_prevHmdYaw = currentYaw;
@@ -750,12 +752,22 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             const auto& activeVel = (rSpeed > lSpeed) ? rVel : lVel;
             const auto& activeLocal = (rSpeed > lSpeed) ? rightLocal : leftLocal;
 
+            // Vent Duct Pipe Hang & Death-From-Above Aerial Drop Ambush (ADR 0033)
+            bool isLookingDown = (s_lastHmdPitch < -0.70f); // Looking steeply downward (< -40 deg) from ledge/duct
+            bool isDownwardPlunge = (activeVel.y < -1.10f);
+
             // Two-Handed Overhead Pipe Slam / Heavy Club Crushing Strike (ADR 0026)
             bool dualOverheadSlam = (leftLocal.y > 0.10f && rightLocal.y > 0.10f) &&
                                     (vrState.leftController.grip > 0.45f && vrState.rightController.grip > 0.45f) &&
                                     (lVel.y < -1.30f && rVel.y < -1.30f);
 
-            if (dualOverheadSlam) {
+            if (isLookingDown && isDownwardPlunge) {
+                VR_LOG_INFO("Physical Gesture: DEATH-FROM-ABOVE AERIAL TAKEDOWN / DROP AMBUSH (Pitch: %.2f rad, Vy: %.2f m/s)", s_lastHmdPitch, activeVel.y);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                vrState.rightHapticPulse = 0.95f; // Bone-shattering ground impact shockwave (280 Hz)
+                vrState.leftHapticPulse = 0.95f;
+            } else if (dualOverheadSlam) {
                 VR_LOG_INFO("Physical Gesture: TWO-HANDED OVERHEAD CRUSHING SLAM / PIPE STRIKE (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
                 SendKey('S', true);
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
@@ -978,6 +990,28 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         } else {
             s_hasStabilizedPose = false;
         }
+    }
+
+    // 6g. Two-Handed Riot Shotgun Pump Action & Chambering (ADR 0034)
+    static bool s_shotgunPumpRackedBack = false;
+    static DWORD s_lastPumpActionTime = 0;
+    if (s_twoHandedStabilizationActive && !isHarriesStance) {
+        float relZ = leftLocal.z - rightLocal.z;
+        if (!s_shotgunPumpRackedBack && relZ > 0.06f && (now - s_lastPumpActionTime > 400)) {
+            s_shotgunPumpRackedBack = true;
+            s_lastPumpActionTime = now;
+            VR_LOG_INFO("Physical Gunplay: SHOTGUN PUMP RACKED BACK / CASING EJECTED (relZ: %.2fm)", relZ);
+            vrState.leftHapticPulse = 0.55f; // Mechanical slide rack click (180 Hz)
+            vrState.rightHapticPulse = 0.35f;
+        } else if (s_shotgunPumpRackedBack && relZ < 0.01f) {
+            s_shotgunPumpRackedBack = false;
+            s_lastPumpActionTime = now;
+            VR_LOG_INFO("Physical Gunplay: SHOTGUN SLIDE PUSHED FORWARD / SHELL CHAMBERED (relZ: %.2fm)", relZ);
+            vrState.leftHapticPulse = 0.75f; // Heavy chamber lock snap (240 Hz)
+            vrState.rightHapticPulse = 0.55f;
+        }
+    } else {
+        s_shotgunPumpRackedBack = false;
     }
 
     // 6c. Spatial Weapon Holstering & Physical Inventory Gestures (ADR 0015, 0021, 0023)
@@ -1279,6 +1313,34 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         }
     }
 
+    // Interactive Guard Interrogation: Physical Throat-Grip Shakedown (ADR 0032)
+    // Off-hand held forward at collar/chest height (Z in [-0.60, -0.22]m, Y in [-0.25, +0.15]m) with Left Grip
+    static bool s_isThroatGripping = false;
+    static DWORD s_lastShakedownPulseTime = 0;
+    bool inThroatZone = s_leftGripDown && (leftLocal.z > -0.60f && leftLocal.z < -0.22f) &&
+                                        (leftLocal.y > -0.25f && leftLocal.y < 0.15f) &&
+                                        (fabsf(leftLocal.x) < 0.28f);
+    if (inThroatZone) {
+        if (!s_isThroatGripping) {
+            s_isThroatGripping = true;
+            VR_LOG_INFO("Diegetic Interaction: NPC THROAT / COLLAR GRIP engaged (Pos: [%.2f, %.2f, %.2f])",
+                leftLocal.x, leftLocal.y, leftLocal.z);
+            vrState.leftHapticPulse = 0.45f; // Throaty struggle pulse (120 Hz)
+        }
+        // Physical Forward/Back Shake: |lVel.z| > 0.70 m/s
+        if (fabsf(lVel.z) > 0.70f && (now - s_lastShakedownPulseTime > 350)) {
+            s_lastShakedownPulseTime = now;
+            VR_LOG_INFO("Diegetic Interaction: PHYSICAL SHAKEDOWN GESTURE executed (VelZ: %.2f m/s)", lVel.z);
+            SendKeyTap('E'); // Advance extortion/interrogation dialogue
+            vrState.leftHapticPulse = 0.75f; // Compliance snap haptic (220 Hz)
+        }
+    } else {
+        if (s_isThroatGripping) {
+            s_isThroatGripping = false;
+            VR_LOG_INFO("Diegetic Interaction: NPC THROAT GRIP released");
+        }
+    }
+
     // Right Grip -> Weapon Reload ('R') (suppressed during ladder climb)
     bool wantRightGrip = !isClimbingActive && (vrState.rightController.grip > 0.5f);
     if (wantRightGrip != s_rightGripDown) {
@@ -1330,24 +1392,37 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         vrState.leftHapticPulse = 0.3f;
     }
 
-    // Left Thumbstick Click -> Crouch Toggle ('C')
+    // Dual Thumbstick Click -> Emergency Ejection / Drone Neural Disconnect (ADR 0031)
     bool stickLeft = (btns & RIDDICK_VR_BTN_STICK_LEFT) != 0;
-    bool prevStickLeft = (s_prevButtons & RIDDICK_VR_BTN_STICK_LEFT) != 0;
-    if (stickLeft && !prevStickLeft) {
-        SendKeyTap('C');
-    }
-
-    // Right Thumbstick Click -> Recenter HMD & Cinema Screen & Reset Standing Eye Height
     bool stickRight = (btns & RIDDICK_VR_BTN_STICK_RIGHT) != 0;
+    bool prevStickLeft = (s_prevButtons & RIDDICK_VR_BTN_STICK_LEFT) != 0;
     bool prevStickRight = (s_prevButtons & RIDDICK_VR_BTN_STICK_RIGHT) != 0;
-    if (stickRight && !prevStickRight) {
-        vrState.shouldRecenter = true;
-        s_hasPrevHmdOrientation = false;
-        if (vrState.hmdPose.isValid) {
-            s_standingEyeHeight = vrState.hmdPose.position.y;
-            VR_LOG_INFO("Right Stick Click: HMD recentered and standing eye height recalibrated to %.2fm", s_standingEyeHeight);
+
+    bool dualStick = stickLeft && stickRight;
+    bool prevDualStick = prevStickLeft && prevStickRight;
+
+    if (dualStick && !prevDualStick) {
+        VR_LOG_INFO("Cybernetic Uplink: EMERGENCY NEURAL EJECTION / DRONE DISCONNECT triggered (Dual-Stick Click)");
+        SendKeyTap(VK_ESCAPE);
+        SendKeyTap('E');
+        vrState.leftHapticPulse = 0.85f;  // Intense static burst (280 Hz)
+        vrState.rightHapticPulse = 0.85f;
+    } else {
+        // Left Thumbstick Click -> Crouch Toggle ('C')
+        if (stickLeft && !prevStickLeft) {
+            SendKeyTap('C');
         }
-        vrState.rightHapticPulse = 0.6f;
+
+        // Right Thumbstick Click -> Recenter HMD & Cinema Screen & Reset Standing Eye Height
+        if (stickRight && !prevStickRight) {
+            vrState.shouldRecenter = true;
+            s_hasPrevHmdOrientation = false;
+            if (vrState.hmdPose.isValid) {
+                s_standingEyeHeight = vrState.hmdPose.position.y;
+                VR_LOG_INFO("Right Stick Click: HMD recentered and standing eye height recalibrated to %.2fm", s_standingEyeHeight);
+            }
+            vrState.rightHapticPulse = 0.6f;
+        }
     }
 
     // Left Controller Menu Button -> Pause Menu / Dismiss / Skip Cutscene (Escape & Backspace & Tab)

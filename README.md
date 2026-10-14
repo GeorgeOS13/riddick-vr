@@ -61,6 +61,10 @@ Key technical choices, trade-offs, and implementation strategies are documented 
 | [**ADR-0028**](docs/adr/0028-cryo-hibernation-capsule-emergency-release.md) | Cryo-Pod Emergency Canopy Seal Ejection | Narrative: Dual-palm forward shove (Vz < -0.28 m/s) decompression breakout |
 | [**ADR-0029**](docs/adr/0029-diegetic-collectible-inspection-cigarette-packs-and-bounty-cards.md) | Diegetic Collectible Inspection: Cigarette Packs & Cards | Interactions: Off-hand eye-level inspection (Y > -0.05m, Z > -0.32m) with 180Hz buzz |
 | [**ADR-0030**](docs/adr/0030-laser-tripwire-dynamic-crouch-limbo-evasion.md) | Laser Tripwire Limbo Evasion & Prone Crawl Pacing | Stealth: Head drop > 48cm deep prone posture with 600ms crawl heartbeat |
+| [**ADR-0031**](docs/adr/0031-cybernetic-ghost-drone-piloting-and-diegetic-targeting-reticle.md) | Cybernetic Ghost Drone Piloting & Neural Ejection | Systems: Dual-thumbstick emergency disconnect burst and decoupled drone aiming |
+| [**ADR-0032**](docs/adr/0032-interactive-guard-interrogation-and-physical-throat-grip-shakedown.md) | Interactive Guard Interrogation & Throat-Grip Shakedown | Interactions: Forward collar reach, throat grip, and forward/back shake intimidation |
+| [**ADR-0033**](docs/adr/0033-vent-duct-pipe-hang-and-aerial-drop-takedowns.md) | Vent Duct Pipe Hang & Death-From-Above Aerial Drops | Combat: Steep downward look (pitch < -40 deg) with downward plunge (Vy < -1.1 m/s) |
+| [**ADR-0034**](docs/adr/0034-riot-shotgun-physical-pump-action-and-chambering.md) | Riot Shotgun Physical Pump Action & Chambering | Gunplay: Two-handed slide rack rearward (0.55 click) and forward battery lock (0.75) |
 
 ---
 
@@ -71,7 +75,7 @@ riddick-vr/
 ├── .github/
 │   └── ISSUE_TEMPLATE/       # Templates for bug reports and feature requests
 ├── docs/
-│   └── adr/                  # Architectural Decision Records (ADR 0001 - 0030)
+│   └── adr/                  # Architectural Decision Records (ADR 0001 - 0034)
 ├── include/
 │   └── riddick_vr_protocol.h # IPC shared state, poses, matrix, controller formats
 ├── src/
@@ -149,6 +153,10 @@ The script automatically produces:
 * **Physical Object Throwing & Body Dragging:** Squeeze Left Grip to pick up objects/bodies; release during arm swing ($> 1.2\text{ m/s}$) to throw; haul while crouched for heavy drag friction resistance.
 * **Diegetic Collectible Inspection:** Bring off-hand holding cigarette packs or bounty cards up to eye level ($Y > -0.05\text{ m}, Z > -0.32\text{ m}$) with Left Grip to inspect fine detail with $180\text{ Hz}$ tactile buzz.
 * **Laser Tripwire Deep Prone Limbo:** Duck lower than $48\text{ cm}$ below standing eye-height to drop into deep prone crawl, slipping beneath laser grids with rhythmic $600\text{ ms}$ stealth crawl pulses.
+* **Cybernetic Drone Uplink & Ejection:** Steer drones with motion aim; click both thumbsticks simultaneously to sever link with high-intensity static surge ($0.85$).
+* **Guard Interrogation & Throat Shakedown:** Reach forward to grab guards/snitches by the throat with Left Grip; jerk forward/back ($|V_z| > 0.7\text{ m/s}$) to intimidate and advance dialogue.
+* **Death-From-Above Aerial Takedowns:** Hang over ledges or drop from overhead ducts looking down ($\text{pitch} < -40^\circ$); plunge downward with weapons to execute instant aerial takedowns with $0.95$ ground impact shockwaves.
+* **Riot Shotgun Manual Pump Action:** In two-handed stance, rack the off-hand forend rearward ($> 6\text{ cm}$) to eject spent shells ($0.55$), then slam forward into battery ($0.75$) to chamber buckshot.
 * **Tactical Eyeshine & Flashlight:** Tap right temple with grip to toggle Eyeshine (`Q`); tap left shoulder to toggle flashlight (`F`).
 
 ---
