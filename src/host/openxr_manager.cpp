@@ -1064,27 +1064,40 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
                 EnsureSharedTextures(clientState.leftEyeSharedHandle, clientState.rightEyeSharedHandle);
             }
 
-            // Apply haptics requested by game hook (melee punches, gun recoil, reload, eyeshine)
-            if (clientState.leftHapticPulse > 0.05f && xrApplyHapticFeedback) {
+            // Apply tactile haptic waveforms requested by game hook (blade slices, gun recoil, climbing, eyeshine)
+            auto ApplyTactileHaptics = [&](XrPath handPath, float pulseVal) {
+                if (pulseVal <= 0.05f || !xrApplyHapticFeedback) return;
+
                 XrHapticVibration vib{XR_TYPE_HAPTIC_VIBRATION};
-                vib.amplitude = (std::min)(clientState.leftHapticPulse, 1.0f);
-                vib.duration = XR_MIN_HAPTIC_DURATION * 4;
-                vib.frequency = XR_FREQUENCY_UNSPECIFIED;
+                vib.amplitude = (std::min)(pulseVal, 1.0f);
+
+                // Differentiate tactile texture based on gesture intensity & frequency:
+                if (pulseVal >= 0.90f) {
+                    // High-frequency, sharp cutting blade slice / lethal finisher (280 Hz, 60ms)
+                    vib.frequency = 280.0f;
+                    vib.duration = 60000000;
+                } else if (pulseVal >= 0.70f) {
+                    // Resonant optical buzz (eyeshine), mechanical switch (flashlight), gun recoil (180 Hz, 45ms)
+                    vib.frequency = 180.0f;
+                    vib.duration = 45000000;
+                } else if (pulseVal >= 0.45f) {
+                    // Solid tactile impact (mantle ledge hoist, magazine slap) (120 Hz, 75ms)
+                    vib.frequency = 120.0f;
+                    vib.duration = 75000000;
+                } else {
+                    // Subtle tactile sensation (rung grab, physical crouch, wall-peek, ADS stabilization) (85 Hz, 35ms)
+                    vib.frequency = 85.0f;
+                    vib.duration = 35000000;
+                }
+
                 XrHapticActionInfo hapticInfo{XR_TYPE_HAPTIC_ACTION_INFO};
                 hapticInfo.action = m_hapticAction;
-                hapticInfo.subactionPath = m_leftHandPath;
+                hapticInfo.subactionPath = handPath;
                 xrApplyHapticFeedback(m_session, &hapticInfo, (XrHapticBaseHeader*)&vib);
-            }
-            if (clientState.rightHapticPulse > 0.05f && xrApplyHapticFeedback) {
-                XrHapticVibration vib{XR_TYPE_HAPTIC_VIBRATION};
-                vib.amplitude = (std::min)(clientState.rightHapticPulse, 1.0f);
-                vib.duration = XR_MIN_HAPTIC_DURATION * 4;
-                vib.frequency = XR_FREQUENCY_UNSPECIFIED;
-                XrHapticActionInfo hapticInfo{XR_TYPE_HAPTIC_ACTION_INFO};
-                hapticInfo.action = m_hapticAction;
-                hapticInfo.subactionPath = m_rightHandPath;
-                xrApplyHapticFeedback(m_session, &hapticInfo, (XrHapticBaseHeader*)&vib);
-            }
+            };
+
+            ApplyTactileHaptics(m_leftHandPath, clientState.leftHapticPulse);
+            ApplyTactileHaptics(m_rightHandPath, clientState.rightHapticPulse);
         }
     }
 
