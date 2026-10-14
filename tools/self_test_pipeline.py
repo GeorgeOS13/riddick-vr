@@ -63,15 +63,17 @@ def analyze_frame(bmp_path: Path):
     active_w = active_right - active_left + 1
     active_aspect = active_w / max(active_h, 1)
     is_loading_indicator = is_black or (active_w < 100 or active_h < 100)
+    non_black_ratio = float(np.mean(arr > 10))
+    is_splash_or_loading = is_loading_indicator or (non_black_ratio < 0.22)
 
     # 3. Check aspect ratio (should be ~1.78 for 16:9 cinema quad, or ~0.93 for full-immersion gameplay)
     is_full_immersion = (active_w >= width - 20 and active_h >= height - 20) or (0.80 <= active_aspect <= 1.10)
-    aspect_ok = True if is_loading_indicator else ((1.45 <= active_aspect <= 1.95) or is_full_immersion)
+    aspect_ok = True if is_splash_or_loading else ((1.45 <= active_aspect <= 1.95) or is_full_immersion)
 
     # 4. Check HUD / vertical coverage:
     # In cinema mode, active HUD is letterboxed within lens sweet spot (< 2200).
     # In full-immersion action mode, the frame fills the eye buffer edge-to-edge.
-    hud_safe_bottom = True if is_loading_indicator else (active_bottom < 2200 or is_full_immersion)
+    hud_safe_bottom = True if is_splash_or_loading else (active_bottom < 2200 or is_full_immersion)
 
     # 5. Check for Chroma-key Green Flashes (#00FF00)
     green_mask = (arr[:, :, 1] > 200) & (arr[:, :, 0] < 50) & (arr[:, :, 2] < 50)
