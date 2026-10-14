@@ -793,6 +793,14 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         bool opposingShieldWrench = (lVel.x < -0.90f || lVel.y < -0.80f) && (rVel.x > 0.90f || rVel.y > 0.80f);
         bool isShieldPryDisarm = bothAtShieldZone && shieldGrippedAndWedged && opposingShieldWrench;
 
+        // Inmate Pit Brawl Pocket Ash Throw Riposte (ADR 0115)
+        static DWORD s_lastPocketAshRiposteTime = 0;
+        bool rightAtPocket = (rightLocal.y > -0.45f && rightLocal.y < -0.15f) &&
+                             (fabsf(rightLocal.x) > 0.10f && fabsf(rightLocal.x) < 0.26f) &&
+                             (vrState.rightController.grip > 0.50f);
+        bool pocketAshFling = (rVel.y > 1.10f && rVel.z < -0.90f);
+        bool isPocketAshRiposte = s_currentBlockEngaged && rightAtPocket && pocketAshFling;
+
         if (dualRifleStrip) {
             s_lastPunchTime = now;
             VR_LOG_INFO("Physical Counter: GUARD RIFLE STRIP & MAG EJECTION DISARM (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
@@ -802,6 +810,17 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             SendKeyTap('1'); // Equip stripped firearm
             vrState.rightHapticPulse = 0.95f; // Receiver wrenching shockwave (280 Hz)
             vrState.leftHapticPulse = 0.95f;
+        } else if (isPocketAshRiposte && (now - s_lastPocketAshRiposteTime > 1600)) {
+            s_lastPocketAshRiposteTime = now;
+            s_lastPunchTime = now;
+            VR_LOG_INFO("Physical Counter: POCKET ASH THROW BLIND & RIPOSTE (Ry: %.2f, Rz: %.2f)", rVel.y, rVel.z);
+            SendKeyTap('E');
+            SendKeyTap(VK_TAB);
+            SendKey('W', true);
+            mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+            mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+            SendKey('W', false);
+            vrState.rightHapticPulse = 0.85f; // Particulate scatter & strike snap (220 Hz)
         } else if (isShieldPryDisarm) {
             s_lastPunchTime = now;
             VR_LOG_INFO("Physical Counter: RIOT SHIELD WEDGE PRY & DISARM (Lx: %.2f, Rx: %.2f)", lVel.x, rVel.x);
@@ -898,7 +917,31 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                       (vrState.leftController.grip > 0.55f && vrState.rightController.grip > 0.55f) &&
                                       (lVel.y < -1.40f && rVel.y < -1.40f);
 
-            // Inmate Shiv Jugular Carotid Arterial Slash (ADR 0099)
+            // Tactical Stun Baton Overload Arc Wave Discharge (ADR 0118)
+            static DWORD s_lastArcWaveTime = 0;
+            static DWORD s_arcWaveChargeStart = 0;
+            bool crossedBatonCharge = (handsDistSledge < 0.18f) &&
+                                      (leftLocal.y > -0.25f && leftLocal.y < 0.10f && rightLocal.y > -0.25f && rightLocal.y < 0.10f) &&
+                                      (vrState.leftController.grip > 0.70f && vrState.rightController.grip > 0.70f) &&
+                                      (vrState.leftController.trigger > 0.65f && vrState.rightController.trigger > 0.65f);
+            bool isDischargingArcWave = false;
+            if (crossedBatonCharge) {
+                if (s_arcWaveChargeStart == 0) s_arcWaveChargeStart = now;
+                DWORD chargeTime = now - s_arcWaveChargeStart;
+                float chargeRatio = (chargeTime < 400) ? (chargeTime / 400.0f) : 1.0f;
+                vrState.leftHapticPulse = 0.30f + 0.45f * chargeRatio;
+                vrState.rightHapticPulse = 0.30f + 0.45f * chargeRatio;
+            } else {
+                if (s_arcWaveChargeStart != 0 && (now - s_arcWaveChargeStart >= 250)) {
+                    bool explosiveRadialThrust = (lVel.x < -1.05f && rVel.x > 1.05f) || (lVel.z < -1.10f && rVel.z < -1.10f);
+                    if (explosiveRadialThrust && (now - s_lastArcWaveTime > 2500)) {
+                        s_lastArcWaveTime = now;
+                        isDischargingArcWave = true;
+                    }
+                }
+                s_arcWaveChargeStart = 0;
+            }
+
             bool crouchedForStealth = (s_isPhysicallyCrouched || s_isDeepProne);
             bool atThroatCorridor = (rightLocal.y > -0.12f && rightLocal.y < 0.16f) &&
                                     (rightLocal.z > -0.34f && rightLocal.z < -0.10f) &&
@@ -906,7 +949,17 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             bool carotidSlice = (fabsf(rVel.x) > 1.25f);
             bool stealthCarotidSlash = crouchedForStealth && atThroatCorridor && carotidSlice;
 
-            if (dualSledgeOverhead) {
+            if (isDischargingArcWave) {
+                VR_LOG_INFO("Tactical Melee: STUN BATON OVERLOAD RADIAL ARC WAVE DISCHARGED (Lx: %.2f, Rx: %.2f)", lVel.x, rVel.x);
+                SendKey('S', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('S', false);
+                SendKeyTap(VK_SPACE);
+                SendKeyTap('Q');
+                vrState.leftHapticPulse = 0.98f;  // High-voltage electrostatic arc ring shockwave (300 Hz)
+                vrState.rightHapticPulse = 0.98f;
+            } else if (dualSledgeOverhead) {
                 VR_LOG_INFO("Physical Gesture: HEAVY ORE SLEDGEHAMMER OVERHEAD CRUSH (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
                 SendKey('S', true);
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
@@ -2220,6 +2273,21 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 }
             }
 
+            // Subterranean Hydroponics Nutrient Dosing Solenoid Lever (ADR 0116)
+            static DWORD s_lastSolenoidLeverTime = 0;
+            bool handAtSolenoidLever = ((rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > -0.25f && rightLocal.y < 0.15f && vrState.rightController.grip > 0.50f) ||
+                                        (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > -0.25f && leftLocal.y < 0.15f && vrState.leftController.grip > 0.50f));
+            bool solenoidLeverUp = (rVel.y > 0.65f || lVel.y > 0.65f);
+            if (handAtSolenoidLever && solenoidLeverUp && (now - s_lastSolenoidLeverTime > 1500)) {
+                s_lastSolenoidLeverTime = now;
+                VR_LOG_INFO("Environmental Gesture: HYDROPONIC NUTRIENT SOLENOID LEVER THROWN UPWARD (Vy: %.2f)", (rVel.y > lVel.y) ? rVel.y : lVel.y);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap('Q');
+                if (rVel.y > 0.65f) vrState.rightHapticPulse = 0.80f; // Armature clack & pipe surge (110 Hz)
+                if (lVel.y > 0.65f) vrState.leftHapticPulse = 0.80f;
+            }
+
             // Dark Athena Cargo Bay Magnetic Crane Remote Pendant Snatch (ADR 0106)
             static DWORD s_lastCranePendantTime = 0;
             bool handAtOverheadPendant = ((rightLocal.y > 0.18f && rightLocal.z > -0.32f && rightLocal.z < -0.05f && vrState.rightController.grip > 0.55f) ||
@@ -2248,6 +2316,22 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 vrState.leftHapticPulse = 0.98f;  // Deep lead door structural impact shockwave (40 Hz)
                 vrState.rightHapticPulse = 0.98f;
+            }
+
+            // Dark Athena EVA Solar Collector Debris Shield Ejection (ADR 0117)
+            static DWORD s_lastShieldEjectTime = 0;
+            bool bothAtTrussMount = (leftLocal.z > -0.40f && leftLocal.z < -0.14f && rightLocal.z > -0.40f && rightLocal.z < -0.14f) &&
+                                    (leftLocal.y > 0.10f && leftLocal.y < 0.35f && rightLocal.y > 0.10f && rightLocal.y < 0.35f) &&
+                                    (vrState.leftController.grip > 0.55f && vrState.rightController.grip > 0.55f);
+            bool dualRearwardYank = (lVel.z > 0.85f && rVel.z > 0.85f);
+            if (bothAtTrussMount && dualRearwardYank && (now - s_lastShieldEjectTime > 2500)) {
+                s_lastShieldEjectTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA SOLAR DEBRIS SHIELD JETTISONED (Lz: %.2f, Rz: %.2f)", lVel.z, rVel.z);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap(VK_RETURN);
+                vrState.leftHapticPulse = 0.95f;  // Pyrotechnic explosive pin severance shockwave (240 Hz)
+                vrState.rightHapticPulse = 0.95f;
             }
         }
     }
