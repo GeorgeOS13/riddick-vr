@@ -588,6 +588,26 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     float rSpeed = sqrtf(rVel.x * rVel.x + rVel.y * rVel.y + rVel.z * rVel.z);
     float lSpeed = sqrtf(lVel.x * lVel.x + lVel.y * lVel.y + lVel.z * lVel.z);
 
+    // Dark Athena EVA Solar Flare Shadow Occlusion Stance (ADR 0119)
+    static DWORD s_lastSolarShadowTuckTime = 0;
+    static bool s_isSolarShadowTuck = false;
+    bool handsTuckedIn = (fabsf(leftLocal.x) < 0.14f && fabsf(rightLocal.x) < 0.14f) &&
+                         (leftLocal.z > -0.20f && rightLocal.z > -0.20f) &&
+                         (vrState.leftController.grip > 0.50f && vrState.rightController.grip > 0.50f);
+    bool wantSolarShadowTuck = (s_isPhysicallyCrouched || s_isDeepProne) && handsTuckedIn;
+    if (wantSolarShadowTuck != s_isSolarShadowTuck) {
+        s_isSolarShadowTuck = wantSolarShadowTuck;
+        if (s_isSolarShadowTuck && (now - s_lastSolarShadowTuckTime > 1500)) {
+            s_lastSolarShadowTuckTime = now;
+            VR_LOG_INFO("Environmental Stealth: EVA SOLAR FLARE SHADOW OCCLUSION TUCK engaged (HandsX: [%.2f, %.2f])", leftLocal.x, rightLocal.x);
+            SendKeyTap('C');
+            SendKeyTap(VK_SPACE);
+            SendKeyTap('Q');
+            vrState.leftHapticPulse = 0.35f;  // Cardiovascular shadow stabilization pulse (60 Hz)
+            vrState.rightHapticPulse = 0.35f;
+        }
+    }
+
     // 2. Physical Ladder Climbing & Mantling Gestures (ADR 0009)
     // - Rung Grabbing: Controller raised above chin/shoulder level (Y > 0.15m relative to HMD) and grip squeezed (> 0.5f)
     // - Mount / Initiate: Taps 'E' and triggers 0.35 amplitude haptic pulse upon grabbing a rung
@@ -949,6 +969,13 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             bool carotidSlice = (fabsf(rVel.x) > 1.25f);
             bool stealthCarotidSlash = crouchedForStealth && atThroatCorridor && carotidSlice;
 
+            // Inmate Shiv Rib-Cage Underhook Puncture & Lift (ADR 0122)
+            static DWORD s_lastRibUnderhookTime = 0;
+            bool lowStanceForUnderhook = (s_isPhysicallyCrouched || s_isDeepProne) || (rightLocal.y < -0.15f);
+            bool reverseBladeGrip = (vrState.rightController.grip > 0.55f && vrState.rightController.trigger < 0.40f);
+            bool underhookRisingThrust = (rVel.y > 1.15f && rVel.z < -0.90f);
+            bool isRibUnderhook = lowStanceForUnderhook && reverseBladeGrip && underhookRisingThrust;
+
             if (isDischargingArcWave) {
                 VR_LOG_INFO("Tactical Melee: STUN BATON OVERLOAD RADIAL ARC WAVE DISCHARGED (Lx: %.2f, Rx: %.2f)", lVel.x, rVel.x);
                 SendKey('S', true);
@@ -959,6 +986,17 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 vrState.leftHapticPulse = 0.98f;  // High-voltage electrostatic arc ring shockwave (300 Hz)
                 vrState.rightHapticPulse = 0.98f;
+            } else if (isRibUnderhook && (now - s_lastRibUnderhookTime > 1500)) {
+                s_lastRibUnderhookTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE SHIV RIB-CAGE UNDERHOOK PUNCTURE & LIFT (Ry: %.2f, Rz: %.2f)", rVel.y, rVel.z);
+                SendKey('W', true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, false);
+                SendKey('W', false);
+                vrState.rightHapticPulse = 0.95f; // Cartilage perforation & body lift rumble (280 Hz)
             } else if (dualSledgeOverhead) {
                 VR_LOG_INFO("Physical Gesture: HEAVY ORE SLEDGEHAMMER OVERHEAD CRUSH (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
                 SendKey('S', true);
@@ -2088,6 +2126,22 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 }
             }
 
+            // Subterranean Mining Rail Track Derailer Wedge Strike (ADR 0120)
+            static DWORD s_lastDerailerStrikeTime = 0;
+            bool leftAtRailWedge = (s_isPhysicallyCrouched || s_isDeepProne) &&
+                                   (leftLocal.z > -0.45f && leftLocal.z < -0.16f && leftLocal.y < -0.45f) &&
+                                   (vrState.leftController.grip > 0.55f);
+            bool rightHammerStrikeDown = (rVel.y < -1.10f);
+            if (leftAtRailWedge && rightHammerStrikeDown && (now - s_lastDerailerStrikeTime > 1800)) {
+                s_lastDerailerStrikeTime = now;
+                VR_LOG_INFO("Environmental Gesture: MINING RAIL DERAILER WEDGE STRUCK & SET (Ry: %.2f m/s)", rVel.y);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap(VK_TAB);
+                vrState.rightHapticPulse = 0.95f; // Anvil crack shockwave (260 Hz)
+                vrState.leftHapticPulse = 0.60f;  // Rail acoustic ring (85 Hz)
+            }
+
             // Dark Athena EVA Airlock Manual Handwheel Decompression Dogging (ADR 0078)
             static DWORD s_lastAirlockCrankTime = 0;
             static int s_airlockCrankCount = 0;
@@ -2216,6 +2270,21 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 if (rVel.z > 0.85f) vrState.rightHapticPulse = 0.90f; // Inductive arc shudder (240 Hz)
                 if (lVel.z > 0.85f) vrState.leftHapticPulse = 0.90f;
+            }
+
+            // Cybernetic Drone Power Shunt Manual Lever Yank (ADR 0121)
+            static DWORD s_lastDroneShuntTime = 0;
+            bool handAtDroneShunt = ((rightLocal.z > -0.42f && rightLocal.z < -0.14f && rightLocal.y > -0.15f && rightLocal.y < 0.20f && vrState.rightController.grip > 0.50f) ||
+                                     (leftLocal.z > -0.42f && leftLocal.z < -0.14f && leftLocal.y > -0.15f && leftLocal.y < 0.20f && vrState.leftController.grip > 0.50f));
+            bool shuntYankDown = (rVel.y < -0.60f || lVel.y < -0.60f);
+            if (handAtDroneShunt && shuntYankDown && (now - s_lastDroneShuntTime > 2000)) {
+                s_lastDroneShuntTime = now;
+                VR_LOG_INFO("Environmental Gesture: DRONE POWER SHUNT BREAKER YANKED DOWNWARD (Vy: %.2f)", (rVel.y < lVel.y) ? rVel.y : lVel.y);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap('Q');
+                if (rVel.y < -0.60f) vrState.rightHapticPulse = 0.90f; // Inductive shunt discharge shudder (280 Hz)
+                if (lVel.y < -0.60f) vrState.leftHapticPulse = 0.90f;
             }
 
             // Subterranean Cryo-Stasis Chamber Biometric Bypass Override (ADR 0097)
