@@ -21,7 +21,11 @@ public:
 
     bool IsCameraLocated() const { return m_cameraMatrixPtr != nullptr; }
 
+    void SetGameWindow(HWND hwnd) { m_hwnd = hwnd; }
+    HWND GetGameWindow() const { return m_hwnd; }
+
 private:
+    HWND m_hwnd = nullptr;
     CameraHook() = default;
     ~CameraHook() = default;
 

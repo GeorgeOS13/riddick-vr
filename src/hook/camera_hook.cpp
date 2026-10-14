@@ -30,6 +30,8 @@ bool CameraHook::ScanForCameraSignature() {
     return false; // Dynamic matrix intercept active
 }
 
+static HWND s_gameHwnd = nullptr;
+
 static void SendKey(WORD vk, bool isDown) {
     UINT scan = MapVirtualKeyA(vk, MAPVK_VK_TO_VSC);
 
@@ -51,6 +53,16 @@ static void SendKey(WORD vk, bool isDown) {
 
     // 3. Win32 legacy keybd_event fallback
     keybd_event(static_cast<BYTE>(vk), static_cast<BYTE>(scan), isDown ? 0 : KEYEVENTF_KEYUP, 0);
+
+    // 4. Direct window message posting to game window
+    if (s_gameHwnd && IsWindow(s_gameHwnd)) {
+        LPARAM lParam = (scan << 16) | 1;
+        if (!isDown) lParam |= (1 << 30) | (1 << 31);
+        PostMessageA(s_gameHwnd, isDown ? WM_KEYDOWN : WM_KEYUP, vk, lParam);
+        if (isDown && (vk == VK_RETURN || vk == 'E' || vk == 'e' || vk == VK_ESCAPE || vk == VK_BACK || vk == VK_TAB || vk == VK_SPACE)) {
+            PostMessageA(s_gameHwnd, WM_CHAR, vk, lParam);
+        }
+    }
 }
 
 static void SendKeyTap(WORD vk) {
@@ -117,6 +129,45 @@ void CameraHook::StabilizeViewMatrix(float* outView, const float* inView, const 
                 stabilizedBase[3 * 4 + r] * eyeMat[c * 4 + 3];
         }
     }
+}
+
+// Transform a world-space point into HMD local space (where +X is right, +Y is up, -Z is forward)
+static RiddickVRVector3 WorldToHmdLocal(const RiddickVRVector3& worldPos, const RiddickVRTrackedPose& hmdPose) {
+    float dx = worldPos.x;
+    float dy = worldPos.y;
+    float dz = worldPos.z;
+
+    if (hmdPose.isValid && (fabsf(hmdPose.position.x) > 0.001f || fabsf(hmdPose.position.y) > 0.5f || fabsf(hmdPose.position.z) > 0.001f)) {
+        dx -= hmdPose.position.x;
+        dy -= hmdPose.position.y;
+        dz -= hmdPose.position.z;
+
+        // Inverse quaternion rotation: q_inv = (-qx, -qy, -qz, qw)
+        float qx = -hmdPose.orientation.x;
+        float qy = -hmdPose.orientation.y;
+        float qz = -hmdPose.orientation.z;
+        float qw = hmdPose.orientation.w;
+
+        float norm = sqrtf(qx * qx + qy * qy + qz * qz + qw * qw);
+        if (norm > 0.0001f) {
+            qx /= norm;
+            qy /= norm;
+            qz /= norm;
+            qw /= norm;
+
+            float tx = 2.0f * (qy * dz - qz * dy);
+            float ty = 2.0f * (qz * dx - qx * dz);
+            float tz = 2.0f * (qx * dy - qy * dx);
+
+            float rx = dx + qw * tx + (qy * tz - qz * ty);
+            float ry = dy + qw * ty + (qz * tx - qx * tz);
+            float rz = dz + qw * tz + (qx * ty - qy * tx);
+
+            return { rx, ry, rz };
+        }
+    }
+
+    return { dx, dy, dz };
 }
 
 void CameraHook::Update(RiddickVRSharedState& vrState) {
@@ -284,40 +335,57 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         s_stickYDownArmed = true;
     }
 
-    // 4. Physical Melee Combat Gestures (Jabs, Hooks, Uppercuts)
-    static DWORD s_lastPunchTime = 0;
-    DWORD now = GetTickCount();
+    // Transform controller positions into HMD-relative space for spatial gestures
+    RiddickVRVector3 leftLocal = WorldToHmdLocal(vrState.leftController.gripPose.position, vrState.hmdPose);
+    RiddickVRVector3 rightLocal = WorldToHmdLocal(vrState.rightController.gripPose.position, vrState.hmdPose);
 
     const auto& rVel = vrState.rightController.gripPose.linearVelocity;
     const auto& lVel = vrState.leftController.gripPose.linearVelocity;
     float rSpeed = sqrtf(rVel.x * rVel.x + rVel.y * rVel.y + rVel.z * rVel.z);
     float lSpeed = sqrtf(lVel.x * lVel.x + lVel.y * lVel.y + lVel.z * lVel.z);
 
-    if (now - s_lastPunchTime > 350) {
+    DWORD now = GetTickCount();
+    static DWORD s_lastPunchTime = 0;
+    static bool s_physicalBlockEngaged = false;
+    static DWORD s_guardPoseHoldTimer = 0;
+    static DWORD s_guardPoseReleaseTimer = 0;
+    static bool s_currentBlockEngaged = false;
+
+    // 4. Physical Melee Combat Gestures (Jabs, Hooks, Uppercuts)
+    if (now - s_lastPunchTime > 320) {
         if (rSpeed > 1.8f || lSpeed > 1.8f) {
-            const auto& activeVel = (rSpeed > lSpeed) ? rVel : lVel;
+            // Immediately disengage block if currently blocking so punches are not canceled or stuck
+            if (s_currentBlockEngaged) {
+                mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
+                s_currentBlockEngaged = false;
+                s_physicalBlockEngaged = false;
+                s_guardPoseHoldTimer = 0;
+                s_guardPoseReleaseTimer = 0;
+            }
+
             s_lastPunchTime = now;
+            const auto& activeVel = (rSpeed > lSpeed) ? rVel : lVel;
 
             if (activeVel.y > 1.2f) {
-                VR_LOG_INFO("Physical Gesture: UPPERCUT detected");
+                VR_LOG_INFO("Physical Gesture: UPPERCUT detected (Speed: %.2f m/s)", activeVel.y);
                 SendKey('S', true);
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey('S', false);
             } else if (activeVel.x > 1.2f) {
-                VR_LOG_INFO("Physical Gesture: RIGHT HOOK detected");
+                VR_LOG_INFO("Physical Gesture: RIGHT HOOK detected (Speed: %.2f m/s)", activeVel.x);
                 SendKey('D', true);
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey('D', false);
             } else if (activeVel.x < -1.2f) {
-                VR_LOG_INFO("Physical Gesture: LEFT HOOK detected");
+                VR_LOG_INFO("Physical Gesture: LEFT HOOK detected (Speed: %.2f m/s)", activeVel.x);
                 SendKey('A', true);
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey('A', false);
             } else {
-                VR_LOG_INFO("Physical Gesture: STRAIGHT PUNCH detected");
+                VR_LOG_INFO("Physical Gesture: STRAIGHT PUNCH detected (Speed: %.2f m/s)", (rSpeed > lSpeed) ? rSpeed : lSpeed);
                 SendKey('W', true);
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
@@ -329,23 +397,76 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         }
     }
 
-    // 5. Tactical Weapon Reload Gesture (F.E.A.R. VR Style)
-    // Bringing left hand to right weapon (< 18cm) or reaching down to hip pouch triggers Reload ('R')
+    // 4b. Physical Boxer Guard Pose Detection ("holding both fists up in front of the VR")
+    // Criteria:
+    // - Both controllers raised in front of chin/face level relative to HMD (y in -0.28 to +0.18)
+    // - Both controllers in front of face (z in -0.42 to -0.12)
+    // - Both hands close together horizontally (|x_left - x_right| < 0.35m)
+    // - Both controllers gripped / fists clenched (> 0.40 grip)
+    // - Hands steady (not throwing a punch, rSpeed < 1.4 m/s and lSpeed < 1.4 m/s)
+    // - Outside punch execution recovery window (> 250ms since last punch)
+    bool chinLevel = (leftLocal.y >= -0.28f && leftLocal.y <= 0.18f) &&
+                     (rightLocal.y >= -0.28f && rightLocal.y <= 0.18f);
+    bool inFrontOfFace = (leftLocal.z >= -0.42f && leftLocal.z <= -0.12f) &&
+                         (rightLocal.z >= -0.42f && rightLocal.z <= -0.12f);
+    bool handsClose = fabsf(leftLocal.x - rightLocal.x) < 0.35f;
+    bool fistsClenched = (vrState.leftController.grip > 0.40f && vrState.rightController.grip > 0.40f);
+    bool handsSteady = (rSpeed < 1.4f && lSpeed < 1.4f);
+    bool notPunching = (now - s_lastPunchTime > 250);
+
+    bool guardPoseDetected = chinLevel && inFrontOfFace && handsClose && fistsClenched && handsSteady && notPunching;
+
+    // Temporal Hysteresis & Debouncing:
+    // Require guard pose to hold for ~60ms to engage (prevents false-triggers during punches)
+    if (guardPoseDetected) {
+        s_guardPoseReleaseTimer = 0;
+        if (s_guardPoseHoldTimer == 0) {
+            s_guardPoseHoldTimer = now;
+        } else if (now - s_guardPoseHoldTimer >= 60) {
+            s_physicalBlockEngaged = true;
+        }
+    } else {
+        s_guardPoseHoldTimer = 0;
+        if (s_physicalBlockEngaged) {
+            // If throwing a punch, release block instantly (0ms)
+            if (rSpeed > 1.5f || lSpeed > 1.5f) {
+                s_physicalBlockEngaged = false;
+                s_guardPoseReleaseTimer = 0;
+            } else {
+                // When hands drop naturally, require 80ms release buffer to eliminate jitter
+                if (s_guardPoseReleaseTimer == 0) {
+                    s_guardPoseReleaseTimer = now;
+                } else if (now - s_guardPoseReleaseTimer >= 80) {
+                    s_physicalBlockEngaged = false;
+                    s_guardPoseReleaseTimer = 0;
+                }
+            }
+        }
+    }
+
+    // 5. Tactical Weapon Reload Gestures (F.E.A.R. / Riddick VR Style)
+    // Supports physical gestures:
+    // A) Off-hand brought to weapon receiver / magazine well (< 20cm)
+    // B) Off-hand reaching down to waist ammo pouch (y < -0.38m relative to HMD)
     static DWORD s_lastReloadGestureTime = 0;
     float reloadHandDist = sqrtf(
-        powf(vrState.leftController.gripPose.position.x - vrState.rightController.gripPose.position.x, 2) +
-        powf(vrState.leftController.gripPose.position.y - vrState.rightController.gripPose.position.y, 2) +
-        powf(vrState.leftController.gripPose.position.z - vrState.rightController.gripPose.position.z, 2)
+        powf(leftLocal.x - rightLocal.x, 2) +
+        powf(leftLocal.y - rightLocal.y, 2) +
+        powf(leftLocal.z - rightLocal.z, 2)
     );
 
-    if (now - s_lastReloadGestureTime > 1200) {
-        if ((reloadHandDist < 0.18f && vrState.leftController.grip > 0.3f) || 
-            (vrState.leftController.gripPose.position.y < -0.38f && vrState.leftController.grip > 0.4f)) {
+    if (!s_physicalBlockEngaged && (now - s_lastReloadGestureTime > 1100)) {
+        bool offHandAtReceiver = (reloadHandDist < 0.20f && vrState.leftController.grip > 0.35f && (leftLocal.y < -0.10f || rightLocal.z < -0.25f));
+        bool handAtWaistPouch = (leftLocal.y < -0.38f && vrState.leftController.grip > 0.38f) ||
+                                (rightLocal.y < -0.38f && vrState.rightController.grip > 0.50f);
+
+        if (offHandAtReceiver || handAtWaistPouch) {
             s_lastReloadGestureTime = now;
-            VR_LOG_INFO("Tactical Gesture: MANUAL WEAPON RELOAD triggered");
+            VR_LOG_INFO("Tactical Gesture: MANUAL WEAPON RELOAD triggered (%s, HandDist: %.2fm, LeftY: %.2f)",
+                offHandAtReceiver ? "Weapon Receiver / Mag-Well" : "Waist Ammo Pouch", reloadHandDist, leftLocal.y);
             SendKeyTap('R');
-            vrState.leftHapticPulse = 0.5f;
-            vrState.rightHapticPulse = 0.7f;
+            vrState.leftHapticPulse = 0.55f;
+            vrState.rightHapticPulse = 0.75f;
         }
     }
 
@@ -362,10 +483,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         vrState.leftHapticPulse = 0.8f;
     }
 
-    // 7. Aim & Block (Explicit & Deliberate via Left Trigger)
-    // Left Trigger -> Aim / Block (Right Click).
-    // Proximity hand heuristic removed so the player is never accidentally immobilized or stuck blocking!
-    static bool s_leftTriggerDown = false, s_rightTriggerDown = false;
+    // 7. Aim & Block (Unified Physical Boxer Guard + Left Trigger Aim/Block)
+    // In Riddick:
+    // Right Mouse Button (ACTION_SECONDARYFIRE 241) = Guard / Block when unarmed/melee, Aim/Zoom when holding firearms.
+    static bool s_rightTriggerDown = false;
     static bool s_leftGripDown = false, s_rightGripDown = false;
 
     // Right Trigger -> Fire / Primary Attack / UI Select Click
@@ -376,12 +497,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         if (wantRightTrigger) vrState.rightHapticPulse = 0.4f;
     }
 
-    // Left Trigger -> Aim / Block (Right Click)
-    bool wantBlock = (vrState.leftController.trigger > 0.5f);
-    if (wantBlock != s_leftTriggerDown) {
-        mouse_event(wantBlock ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
-        s_leftTriggerDown = wantBlock;
-        if (wantBlock) vrState.leftHapticPulse = 0.3f;
+    // Block / Aim: Engaged physically via Boxer Guard pose OR manually via Left Trigger
+    bool wantBlock = s_physicalBlockEngaged || (vrState.leftController.trigger > 0.5f);
+    if (wantBlock != s_currentBlockEngaged) {
+        if (wantBlock) {
+            if (now - s_lastPunchTime > 200) {
+                mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
+                s_currentBlockEngaged = true;
+                if (s_physicalBlockEngaged) {
+                    VR_LOG_INFO("Combat State: BOXER GUARD / BLOCK MODE engaged (Physical Gesture)");
+                    vrState.leftHapticPulse = 0.35f;
+                    vrState.rightHapticPulse = 0.35f;
+                } else {
+                    VR_LOG_INFO("Combat State: AIM / BLOCK engaged (Left Trigger)");
+                    vrState.leftHapticPulse = 0.3f;
+                }
+            }
+        } else {
+            mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
+            s_currentBlockEngaged = false;
+            VR_LOG_INFO("Combat State: AIM / BLOCK disengaged");
+        }
     }
 
     // Left Grip -> Grab / Secondary Interact ('E')
