@@ -261,6 +261,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     static float s_accumulatedLookX = 0.0f;
     static float s_accumulatedLookY = 0.0f;
     static float s_lastHmdYaw = 0.0f;
+    static float s_recoilKickPitch = 0.0f;
 
     if (vrState.hmdPose.isValid && !vrState.cinemaMode) {
         float qx = vrState.hmdPose.orientation.x;
@@ -363,6 +364,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                             } else {
                                 ctrlPitch = asinf(sinCtrlPitch);
                             }
+
+                            // Apply transient muzzle climb recoil kick (exponential recovery over ~120ms)
+                            ctrlPitch += s_recoilKickPitch;
+                            s_recoilKickPitch *= 0.82f;
 
                             if (!s_hasPrevCtrlAim) {
                                 s_prevCtrlYaw = ctrlYaw;
@@ -958,7 +963,14 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (wantRightTrigger != s_rightTriggerDown) {
         mouse_event(wantRightTrigger ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
         s_rightTriggerDown = wantRightTrigger;
-        if (wantRightTrigger) vrState.rightHapticPulse = 0.4f;
+        if (wantRightTrigger) {
+            // Weapon Recoil Kick & Tactical Impulse (ADR 0013 & 0014)
+            s_recoilKickPitch = s_twoHandedStabilizationActive ? 0.022f : 0.040f;
+            vrState.rightHapticPulse = s_twoHandedStabilizationActive ? 0.65f : 0.82f;
+            if (s_twoHandedStabilizationActive) {
+                vrState.leftHapticPulse = 0.45f; // Foregrip haptic transmission
+            }
+        }
     }
 
     // Block / Aim: Engaged physically via Boxer Guard pose OR manually via Left Trigger
