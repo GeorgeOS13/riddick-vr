@@ -937,15 +937,17 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         }
     }
 
-    // 6c. Spatial Weapon Holstering & Physical Inventory Gestures (ADR 0015 & 0021)
+    // 6c. Spatial Weapon Holstering & Physical Inventory Gestures (ADR 0015, 0021, 0023)
     // - Right Hand Over-Shoulder (Y > 0.15m, Z > -0.05m, grip > 0.50): Equips / Holsters Primary Weapon ('1')
     // - Right Hand Chest Bandolier (Y in [-0.22, 0.05], |X| < 0.14, Z > -0.25, grip > 0.50): Equips Grenades ('4')
+    // - Right Hand Low Spine / Back Waist (Y < -0.30m, Z > -0.05m, |X| < 0.15m, grip > 0.50): Equips Heavy / SCAR Gun ('5')
     // - Right Hand Hip Draw (Y < -0.32m, X > 0.14m, grip > 0.50): Equips / Holsters Sidearm / Pistol ('2')
     // - Left Hand Hip Draw (Y < -0.32m, X < -0.14m, grip > 0.50): Equips / Draws Melee Blades / Ulaks ('3')
     static DWORD s_lastHolsterTime = 0;
     if (!isClimbingActive && !s_physicalBlockEngaged && !s_twoHandedStabilizationActive && (now - s_lastHolsterTime > 900)) {
         bool rightOverShoulder = (rightLocal.y > 0.15f && rightLocal.z > -0.05f && vrState.rightController.grip > 0.50f);
         bool rightAtChest = (rightLocal.y >= -0.22f && rightLocal.y <= 0.05f && fabsf(rightLocal.x) < 0.14f && rightLocal.z > -0.25f && vrState.rightController.grip > 0.50f);
+        bool rightLowSpine = (rightLocal.y < -0.30f && rightLocal.z > -0.05f && fabsf(rightLocal.x) < 0.15f && vrState.rightController.grip > 0.50f);
         bool rightAtHip = (rightLocal.y < -0.32f && rightLocal.x > 0.14f && vrState.rightController.grip > 0.50f);
         bool leftAtHip = (leftLocal.y < -0.32f && leftLocal.x < -0.14f && vrState.leftController.grip > 0.50f);
 
@@ -959,6 +961,11 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             VR_LOG_INFO("Holster Gesture: TACTICAL GRENADE slot toggled (Chest Bandolier)");
             SendKeyTap('4');
             vrState.rightHapticPulse = 0.65f; // Grenade bandolier snap pulse
+        } else if (rightLowSpine) {
+            s_lastHolsterTime = now;
+            VR_LOG_INFO("Holster Gesture: HEAVY WEAPON / SCAR GUN slot toggled (Low Spine)");
+            SendKeyTap('5');
+            vrState.rightHapticPulse = 0.85f; // Heavy industrial magnetic clamp pulse
         } else if (rightAtHip) {
             s_lastHolsterTime = now;
             VR_LOG_INFO("Holster Gesture: SIDEARM / PISTOL slot toggled (Right Hip)");
@@ -996,6 +1003,25 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             VR_LOG_INFO("Tactical Gesture: GRENADE LAUNCHED / THROWN (Speed: %.2f m/s)", rSpeed);
             mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
             vrState.rightHapticPulse = 0.60f; // Throw release impulse
+        }
+    }
+
+    // 6f. SCAR Rifle Air Mine Detonation (ADR 0023)
+    // Squeezing off-hand trigger + grip clench while two-handed detonates armed SCAR compressed air mines!
+    static bool s_scarDetonatorDown = false;
+    static DWORD s_lastScarDetonateTime = 0;
+    if (s_twoHandedStabilizationActive) {
+        bool wantDetonate = (vrState.leftController.trigger > 0.85f && vrState.leftController.grip > 0.60f);
+        if (wantDetonate && !s_scarDetonatorDown && (now - s_lastScarDetonateTime > 600)) {
+            s_lastScarDetonateTime = now;
+            s_scarDetonatorDown = true;
+            VR_LOG_INFO("Tactical Gesture: SCAR AIR MINE DETONATION TRIGGERED (Off-Hand Clench)");
+            mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
+            mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
+            vrState.leftHapticPulse = 0.95f; // Heavy explosive shockwave (280 Hz)
+            vrState.rightHapticPulse = 0.95f;
+        } else if (!wantDetonate) {
+            s_scarDetonatorDown = false;
         }
     }
 
