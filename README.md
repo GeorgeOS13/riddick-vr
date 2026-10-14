@@ -197,6 +197,10 @@ The script automatically produces:
 * **Inmate Shiv Boot Sheath Draw:** Reach down to inside calf/ankle ($Y < -0.60\text{ m}, X \in [-0.25, 0.0]\text{ m}$) while crouched or prone and grip to draw/holster concealed shiv (Slot '3') with $160\text{ Hz}$ ($0.45$) sheath friction click.
 * **Cargo Crane Hydraulic Console Steering:** Grasp gantry crane levers ($Z \in [-0.40, -0.15]\text{ m}, Y \in [-0.35, -0.05]\text{ m}$) with grip held; push/pull and throw laterally to drive boom/trolley (`W`/`S`/`A`/`D`) with $50\text{ Hz}$ ($0.35$) hydraulic rumble.
 * **Security Drone EMP Overload & Chassis Snap:** Grapple stunned security drone collar ($Z \in [-0.45, -0.20]\text{ m}$) with both grips clenched ($> 0.65$) and twist opposing hands violently ($|\Delta V_y| > 1.20\text{ m/s}$) to snap cybernetic spine (`LMB` + `'E'`) with dual $0.95$ ($280\text{ Hz}$) EMP arc burst.
+* **Laser Tripwire Shield Deflection:** Hold riot shield forward in two-handed stance ($Z \in [-0.35, -0.15]\text{ m}$) to deflect sweeping infrared beams without triggering sector alarms ($220\text{ Hz}$ scatter haptics).
+* **Inmate Mess Hall Tray Parry & Batter:** Grip mess tray from cafeteria table ($Y \in [-0.55, -0.25]\text{ m}$) with Left Grip (`E` + Slot '1'); thrust forward ($V_z < -1.0\text{ m/s}$) for facial tray smash (`LMB`, $0.90$).
+* **Hydraulic Pressure Blast Valve Steam Jet:** Strike/kick wall blast valve ($Z \in [-0.40, -0.18]\text{ m}, V_z < -1.10\text{ m/s}$) to pop emergency relief seal (`E` + `'Q'`), unleashing scalding steam jets with $130\text{ Hz}$ ($0.75$) rumble.
+* **Cybernetic Drone Reticle Lead & Decoupled Aim:** Drone cockpit view tracks natural HMD look while heavy servo-driven turret tracks motion aim with dynamic lag filtering ($\alpha = 0.28$) and lock-on confirmation.
 * **Tactical Eyeshine & Flashlight:** Tap right temple with grip to toggle Eyeshine (`Q`); tap left shoulder to toggle flashlight (`F`).
 
 ---

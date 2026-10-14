@@ -801,6 +801,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                     (vrState.leftController.grip > 0.45f && vrState.rightController.grip > 0.45f) &&
                                     (lVel.y < -1.30f && rVel.y < -1.30f);
 
+            // Inmate Mess Hall Tray Facial Batter (ADR 0060)
+            bool leftTrayBatter = (leftLocal.z < -0.18f) && (lVel.z < -1.0f) && (vrState.leftController.grip > 0.50f);
+
             if (droneEmpSnap) {
                 VR_LOG_INFO("Physical Combat: SECURITY DRONE EMP OVERLOAD & CHASSIS SNAP (TorqueRelY: %.2f)", fabsf(lVel.y - rVel.y));
                 SendKeyTap('E');
@@ -808,6 +811,13 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 vrState.rightHapticPulse = 0.95f; // Mechanical spine crunch & EMP arc wave (280 Hz)
                 vrState.leftHapticPulse = 0.95f;
+            } else if (leftTrayBatter) {
+                VR_LOG_INFO("Physical Gesture: INMATE MESS TRAY CONCUSSIVE BATTER (Lz: %.2f)", lVel.z);
+                SendKey('W', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('W', false);
+                vrState.leftHapticPulse = 0.90f; // Sheet metal concussive clatter (160 Hz)
             } else if (dualShieldBash) {
                 VR_LOG_INFO("Physical Gesture: RIOT SHIELD CONCUSSIVE BASH (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
                 SendKey('W', true);
@@ -1060,6 +1070,12 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             } else {
                 float smoothAlpha = isHarriesStance ? 0.22f : 0.35f;
 
+                // Cybernetic Drone HUD Decoupled Sight & Reticle Drift Dampening (ADR 0062)
+                bool isDroneAiming = (vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f);
+                if (isDroneAiming) {
+                    smoothAlpha = 0.28f; // Heavy cybernetic servo lag & drift dampening
+                }
+
                 // Sniper Rifle Diegetic Eye Relief & Bipod Bracing (ADR 0042)
                 float scopeEyeDist = sqrtf(
                     powf(rightLocal.x, 2) +
@@ -1104,6 +1120,17 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
         } else {
             s_hasStabilizedPose = false;
+        }
+    }
+
+    // Laser Tripwire Spatial Shield Deflection (ADR 0059)
+    static DWORD s_lastLaserDeflectTime = 0;
+    if (s_twoHandedStabilizationActive) {
+        bool shieldHeldForward = (rightLocal.z > -0.35f && rightLocal.z < -0.15f) && (fabsf(rightLocal.y) < 0.20f);
+        if (shieldHeldForward && (now - s_lastLaserDeflectTime > 150)) {
+            s_lastLaserDeflectTime = now;
+            vrState.rightHapticPulse = 0.30f; // Laser scatter refraction micro-vibration (220 Hz)
+            vrState.leftHapticPulse = 0.30f;
         }
     }
 
@@ -1462,6 +1489,32 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     s_lastCraneRumbleTime = now;
                     vrState.rightHapticPulse = 0.35f; // Heavy hydraulic motor rumble (50 Hz)
                 }
+            }
+
+            // Inmate Mess Hall Tray Equip (ADR 0060)
+            static DWORD s_lastTrayEquipTime = 0;
+            bool leftNearMessTable = (leftLocal.y > -0.55f && leftLocal.y < -0.25f) &&
+                                     (leftLocal.z > -0.40f && leftLocal.z < -0.15f) &&
+                                     (vrState.leftController.grip > 0.50f);
+            if (leftNearMessTable && (now - s_lastTrayEquipTime > 1000)) {
+                s_lastTrayEquipTime = now;
+                VR_LOG_INFO("Environmental Gesture: INMATE MESS TRAY EQUIPPED FROM TABLE (Y: %.2fm)", leftLocal.y);
+                SendKeyTap('E');
+                SendKeyTap('1'); // Equip improvised defensive slot
+                vrState.leftHapticPulse = 0.40f; // Stamped sheet metal clang (180 Hz)
+            }
+
+            // Hydraulic Pressure Blast Valve Steam Jet Venting (ADR 0061)
+            static DWORD s_lastSteamJetTime = 0;
+            bool rightAtBlastValve = (rightLocal.z > -0.40f && rightLocal.z < -0.18f) &&
+                                     (rightLocal.y > -0.20f && rightLocal.y < 0.20f);
+            bool blastStrike = (rVel.z < -1.10f || rVel.y < -0.80f);
+            if (rightAtBlastValve && blastStrike && (now - s_lastSteamJetTime > 1200)) {
+                s_lastSteamJetTime = now;
+                VR_LOG_INFO("Environmental Gesture: HYDRAULIC PRESSURE BLAST VALVE POPPED / STEAM JET RELEASED");
+                SendKeyTap('E');
+                SendKeyTap('Q'); // Thermal diversion signal
+                vrState.rightHapticPulse = 0.75f; // Pressurized jet stream vibration (130 Hz)
             }
         }
     }
