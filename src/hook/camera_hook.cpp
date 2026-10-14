@@ -920,6 +920,19 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         }
     }
 
+    // 6a. Physical Shiv Sharpening & Blade Grinding (ADR 0035)
+    static DWORD s_lastHoneStrokeTime = 0;
+    bool inHoneProximity = (reloadHandDist < 0.15f) && (vrState.leftController.grip > 0.40f) && (vrState.rightController.grip > 0.40f);
+    if (inHoneProximity && !s_physicalBlockEngaged && !isClimbingActive) {
+        float relVelY = fabsf(lVel.y - rVel.y);
+        if (relVelY > 0.55f && (now - s_lastHoneStrokeTime > 250)) {
+            s_lastHoneStrokeTime = now;
+            VR_LOG_INFO("Physical Gesture: SHIV SHARPENING / BLADE GRINDING STROKE (RelVelY: %.2f m/s, Dist: %.2fm)", relVelY, reloadHandDist);
+            vrState.leftHapticPulse = 0.55f;  // Crisp metallic scrape (220 Hz)
+            vrState.rightHapticPulse = 0.55f;
+        }
+    }
+
     // 6b. Two-Handed Firearm Stabilization (ADR 0005)
     // Detect when player brings off-hand to steady the two-handed weapon:
     // - Distance between controller grip poses < 25cm
@@ -1014,12 +1027,23 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         s_shotgunPumpRackedBack = false;
     }
 
-    // 6c. Spatial Weapon Holstering & Physical Inventory Gestures (ADR 0015, 0021, 0023)
+    // 6h. Mining Core Pneumatic Rock Drill & Industrial Jackhammer Rumble (ADR 0037)
+    static DWORD s_lastMiningDrillTime = 0;
+    if (s_twoHandedStabilizationActive && (vrState.rightController.trigger > 0.80f) && (vrState.leftController.trigger > 0.80f)) {
+        if (now - s_lastMiningDrillTime > 70) {
+            s_lastMiningDrillTime = now;
+            vrState.rightHapticPulse = 0.95f; // Seismic subterranean percussion (65 Hz)
+            vrState.leftHapticPulse = 0.95f;
+        }
+    }
+
+    // 6c. Spatial Weapon Holstering & Physical Inventory Gestures (ADR 0015, 0021, 0023, 0038)
     // - Right Hand Over-Shoulder (Y > 0.15m, Z > -0.05m, grip > 0.50): Equips / Holsters Primary Weapon ('1')
     // - Right Hand Chest Bandolier (Y in [-0.22, 0.05], |X| < 0.14, Z > -0.25, grip > 0.50): Equips Grenades ('4')
     // - Right Hand Low Spine / Back Waist (Y < -0.30m, Z > -0.05m, |X| < 0.15m, grip > 0.50): Equips Heavy / SCAR Gun ('5')
     // - Right Hand Hip Draw (Y < -0.32m, X > 0.14m, grip > 0.50): Equips / Holsters Sidearm / Pistol ('2')
     // - Left Hand Hip Draw (Y < -0.32m, X < -0.14m, grip > 0.50): Equips / Draws Melee Blades / Ulaks ('3')
+    // - Hand at Ankle Boot (Y < -0.65m, grip > 0.50) while Crouched: Stashes / Retrieves Contraband (ADR 0038)
     static DWORD s_lastHolsterTime = 0;
     if (!isClimbingActive && !s_physicalBlockEngaged && !s_twoHandedStabilizationActive && (now - s_lastHolsterTime > 900)) {
         bool rightOverShoulder = (rightLocal.y > 0.15f && rightLocal.z > -0.05f && vrState.rightController.grip > 0.50f);
@@ -1027,6 +1051,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         bool rightLowSpine = (rightLocal.y < -0.30f && rightLocal.z > -0.05f && fabsf(rightLocal.x) < 0.15f && vrState.rightController.grip > 0.50f);
         bool rightAtHip = (rightLocal.y < -0.32f && rightLocal.x > 0.14f && vrState.rightController.grip > 0.50f);
         bool leftAtHip = (leftLocal.y < -0.32f && leftLocal.x < -0.14f && vrState.leftController.grip > 0.50f);
+        bool rightAtAnkle = (rightLocal.y < -0.65f && vrState.rightController.grip > 0.50f);
+        bool leftAtAnkle = (leftLocal.y < -0.65f && vrState.leftController.grip > 0.50f);
 
         if (rightOverShoulder) {
             s_lastHolsterTime = now;
@@ -1043,6 +1069,12 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             VR_LOG_INFO("Holster Gesture: HEAVY WEAPON / SCAR GUN slot toggled (Low Spine)");
             SendKeyTap('5');
             vrState.rightHapticPulse = 0.85f; // Heavy industrial magnetic clamp pulse
+        } else if ((s_isPhysicallyCrouched || s_isDeepProne) && (rightAtAnkle || leftAtAnkle)) {
+            s_lastHolsterTime = now;
+            VR_LOG_INFO("Holster Gesture: CONTRABAND ANKLE BOOT POUCH accessed (HandY: %.2fm)", rightAtAnkle ? rightLocal.y : leftLocal.y);
+            SendKeyTap(VK_TAB); // Cube PDA / contraband manifest
+            if (rightAtAnkle) vrState.rightHapticPulse = 0.35f; // Subtle fabric rustle (140 Hz)
+            if (leftAtAnkle) vrState.leftHapticPulse = 0.35f;
         } else if (rightAtHip) {
             s_lastHolsterTime = now;
             VR_LOG_INFO("Holster Gesture: SIDEARM / PISTOL slot toggled (Right Hip)");
@@ -1167,6 +1199,18 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 vrState.leftHapticPulse = 0.80f; // Pneumatic decompression surge
                 vrState.rightHapticPulse = 0.80f;
+            }
+
+            // Ventilation Duct Screw Fastener Unthreading (ADR 0036)
+            bool rightAtVentCorner = (rightLocal.z > -0.45f && rightLocal.z < -0.20f) &&
+                                     (fabsf(rightLocal.x) > 0.12f) &&
+                                     (vrState.rightController.grip > 0.45f) &&
+                                     (fabsf(rVel.x) > 0.45f || fabsf(rVel.y) > 0.45f);
+            if (rightAtVentCorner) {
+                s_lastEnvInteractTime = now;
+                VR_LOG_INFO("Environmental Gesture: VENT FASTENER UNTHREADING RATCHET (Z: %.2fm, Vx: %.2f)", rightLocal.z, rVel.x);
+                SendKeyTap('E');
+                vrState.rightHapticPulse = 0.45f; // Mechanical ratchet tooth click (160 Hz)
             }
         }
     }

@@ -65,6 +65,10 @@ Key technical choices, trade-offs, and implementation strategies are documented 
 | [**ADR-0032**](docs/adr/0032-interactive-guard-interrogation-and-physical-throat-grip-shakedown.md) | Interactive Guard Interrogation & Throat-Grip Shakedown | Interactions: Forward collar reach, throat grip, and forward/back shake intimidation |
 | [**ADR-0033**](docs/adr/0033-vent-duct-pipe-hang-and-aerial-drop-takedowns.md) | Vent Duct Pipe Hang & Death-From-Above Aerial Drops | Combat: Steep downward look (pitch < -40 deg) with downward plunge (Vy < -1.1 m/s) |
 | [**ADR-0034**](docs/adr/0034-riot-shotgun-physical-pump-action-and-chambering.md) | Riot Shotgun Physical Pump Action & Chambering | Gunplay: Two-handed slide rack rearward (0.55 click) and forward battery lock (0.75) |
+| [**ADR-0035**](docs/adr/0035-physical-shiv-sharpening-and-blade-grinding.md) | Physical Shiv Sharpening & Blade Grinding | Combat: Close edge reciprocating strokes (|Delta Y| > 8cm) with 220Hz metallic scrape |
+| [**ADR-0036**](docs/adr/0036-ventilation-duct-screw-fastener-unthreading.md) | Vent Duct Screw Fastener Unthreading | Interactions: Grate corner contact and wrist twist ratchet unthreading (160Hz click) |
+| [**ADR-0037**](docs/adr/0037-mining-core-pneumatic-drill-and-seismic-haptics.md) | Mining Core Pneumatic Rock Drill Seismic Haptics | Tools & Haptics: Dual-trigger industrial hammering with cyclic 65Hz seismic shockwaves |
+| [**ADR-0038**](docs/adr/0038-contraband-smuggling-and-ankle-pouch-inventory.md) | Contraband Smuggling & Ankle Pouch Inventory | Inventory & Stealth: Crouched reaching down to boot (Y < -0.65m) to stash/retrieve contraband |
 
 ---
 
@@ -75,7 +79,7 @@ riddick-vr/
 ├── .github/
 │   └── ISSUE_TEMPLATE/       # Templates for bug reports and feature requests
 ├── docs/
-│   └── adr/                  # Architectural Decision Records (ADR 0001 - 0034)
+│   └── adr/                  # Architectural Decision Records (ADR 0001 - 0038)
 ├── include/
 │   └── riddick_vr_protocol.h # IPC shared state, poses, matrix, controller formats
 ├── src/
@@ -157,6 +161,10 @@ The script automatically produces:
 * **Guard Interrogation & Throat Shakedown:** Reach forward to grab guards/snitches by the throat with Left Grip; jerk forward/back ($|V_z| > 0.7\text{ m/s}$) to intimidate and advance dialogue.
 * **Death-From-Above Aerial Takedowns:** Hang over ledges or drop from overhead ducts looking down ($\text{pitch} < -40^\circ$); plunge downward with weapons to execute instant aerial takedowns with $0.95$ ground impact shockwaves.
 * **Riot Shotgun Manual Pump Action:** In two-handed stance, rack the off-hand forend rearward ($> 6\text{ cm}$) to eject spent shells ($0.55$), then slam forward into battery ($0.75$) to chamber buckshot.
+* **Physical Shiv Sharpening:** Rub off-hand whetstone or blade along dominant shiv ($dist < 15\text{ cm}$) in reciprocal strokes ($|\Delta V_y| > 0.55\text{ m/s}$) for $220\text{ Hz}$ edge-honing rasp haptics.
+* **Vent Fastener Unthreading:** Contact vent corners with tool/shiv and twist wrist counter-clockwise ($|V_x| > 0.45\text{ m/s}$) to pop corner screws with $160\text{ Hz}$ ratchet clicks.
+* **Mining Core Pneumatic Drill:** Hold both triggers in two-handed stance to unleash heavy industrial rock-shattering percussion with cyclic $65\text{ Hz}$ seismic vibrations ($0.95$).
+* **Contraband Ankle Boot Holster:** Reach down to ankle boot ($Y < -0.65\text{ m}$) while crouched or prone to access concealed contraband pouch with $140\text{ Hz}$ fabric rustle.
 * **Tactical Eyeshine & Flashlight:** Tap right temple with grip to toggle Eyeshine (`Q`); tap left shoulder to toggle flashlight (`F`).
 
 ---
