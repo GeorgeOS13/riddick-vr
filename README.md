@@ -37,6 +37,23 @@ Key technical choices, trade-offs, and implementation strategies are documented 
 | [**ADR-0004**](docs/adr/0004-camera-decoupling-and-first-person-body-awareness.md) | Camera Decoupling & First-Person Body Awareness | Phase 2: Head-bone detachment and comfort motion smoothing |
 | [**ADR-0005**](docs/adr/0005-motion-controls-and-melee-combat-gestures.md) | Motion Controls & Melee Combat Translation | Phase 4: Gunplay and physical shiv/punch interactions |
 | [**ADR-0006**](docs/adr/0006-diegetic-hud-eyeshine-and-post-processing.md) | Diegetic HUD, Eyeshine & Post-Processing Shaders | Phase 3: Night-vision shader adaptation and 3D floating HUD |
+| [**ADR-0007**](docs/adr/0007-full-viewport-immersion-and-fov-projection-matching.md) | Full Viewport Immersion & FOV Projection Matching | Graphics: Elimination of action mode black bars and 1:1 human scale |
+| [**ADR-0008**](docs/adr/0008-spatial-boxer-guard-and-gestural-melee-combat.md) | Spatial Boxer Guard & Gestural Melee Combat | Combat: Dual-fist guard pose detection and tactical reload gestures |
+| [**ADR-0009**](docs/adr/0009-physical-ladder-climbing-and-mantling-gestures.md) | Physical Ladder Climbing & Mantling Gestures | Locomotion: 6DOF hand-over-hand climbing and dual-hand mantling |
+| [**ADR-0010**](docs/adr/0010-diegetic-weapon-ammo-receiver-and-stealth-wall-peeking.md) | Diegetic Ammo Receiver HUD & Wall-Peeking | UI & Stealth: Slide backplate ammo counter and corner lean detection |
+| [**ADR-0011**](docs/adr/0011-granular-melee-and-dual-blade-ulak-slashing-gestures.md) | Granular Melee & Dual-Blade Ulak Slashing | Combat: Scissor cross-slashes, shiv plunges, and throat slits |
+| [**ADR-0012**](docs/adr/0012-spatial-eyeshine-and-tactical-shoulder-flashlight-gestures.md) | Spatial Eyeshine & Shoulder Flashlight Gestures | Controls: Right temple tap for Eyeshine and left shoulder flashlight tap |
+| [**ADR-0013**](docs/adr/0013-tactile-waveform-synthesis-and-haptic-frequency-modulation.md) | Tactile Waveform Synthesis & Frequency Modulation | Haptics: Multi-band voice-coil synthesis (85 Hz to 280 Hz) |
+| [**ADR-0014**](docs/adr/0014-spatial-weapon-recoil-and-tactical-foregrip-transmission.md) | Spatial Weapon Recoil & Foregrip Transmission | Gunplay: Weapon-isolated muzzle climb and off-hand haptic transmission |
+| [**ADR-0015**](docs/adr/0015-spatial-weapon-holstering-and-inventory-gestures.md) | Spatial Weapon Holstering & Physical Inventory | Controls: Over-shoulder long-arm, right hip pistol, left hip Ulaks |
+| [**ADR-0016**](docs/adr/0016-interactive-environmental-manipulation-vent-prying-and-retinal-biometrics.md) | Environmental Manipulation, Vents & Retinal Scanners | Interactions: Dual-hand vent grate prying and index finger terminal poke |
+| [**ADR-0017**](docs/adr/0017-interactive-physical-throwing-and-object-propulsion.md) | Physical Object Throwing & Kinematic Propulsion | Physics: Off-hand grip swing-speed thresholded throwing vs quiet drops |
+| [**ADR-0018**](docs/adr/0018-physical-melee-parrying-counter-strikes-and-disarms.md) | Physical Melee Parrying & Counter-Disarms | Combat: Guard-preserved forward thrust disarms and high-frequency shockwaves |
+| [**ADR-0019**](docs/adr/0019-physical-medical-nanomed-station-activation-and-bio-restoration.md) | NanoMED Medical Station Activation & Bio-Restoration | Interactions: Flat open-palm contact healing and restorative haptic wave |
+| [**ADR-0020**](docs/adr/0020-stealth-body-dragging-and-shadow-concealment-dynamics.md) | Stealth Body Dragging & Concealment Dynamics | Stealth: Low-frequency kinematic drag resistance when hauling corpses |
+| [**ADR-0021**](docs/adr/0021-spatial-tactical-grenade-priming-and-pin-pulling.md) | Tactical Grenade Priming & Pin-Pulling | Weapons: Chest bandolier equip, two-handed pin-pulling, and throw release |
+| [**ADR-0022**](docs/adr/0022-diegetic-eyeshine-anti-glare-and-photopic-adaptation.md) | Diegetic Eyeshine Photopic Adaptation & IPC Sync | Visuals & UI: 4-byte aligned state synchronization and gauntlet expansion |
+| [**ADR-0023**](docs/adr/0023-heavy-scar-gun-and-turret-dual-hand-steering.md) | Heavy SCAR Gun Mine Detonation & Holstering | Gunplay: Low-spine holster draw and off-hand clench air mine detonation |
 
 ---
 
@@ -47,7 +64,7 @@ riddick-vr/
 ├── .github/
 │   └── ISSUE_TEMPLATE/       # Templates for bug reports and feature requests
 ├── docs/
-│   └── adr/                  # Architectural Decision Records (ADR 0001 - 0006)
+│   └── adr/                  # Architectural Decision Records (ADR 0001 - 0023)
 ├── include/
 │   └── riddick_vr_protocol.h # IPC shared state, poses, matrix, controller formats
 ├── src/
@@ -56,7 +73,8 @@ riddick-vr/
 │   └── host/                 # 64-bit OpenXR companion host process (riddickvr-host.exe)
 ├── tools/
 │   ├── build-all.ps1         # Unified multi-architecture build script
-│   └── generate_forwarders.ps1 # Automated 368-symbol OpenGL forwarder generator
+│   ├── generate_forwarders.ps1 # Automated 368-symbol OpenGL forwarder generator
+│   └── self_test_pipeline.py # Autonomous headless VR test runner
 └── CMakeLists.txt            # Unified CMake build definition
 ```
 
@@ -96,14 +114,33 @@ The script automatically produces:
 4. Launch `riddickvr-host.exe` in the background or companion window.
 5. Launch `DarkAthena.exe`! The game proxy will automatically link to the 64-bit host over shared memory and initialize zero-copy GPU texture sharing at full frame rate.
 
-### Controls Mapping
-* **Left Thumbstick:** Smooth Locomotion (`W`, `A`, `S`, `D`)
-* **Right Thumbstick (X):** Snap / Smooth Turn
-* **Physical Crouch:** Duck below threshold ($Y < -0.35\text{ m}$) triggers game crouch (`C`)
-* **Right Trigger:** Primary Attack / Fire (Left Mouse Button)
-* **Left Trigger:** Aim / Block (Right Mouse Button)
-* **Left Grip:** Interact / Action (`E`)
-* **Right Grip:** Reload (`R`)
+### Complete VR Gestures & Controls Mapping
+* **Locomotion:** Left Thumbstick (`W`, `A`, `S`, `D`) with decoupled head look.
+* **Turning:** Right Thumbstick X (Snap turning at $0.75$ deflection, smooth turning otherwise).
+* **Dialogue / Menu Navigation:** Right Thumbstick Y (Up/Down arrow keys).
+* **Physical Boxer Guard:** Raise both fists to chin level ($Y \in [-0.28, +0.18]\text{ m}, Z \in [-0.42, -0.12]\text{ m}$) with clenched grips ($> 0.40$) to engage solid block mode (`RMB`).
+* **Melee Combos:** Fast physical jabs, hooks, uppercuts, and dual Ulak cross-slashes break guard instantly with zero latency.
+* **Counter-Disarms & Parries:** Driving fists forward from Boxer Guard into an incoming strike triggers native Starbreeze disarms and bone-cracking shockwave haptics ($0.95$).
+* **Physical Ladder Climbing:** Reach above shoulder and grip rungs to climb hand-over-hand; pull downward with both hands simultaneously to mantle up ledges.
+* **Tactical Reloads:** Bring off-hand to weapon receiver ($< 20\text{ cm}$) or touch waist ammo pouch.
+* **Two-Handed Firearm Stabilization:** Bring off-hand within $25\text{ cm}$ of firearm with grip held for SLERP aim stabilization and $0.65\times$ jitter dampening.
+* **Tactical Inventory Holstering:**
+  - *Over Right Shoulder:* Primary Long-Arm (`1`)
+  - *Right Hip:* Sidearm / Pistol (`2`)
+  - *Left Hip:* Dual Ulak Blades / Shivs (`3`)
+  - *Chest Bandolier:* Tactical Grenades (`4`)
+  - *Low Spine / Lumbar:* Heavy SCAR Rifle / Minigun (`5`)
+* **Tactical Grenade Pin-Pull:** Bring off-hand to grenade ($< 16\text{ cm}$) and grip to pull pin; swing arm to launch.
+* **SCAR Air Mine Detonation:** Squeeze off-hand trigger + grip clench in two-handed stance to detonate deployed mines.
+* **Diegetic Wrist Health HUD:** Glance at top of left forearm gauntlet to inspect health blocks and stealth concealment status.
+* **Diegetic Weapon Ammo Receiver:** Look at rear slide backplate of firearm to inspect live ammo counters.
+* **Physical Crouching & Wall-Peeking:** Duck down $28\text{ cm}$ below standing eye-height to crouch; lean past corners with $15\text{ cm}$ deadband for tactile wall-peeking.
+* **Environmental Manipulation:**
+  - *Vent Grate Prying:* Reach both hands forward ($Z < -0.20\text{ m}$), grip, and wrench backward.
+  - *Biometric Scanners:* Extend index finger and poke forward into scanner plane.
+  - *NanoMED Health Stations:* Press flat open palm against dispenser pad for soothing bio-restoration.
+* **Physical Object Throwing & Body Dragging:** Squeeze Left Grip to pick up objects/bodies; release during arm swing ($> 1.2\text{ m/s}$) to throw; haul while crouched for heavy drag friction resistance.
+* **Tactical Eyeshine & Flashlight:** Tap right temple with grip to toggle Eyeshine (`Q`); tap left shoulder to toggle flashlight (`F`).
 
 ---
 
