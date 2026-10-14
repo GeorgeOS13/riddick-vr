@@ -1048,7 +1048,15 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         bool handAtWaistPouch = (leftLocal.y < -0.38f && vrState.leftController.grip > 0.38f) ||
                                 (rightLocal.y < -0.38f && vrState.rightController.grip > 0.50f);
 
-        if (offHandAtReceiver || handAtWaistPouch) {
+        // Cybernetic Drone HUD Battery Power Cell Hot-Swap Ejection (ADR 0082)
+        bool cellEjectFlick = (reloadHandDist < 0.18f && vrState.leftController.grip > 0.50f && lVel.y < -0.70f);
+        if (cellEjectFlick) {
+            s_lastReloadGestureTime = now;
+            VR_LOG_INFO("Tactical Weapon: POWER CELL HOT-SWAP EJECTED (Vy: %.2f m/s, Dist: %.2fm)", lVel.y, reloadHandDist);
+            SendKeyTap('R');
+            vrState.leftHapticPulse = 0.75f; // Magnetic cell disconnect snap (140 Hz)
+            vrState.rightHapticPulse = 0.50f;
+        } else if (offHandAtReceiver || handAtWaistPouch) {
             s_lastReloadGestureTime = now;
             VR_LOG_INFO("Tactical Gesture: MANUAL WEAPON RELOAD triggered (%s, HandDist: %.2fm, LeftY: %.2f)",
                 offHandAtReceiver ? "Weapon Receiver / Mag-Well" : "Waist Ammo Pouch", reloadHandDist, leftLocal.y);
@@ -1090,6 +1098,28 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('E');
                 SendKeyTap('3'); // Equip shank slot
                 vrState.rightHapticPulse = 0.70f; // Hone completion resonance (260 Hz)
+            }
+        }
+    }
+
+    // 6a-3. Inmate Mess Hall Contraband Spork Whittling & Tine Sharpening (ADR 0080)
+    static DWORD s_lastSporkStrokeTime = 0;
+    static int s_sporkStrokeCount = 0;
+    bool sporkTableHeight = (rightLocal.y > -0.55f && rightLocal.y < -0.25f) &&
+                            (rightLocal.z > -0.42f && rightLocal.z < -0.16f);
+    bool fastSporkStroke = (fabsf(rVel.x) > 0.60f);
+    if (crouchedForWhittle && sporkTableHeight && grippingShank && fastSporkStroke && !s_physicalBlockEngaged) {
+        if (now - s_lastSporkStrokeTime > 160) {
+            s_lastSporkStrokeTime = now;
+            s_sporkStrokeCount++;
+            VR_LOG_INFO("Physical Gesture: MESS SPORK TINE NOTCHING STROKE #%d (SpeedX: %.2f m/s)", s_sporkStrokeCount, rVel.x);
+            vrState.rightHapticPulse = 0.45f; // Serrated rasp pulse (190 Hz)
+            if (s_sporkStrokeCount >= 4) {
+                s_sporkStrokeCount = 0;
+                VR_LOG_INFO("Physical Gesture: SERRATED CONTRABAND PUNCTURE SPORK CRAFTED / EQUIPPED");
+                SendKeyTap('E');
+                SendKeyTap('3'); // Equip shank/shiv slot
+                vrState.rightHapticPulse = 0.70f; // Hone ping resonance (240 Hz)
             }
         }
     }
@@ -1740,6 +1770,33 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     vrState.leftHapticPulse = 0.85f; // Hermetic clamp thud & seal hiss (100 Hz)
                     vrState.rightHapticPulse = 0.85f;
                 }
+            }
+
+            // Atmospheric Pressure Equalization Hatch Bleed Petcock Valve (ADR 0079)
+            static DWORD s_lastPetcockTwistTime = 0;
+            bool rightAtPetcock = (rightLocal.z > -0.40f && rightLocal.z < -0.15f) &&
+                                  (rightLocal.y > -0.10f && rightLocal.y < 0.20f) &&
+                                  (vrState.rightController.grip > 0.50f);
+            bool petcockTwist = (fabsf(rVel.x) > 0.45f || fabsf(rVel.y) > 0.45f);
+            if (rightAtPetcock && petcockTwist && (now - s_lastPetcockTwistTime > 900)) {
+                s_lastPetcockTwistTime = now;
+                VR_LOG_INFO("Environmental Gesture: ATMOSPHERIC BLEED PETCOCK VALVE TWISTED (Vx: %.2f)", rVel.x);
+                SendKeyTap('E');
+                vrState.rightHapticPulse = 0.55f; // Piercing pressure hiss & needle valve rattle (220 Hz)
+            }
+
+            // Security Turret Optical Sensor Spray Paint / Smear Blind (ADR 0081)
+            static DWORD s_lastTurretBlindTime = 0;
+            bool handAtTurretSensor = ((rightLocal.z > -0.35f && rightLocal.z < -0.15f && rightLocal.y > 0.10f && rightLocal.y < 0.40f && vrState.rightController.grip > 0.50f) ||
+                                       (leftLocal.z > -0.35f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f && vrState.leftController.grip > 0.50f));
+            bool sensorSmearSweep = (fabsf(rVel.x) > 0.50f || fabsf(lVel.x) > 0.50f);
+            if (handAtTurretSensor && sensorSmearSweep && (now - s_lastTurretBlindTime > 1200)) {
+                s_lastTurretBlindTime = now;
+                VR_LOG_INFO("Environmental Stealth: TURRET OPTICAL SENSOR DOME SPRAY-PAINTED / COATED");
+                SendKeyTap('E');
+                SendKeyTap('Q'); // Optical suppression signal
+                if (vrState.rightController.grip > 0.50f) vrState.rightHapticPulse = 0.50f; // Aerosol propellant hiss (160 Hz)
+                if (vrState.leftController.grip > 0.50f) vrState.leftHapticPulse = 0.50f;
             }
         }
     }
