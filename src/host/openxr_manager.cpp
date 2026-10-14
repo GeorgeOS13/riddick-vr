@@ -938,8 +938,13 @@ void OpenXRManager::UpdateTracking(RiddickVRSharedState& state, XrTime predicted
             }
         };
 
+        static RiddickVRVector3 s_prevLeftAimPos{0, 0, 0};
+        static RiddickVRVector3 s_prevRightAimPos{0, 0, 0};
+
         if (m_leftGripSpace) LocateTrackedPose(m_leftGripSpace, state.leftController.gripPose, s_prevLeftPos);
         if (m_rightGripSpace) LocateTrackedPose(m_rightGripSpace, state.rightController.gripPose, s_prevRightPos);
+        if (m_leftAimSpace) LocateTrackedPose(m_leftAimSpace, state.leftController.aimPose, s_prevLeftAimPos);
+        if (m_rightAimSpace) LocateTrackedPose(m_rightAimSpace, state.rightController.aimPose, s_prevRightAimPos);
         s_prevTime = now;
 
         state.leftController.isConnected = state.leftController.gripPose.isValid;
@@ -1371,6 +1376,8 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
             state.rightController.gripPose.position = { 0.2f, 1.2f, -0.3f };
             state.leftController.gripPose.orientation = { 0, 0, 0, 1 };
             state.rightController.gripPose.orientation = { 0, 0, 0, 1 };
+            state.leftController.aimPose = state.leftController.gripPose;
+            state.rightController.aimPose = state.rightController.gripPose;
 
             // Automated self-play simulation:
             // 1. Natural head orientation oscillation (looking around in VR)

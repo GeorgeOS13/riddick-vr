@@ -90,14 +90,61 @@ void CameraHook::StabilizeViewMatrix(float* outView, const float* inView, const 
         return;
     }
 
-    // Extract horizontal forward heading to stabilize horizon (eliminate camera roll/headbob wobble)
-    float fwdX = -inView[2];
-    float fwdZ = -inView[10];
-    float yaw = atan2f(fwdX, fwdZ);
+    // Static orientation state for horizon stabilization
+    static uint32_t s_lastFrameIndex = 0xFFFFFFFF;
+    static float s_currentYaw = 0.0f;
+    static float s_lastValidYaw = 0.0f;
+    static bool s_hasInitializedYaw = false;
 
-    float cosY = cosf(yaw);
-    float sinY = sinf(yaw);
+    // Only update yaw once per stereo frame (share exact same stabilized base between left and right eyes)
+    if (vrState.frameIndex != s_lastFrameIndex || !s_hasInitializedYaw || vrState.shouldRecenter) {
+        s_lastFrameIndex = vrState.frameIndex;
 
+        // Extract horizontal forward heading from inView (-Z camera column in OpenGL)
+        float fwdX = -inView[2];
+        float fwdZ = -inView[10];
+        float lenSq = fwdX * fwdX + fwdZ * fwdZ;
+
+        float targetYaw = s_lastValidYaw;
+        if (lenSq >= 0.001f) {
+            // Well-defined horizontal heading
+            targetYaw = atan2f(fwdX, fwdZ);
+            s_lastValidYaw = targetYaw;
+        } else {
+            // Gimbal singularity guard: looking nearly straight up or down (e.g. vertical ladder climbs,
+            // looking directly up a ventilation shaft). Smoothly retain last known valid yaw.
+            targetYaw = s_lastValidYaw;
+        }
+
+        if (!s_hasInitializedYaw || vrState.shouldRecenter) {
+            s_currentYaw = targetYaw;
+            s_hasInitializedYaw = true;
+        } else {
+            // Calculate shortest angular difference on circle [-pi, +pi]
+            float deltaYaw = targetYaw - s_currentYaw;
+            while (deltaYaw > 3.14159265f) deltaYaw -= 6.2831853f;
+            while (deltaYaw < -3.14159265f) deltaYaw += 6.2831853f;
+
+            // Horizon angular rate limiting / smoothing during sudden animation transitions:
+            // Prevents jarring camera snaps and disorienting rotational jerks when mounting ladders,
+            // crawling into vents, or executing contextual stealth takedown animations.
+            constexpr float MAX_YAW_STEP = 0.085f; // ~4.9 deg per frame (~300 deg/sec at 60 FPS)
+            if (deltaYaw > MAX_YAW_STEP) {
+                deltaYaw = MAX_YAW_STEP;
+            } else if (deltaYaw < -MAX_YAW_STEP) {
+                deltaYaw = -MAX_YAW_STEP;
+            }
+
+            s_currentYaw += deltaYaw;
+            while (s_currentYaw > 3.14159265f) s_currentYaw -= 6.2831853f;
+            while (s_currentYaw < -3.14159265f) s_currentYaw += 6.2831853f;
+        }
+    }
+
+    float cosY = cosf(s_currentYaw);
+    float sinY = sinf(s_currentYaw);
+
+    // Construct perfectly horizontal base matrix (zero roll and pitch, purely yaw-stabilized)
     float stabilizedBase[16] = {0};
     stabilizedBase[0] = cosY;
     stabilizedBase[1] = 0.0f;
@@ -114,6 +161,7 @@ void CameraHook::StabilizeViewMatrix(float* outView, const float* inView, const 
     stabilizedBase[10] = cosY;
     stabilizedBase[11] = 0.0f;
 
+    // Retain full 3D neck/camera translation from inView
     stabilizedBase[12] = inView[12];
     stabilizedBase[13] = inView[13];
     stabilizedBase[14] = inView[14];
