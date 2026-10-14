@@ -101,6 +101,35 @@ static XrQuaternionf ExtractRoll(const XrQuaternionf& q) {
     return result;
 }
 
+static inline RiddickVRVector3 RotateVectorByQuat(const RiddickVRVector3& v, const RiddickVRQuaternion& q) {
+    float tx = 2.0f * (q.y * v.z - q.z * v.y);
+    float ty = 2.0f * (q.z * v.x - q.x * v.z);
+    float tz = 2.0f * (q.x * v.y - q.y * v.x);
+
+    return {
+        v.x + q.w * tx + (q.y * tz - q.z * ty),
+        v.y + q.w * ty + (q.z * tx - q.x * tz),
+        v.z + q.w * tz + (q.x * ty - q.y * tx)
+    };
+}
+
+static inline XrQuaternionf MultiplyQuaternions(const RiddickVRQuaternion& q1, const RiddickVRQuaternion& q2) {
+    XrQuaternionf result{};
+    result.w = q1.w * q2.w - q1.x * q2.x - q1.y * q2.y - q1.z * q2.z;
+    result.x = q1.w * q2.x + q1.x * q2.w + q1.y * q2.z - q1.z * q2.y;
+    result.y = q1.w * q2.y - q1.x * q2.z + q1.y * q2.w + q1.z * q2.x;
+    result.z = q1.w * q2.z + q1.x * q2.y - q1.y * q2.x + q1.z * q2.w;
+
+    float norm = sqrtf(result.x * result.x + result.y * result.y + result.z * result.z + result.w * result.w);
+    if (norm > 0.0001f) {
+        result.x /= norm;
+        result.y /= norm;
+        result.z /= norm;
+        result.w /= norm;
+    }
+    return result;
+}
+
 OpenXRManager::OpenXRManager() {
     m_locatedViews[0].pose.orientation.w = 1.0f;
     m_locatedViews[0].fov = { -0.785f, 0.785f, 0.785f, -0.785f };
@@ -1064,6 +1093,7 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
         std::vector<XrCompositionLayerBaseHeader*> layers;
         XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
         XrCompositionLayerQuad quadLayer{XR_TYPE_COMPOSITION_LAYER_QUAD};
+        XrCompositionLayerQuad wristQuadLayer{XR_TYPE_COMPOSITION_LAYER_QUAD};
         XrCompositionLayerProjectionView projViews[2] = {
             {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},
             {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}
@@ -1209,6 +1239,57 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
                 layer.viewCount = 2;
                 layer.views = projViews;
                 layers.push_back((XrCompositionLayerBaseHeader*)&layer);
+
+                // Diegetic Wrist Health HUD on Left Glove / Gauntlet (Issue #7 & ADR 0006)
+                if (clientState.leftController.gripPose.isValid) {
+                    const auto& grip = clientState.leftController.gripPose;
+
+                    // Offset from left grip position to dorsal/top surface of forearm wrist
+                    // In controller local space:
+                    // +Z is along handle towards forearm (+0.075m), +Y is dorsal/top side (+0.045m), -X is radial side (-0.01m)
+                    RiddickVRVector3 localOffset = { -0.01f, 0.045f, 0.075f };
+                    RiddickVRVector3 worldOffset = RotateVectorByQuat(localOffset, grip.orientation);
+
+                    XrPosef wristPose{};
+                    wristPose.position.x = grip.position.x + worldOffset.x;
+                    wristPose.position.y = grip.position.y + worldOffset.y;
+                    wristPose.position.z = grip.position.z + worldOffset.z;
+
+                    // Rotate quad so its front normal (+Z) points outward from top of wrist (+Y of controller)
+                    // and its top edge (+Y) points forward along forearm towards hand (-Z of controller)
+                    // This is a -90 deg rotation around controller's X axis: Q_rel = (-0.7071f, 0, 0, 0.7071f)
+                    RiddickVRQuaternion qRel = { -0.7071068f, 0.0f, 0.0f, 0.7071068f };
+                    wristPose.orientation = MultiplyQuaternions(grip.orientation, qRel);
+
+                    // Glance activation check: verify gauntlet display is turned towards the player's HMD
+                    RiddickVRQuaternion quadQuat = { wristPose.orientation.x, wristPose.orientation.y, wristPose.orientation.z, wristPose.orientation.w };
+                    RiddickVRVector3 normalWorld = RotateVectorByQuat({ 0.0f, 0.0f, 1.0f }, quadQuat);
+
+                    float toHmdX = m_locatedViews[0].pose.position.x - wristPose.position.x;
+                    float toHmdY = m_locatedViews[0].pose.position.y - wristPose.position.y;
+                    float toHmdZ = m_locatedViews[0].pose.position.z - wristPose.position.z;
+                    float glanceDot = normalWorld.x * toHmdX + normalWorld.y * toHmdY + normalWorld.z * toHmdZ;
+
+                    // Render when gauntlet is oriented towards player's view (glance angle > -0.1f)
+                    if (glanceDot > -0.1f) {
+                        wristQuadLayer.layerFlags = 0;
+                        wristQuadLayer.space = m_appSpace ? m_appSpace : (m_viewSpace ? m_viewSpace : XR_NULL_HANDLE);
+                        wristQuadLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                        wristQuadLayer.subImage.swapchain = m_swapchains[0].handle;
+
+                        // Crop upper-left health box region from swapchain
+                        int32_t hudW = static_cast<int32_t>(m_swapchains[0].width * 0.22f);
+                        int32_t hudH = static_cast<int32_t>(m_swapchains[0].height * 0.15f);
+                        wristQuadLayer.subImage.imageRect.offset = { 0, 0 };
+                        wristQuadLayer.subImage.imageRect.extent = { hudW, hudH };
+
+                        wristQuadLayer.pose = wristPose;
+                        wristQuadLayer.size.width = 0.12f;  // 12 cm gauntlet display width
+                        wristQuadLayer.size.height = 0.06f; // 6 cm gauntlet display height
+
+                        layers.push_back((XrCompositionLayerBaseHeader*)&wristQuadLayer);
+                    }
+                }
             }
         }
 
