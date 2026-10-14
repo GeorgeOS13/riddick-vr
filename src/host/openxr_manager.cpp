@@ -1278,15 +1278,15 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
                         wristQuadLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
                         wristQuadLayer.subImage.swapchain = m_swapchains[0].handle;
 
-                        // Crop upper-left health box region from swapchain
-                        int32_t hudW = static_cast<int32_t>(m_swapchains[0].width * 0.22f);
-                        int32_t hudH = static_cast<int32_t>(m_swapchains[0].height * 0.15f);
+                        // Crop upper-left health box and stealth eyeshine status region from swapchain
+                        int32_t hudW = static_cast<int32_t>(m_swapchains[0].width * 0.26f);
+                        int32_t hudH = static_cast<int32_t>(m_swapchains[0].height * 0.16f);
                         wristQuadLayer.subImage.imageRect.offset = { 0, 0 };
                         wristQuadLayer.subImage.imageRect.extent = { hudW, hudH };
 
                         wristQuadLayer.pose = wristPose;
-                        wristQuadLayer.size.width = 0.12f;  // 12 cm gauntlet display width
-                        wristQuadLayer.size.height = 0.06f; // 6 cm gauntlet display height
+                        wristQuadLayer.size.width = 0.14f;  // 14 cm gauntlet biomonitor width
+                        wristQuadLayer.size.height = 0.07f; // 7 cm gauntlet biomonitor height
 
                         layers.push_back((XrCompositionLayerBaseHeader*)&wristQuadLayer);
                     }

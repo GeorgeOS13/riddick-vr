@@ -917,17 +917,34 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         }
     }
 
-    // 7. Eyeshine / Night Vision Temple Gesture (tapping side of head)
-    static DWORD s_lastEyeshineGestureTime = 0;
-    bool handNearHead = (vrState.rightController.gripPose.position.y > 0.08f && fabsf(vrState.rightController.gripPose.position.x) > 0.12f && vrState.rightController.grip > 0.5f) ||
-                        (vrState.leftController.gripPose.position.y > 0.08f && fabsf(vrState.leftController.gripPose.position.x) > 0.12f && vrState.leftController.grip > 0.5f);
-    if (!isClimbingActive && handNearHead && now - s_lastEyeshineGestureTime > 1500) {
-        s_lastEyeshineGestureTime = now;
-        VR_LOG_INFO("Tactical Gesture: EYESHINE toggled");
-        SendKeyTap('Q'); // Native Riddick Eyeshine key
-        SendKeyTap('F'); // Flashlight fallback
-        vrState.rightHapticPulse = 0.8f;
-        vrState.leftHapticPulse = 0.8f;
+    // 7. Tactical Eyeshine & Flashlight Gestures (ADR 0012)
+    // - Right Hand Temple Tap (Y > 0.08m, X > 0.12m): Toggles Eyeshine / Night Vision ('Q') with 0.85 haptic pulse
+    // - Left Hand Shoulder/Temple Tap (Y > 0.06m, X < -0.12m): Toggles Tactical Shoulder Flashlight ('F') with 0.75 haptic pulse
+    static DWORD s_lastEyeshineTime = 0;
+    static DWORD s_lastFlashlightTime = 0;
+    static bool s_eyeshineActive = false;
+    static bool s_flashlightActive = false;
+
+    if (!isClimbingActive) {
+        // Right Hand -> Eyeshine Night Vision
+        bool rightAtTemple = (rightLocal.y > 0.08f && rightLocal.x > 0.12f && vrState.rightController.grip > 0.5f);
+        if (rightAtTemple && (now - s_lastEyeshineTime > 1200)) {
+            s_lastEyeshineTime = now;
+            s_eyeshineActive = !s_eyeshineActive;
+            VR_LOG_INFO("Tactical Gesture: EYESHINE %s (Right Temple Tap)", s_eyeshineActive ? "ACTIVATED" : "DEACTIVATED");
+            SendKeyTap('Q'); // Native Riddick Eyeshine key
+            vrState.rightHapticPulse = 0.85f; // High-resonance optical buzz
+        }
+
+        // Left Hand -> Tactical Shoulder Flashlight
+        bool leftAtShoulder = (leftLocal.y > 0.06f && leftLocal.x < -0.12f && vrState.leftController.grip > 0.5f);
+        if (leftAtShoulder && (now - s_lastFlashlightTime > 1200)) {
+            s_lastFlashlightTime = now;
+            s_flashlightActive = !s_flashlightActive;
+            VR_LOG_INFO("Tactical Gesture: SHOULDER FLASHLIGHT %s (Left Shoulder Tap)", s_flashlightActive ? "ACTIVATED" : "DEACTIVATED");
+            SendKeyTap('F'); // Native Riddick Flashlight key
+            vrState.leftHapticPulse = 0.75f; // Mechanical click pulse
+        }
     }
 
     // 8. Aim & Block (Unified Physical Boxer Guard + Left Trigger Aim/Block)
