@@ -950,6 +950,45 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         }
     }
 
+    // 6d. Interactive Environmental Manipulation, Vent Prying, and Retinal Biometrics (ADR 0016)
+    // - Physical Vent Grate Prying: Both hands extended forward (Z < -0.20m) and pulling backward (Vz > +0.28 m/s) with grips held
+    // - Biometric Terminal / Retinal Poke: Index pointing forward into terminal plane (Z < -0.34m, Vz < -0.28 m/s)
+    static DWORD s_lastEnvInteractTime = 0;
+    if (!isClimbingActive && !s_physicalBlockEngaged && !s_twoHandedStabilizationActive && (now - s_lastEnvInteractTime > 800)) {
+        // Vent Grate Prying (Dual-Hand Pull)
+        bool bothHandsForward = (leftLocal.z < -0.20f && rightLocal.z < -0.20f);
+        bool bothGripping = (vrState.leftController.grip > 0.50f && vrState.rightController.grip > 0.50f);
+        bool bothPullingBack = (lVel.z > 0.28f && rVel.z > 0.28f);
+
+        if (bothHandsForward && bothGripping && bothPullingBack) {
+            s_lastEnvInteractTime = now;
+            VR_LOG_INFO("Environmental Gesture: VENTILATION GRATE PRY / DUCT OPEN executed (Lz: %.2f, Rz: %.2f)", lVel.z, rVel.z);
+            SendKeyTap('E');
+            SendKeyTap(VK_SPACE);
+            vrState.leftHapticPulse = 0.75f; // Heavy mechanical wrenching pulse
+            vrState.rightHapticPulse = 0.75f;
+        } else {
+            // Biometric Terminal / Retinal Scanner Poke (Single-Hand Pointed Poke)
+            bool rightPointing = (vrState.rightController.trigger < 0.20f && vrState.rightController.grip > 0.40f);
+            bool rightPoke = (rightLocal.z < -0.34f && rVel.z < -0.28f);
+
+            bool leftPointing = (vrState.leftController.trigger < 0.20f && vrState.leftController.grip > 0.40f);
+            bool leftPoke = (leftLocal.z < -0.34f && lVel.z < -0.28f);
+
+            if (rightPointing && rightPoke) {
+                s_lastEnvInteractTime = now;
+                VR_LOG_INFO("Environmental Gesture: BIOMETRIC TERMINAL TOUCH / RETINAL SCANNER (Right Hand, Z: %.2fm)", rightLocal.z);
+                SendKeyTap('E');
+                vrState.rightHapticPulse = 0.40f; // Digital tactile beep
+            } else if (leftPointing && leftPoke) {
+                s_lastEnvInteractTime = now;
+                VR_LOG_INFO("Environmental Gesture: BIOMETRIC TERMINAL TOUCH / RETINAL SCANNER (Left Hand, Z: %.2fm)", leftLocal.z);
+                SendKeyTap('E');
+                vrState.leftHapticPulse = 0.40f; // Digital tactile beep
+            }
+        }
+    }
+
     // 7. Tactical Eyeshine & Flashlight Gestures (ADR 0012)
     // - Right Hand Temple Tap (Y > 0.08m, X > 0.12m): Toggles Eyeshine / Night Vision ('Q') with 0.85 haptic pulse
     // - Left Hand Shoulder/Temple Tap (Y > 0.06m, X < -0.12m): Toggles Tactical Shoulder Flashlight ('F') with 0.75 haptic pulse
