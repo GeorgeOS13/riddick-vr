@@ -642,6 +642,20 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         vrState.rightHapticPulse = 0.60f;
     }
 
+    // Inmate Bunk Overhead Pipe Chin-Up & Ledge Pull Stance (ADR 0090)
+    static DWORD s_lastPipeChinUpTime = 0;
+    bool overheadHands = (leftLocal.y > 0.22f && rightLocal.y > 0.22f);
+    bool bothGripsClenched = (vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f);
+    bool chinUpPullDown = (lVel.y < -0.50f && rVel.y < -0.50f);
+    if (overheadHands && bothGripsClenched && chinUpPullDown && (now - s_lastPipeChinUpTime > 1800)) {
+        s_lastPipeChinUpTime = now;
+        VR_LOG_INFO("Physical Gesture: INMATE BUNK OVERHEAD PIPE CHIN-UP & LEDGE PULL (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
+        SendKeyTap(VK_SPACE);
+        SendKeyTap('C'); // Hoist body into suspended ceiling tuck
+        vrState.leftHapticPulse = 0.70f; // Iron pipe flex strain (75 Hz)
+        vrState.rightHapticPulse = 0.70f;
+    }
+
     // Pull-to-climb motion translation (alternating hands gives hand-over-hand climbing)
     s_ladderClimbUp = (lPullDown || rPullDown);
     s_ladderClimbDown = !s_ladderClimbUp && (lPushUp || rPushUp);
@@ -1122,6 +1136,37 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 vrState.rightHapticPulse = 0.70f; // Hone ping resonance (240 Hz)
             }
         }
+    }
+
+    // 6a-4. Security Camera Thermal Decoy Flare Igniting Gesture (ADR 0089)
+    static DWORD s_lastFlareIgniteTime = 0;
+    bool flareInOffHand = (leftLocal.z > -0.35f && leftLocal.z < -0.15f) && (vrState.leftController.grip > 0.55f);
+    bool strikerAtCap = (reloadHandDist < 0.16f) && (vrState.rightController.grip > 0.55f);
+    float shearVelY = fabsf(lVel.y - rVel.y);
+    float shearVelX = fabsf(lVel.x - rVel.x);
+    if (flareInOffHand && strikerAtCap && (shearVelY > 0.80f || shearVelX > 0.80f) && !s_physicalBlockEngaged && (now - s_lastFlareIgniteTime > 1800)) {
+        s_lastFlareIgniteTime = now;
+        VR_LOG_INFO("Tactical Decoy: THERMAL MAGNESIUM FLARE IGNITED (ShearVelY: %.2f, ShearVelX: %.2f)", shearVelY, shearVelX);
+        SendKeyTap('4'); // Equip flare / throwable slot
+        mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+        mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+        vrState.leftHapticPulse = 0.85f;  // Sulfur percussion strike snap (260 Hz)
+        vrState.rightHapticPulse = 0.85f;
+    }
+
+    // 6a-5. Medical Syringe Sedative Self-Injection & Bio-Adrenaline Rush (ADR 0087)
+    static DWORD s_lastSyringeInjectTime = 0;
+    bool dominantAtOffArm = (rightLocal.x > -0.24f && rightLocal.x < -0.06f) &&
+                            (rightLocal.y > -0.18f && rightLocal.y < 0.12f) &&
+                            (rightLocal.z > -0.25f && rightLocal.z < -0.05f);
+    bool syringePlungerPressed = (vrState.rightController.grip > 0.50f) && (vrState.rightController.trigger > 0.65f);
+    if (dominantAtOffArm && syringePlungerPressed && !s_physicalBlockEngaged && (now - s_lastSyringeInjectTime > 1500)) {
+        s_lastSyringeInjectTime = now;
+        VR_LOG_INFO("Medical Restoration: PNEUMATIC BIO-ADRENALINE SYRINGE INJECTED (Rx: %.2f, Ry: %.2f, Rz: %.2f)", rightLocal.x, rightLocal.y, rightLocal.z);
+        SendKeyTap('E');
+        SendKeyTap('Q'); // Bio-adrenaline / stimulant surge
+        vrState.rightHapticPulse = 0.85f; // Needle plunge & adrenaline rush pulse (100 Hz)
+        vrState.leftHapticPulse = 0.65f;  // Arm tissue injection feedback
     }
 
     // 6b. Two-Handed Firearm Stabilization (ADR 0005)
@@ -1823,6 +1868,21 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 vrState.leftHapticPulse = 0.95f; // Shearing metal turbine arrest impact (120 Hz)
                 vrState.rightHapticPulse = 0.95f;
+            }
+
+            // Atmospheric Hull Rupture Emergency Foam Canister Deployment (ADR 0088)
+            static DWORD s_lastFoamCanisterDeployTime = 0;
+            bool bothAtBreach = (leftLocal.z > -0.44f && leftLocal.z < -0.16f && rightLocal.z > -0.44f && rightLocal.z < -0.16f) &&
+                                (leftLocal.y > -0.30f && leftLocal.y < 0.20f && rightLocal.y > -0.30f && rightLocal.y < 0.20f);
+            bool bothTriggersFoam = (vrState.leftController.trigger > 0.60f && vrState.rightController.trigger > 0.60f);
+            bool foamSeamSweep = (fabsf(lVel.x) > 0.30f || fabsf(rVel.x) > 0.30f || fabsf(lVel.y) > 0.30f || fabsf(rVel.y) > 0.30f);
+            if (bothAtBreach && bothTriggersFoam && foamSeamSweep && (now - s_lastFoamCanisterDeployTime > 2000)) {
+                s_lastFoamCanisterDeployTime = now;
+                VR_LOG_INFO("Environmental Gesture: HULL RUPTURE EMERGENCY FOAM CANISTER EXTRUDED (Vx: %.2f)", rVel.x);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                vrState.leftHapticPulse = 0.60f; // Acoustic foam jet extrusion (120 Hz)
+                vrState.rightHapticPulse = 0.75f; // Rapid cure polymerization pop (200 Hz)
             }
         }
     }
