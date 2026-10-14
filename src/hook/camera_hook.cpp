@@ -690,10 +690,25 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     static DWORD s_guardPoseReleaseTimer = 0;
     static bool s_currentBlockEngaged = false;
 
-    // 5. Physical Melee Combat Gestures (Jabs, Hooks, Uppercuts, Ulak Cross-Slashes, Shiv Executions)
+    // 5. Physical Melee Combat Gestures (Jabs, Hooks, Uppercuts, Ulak Cross-Slashes, Shiv Executions, Counter-Parries)
     if (!isClimbingActive && (now - s_lastPunchTime > 260)) {
         bool dualCrossSlash = (rVel.x < -1.1f && lVel.x > 1.1f) || (rVel.x > 1.1f && lVel.x < -1.1f);
-        if (dualCrossSlash || rSpeed > 1.8f || lSpeed > 1.8f) {
+
+        // 5a. Physical Parry / Counter-Disarm Thrust (ADR 0018)
+        // In Starbreeze engine: Left Click while Right Click (Block) is held executes Counter-Disarm!
+        // When in active Boxer Guard (s_currentBlockEngaged), driving fists forward into an attack (Vz < -1.15 m/s)
+        // executes the reactive counter-strike / disarm without canceling block mode.
+        bool isForwardParry = s_currentBlockEngaged &&
+            ((rVel.z < -1.15f && rightLocal.z < -0.15f) || (lVel.z < -1.15f && leftLocal.z < -0.15f));
+
+        if (isForwardParry) {
+            s_lastPunchTime = now;
+            VR_LOG_INFO("Physical Gesture: PARRY / COUNTER-STRIKE THRUST (Rz: %.2f, Lz: %.2f while Blocking)", rVel.z, lVel.z);
+            mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+            mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+            vrState.rightHapticPulse = 0.95f; // High-frequency bone-cracking parry shockwave (280 Hz)
+            vrState.leftHapticPulse = 0.95f;
+        } else if (dualCrossSlash || rSpeed > 1.8f || lSpeed > 1.8f) {
             // Immediately disengage block if currently blocking so attacks are not canceled or stuck
             if (s_currentBlockEngaged) {
                 mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
@@ -975,6 +990,13 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             bool leftPointing = (vrState.leftController.trigger < 0.20f && vrState.leftController.grip > 0.40f);
             bool leftPoke = (leftLocal.z < -0.34f && lVel.z < -0.28f);
 
+            // NanoMED Medical Regeneration Station Palm Touch (Flat Palm Contact - ADR 0019)
+            bool rightPalmOpen = (vrState.rightController.trigger < 0.20f && vrState.rightController.grip < 0.25f);
+            bool rightPalmTouch = (rightLocal.z < -0.30f && rVel.z < -0.25f);
+
+            bool leftPalmOpen = (vrState.leftController.trigger < 0.20f && vrState.leftController.grip < 0.25f);
+            bool leftPalmTouch = (leftLocal.z < -0.30f && lVel.z < -0.25f);
+
             if (rightPointing && rightPoke) {
                 s_lastEnvInteractTime = now;
                 VR_LOG_INFO("Environmental Gesture: BIOMETRIC TERMINAL TOUCH / RETINAL SCANNER (Right Hand, Z: %.2fm)", rightLocal.z);
@@ -985,6 +1007,16 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 VR_LOG_INFO("Environmental Gesture: BIOMETRIC TERMINAL TOUCH / RETINAL SCANNER (Left Hand, Z: %.2fm)", leftLocal.z);
                 SendKeyTap('E');
                 vrState.leftHapticPulse = 0.40f; // Digital tactile beep
+            } else if (rightPalmOpen && rightPalmTouch) {
+                s_lastEnvInteractTime = now;
+                VR_LOG_INFO("Environmental Gesture: NANOMED MEDICAL REGENERATION STATION TOUCH (Right Palm, Z: %.2fm)", rightLocal.z);
+                SendKeyTap('E');
+                vrState.rightHapticPulse = 0.50f; // Bio-restorative soothing haptic wave
+            } else if (leftPalmOpen && leftPalmTouch) {
+                s_lastEnvInteractTime = now;
+                VR_LOG_INFO("Environmental Gesture: NANOMED MEDICAL REGENERATION STATION TOUCH (Left Palm, Z: %.2fm)", leftLocal.z);
+                SendKeyTap('E');
+                vrState.leftHapticPulse = 0.50f; // Bio-restorative soothing haptic wave
             }
         }
     }
@@ -1064,8 +1096,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         }
     }
 
-    // 9. Left & Right Grip Mapping (Interactions, Physical Throwing, Climbing, Reload - ADR 0017)
-    // Left Grip -> Grab / Secondary Interact ('E') / Physical Object Throwing
+    // 9. Left & Right Grip Mapping (Interactions, Physical Throwing, Body Dragging, Climbing, Reload - ADR 0017 & 0020)
+    // Left Grip -> Grab / Secondary Interact ('E') / Physical Object Throwing / Body Dragging
     bool wantLeftGrip = !isClimbingActive && !s_twoHandedStabilizationActive && (vrState.leftController.grip > 0.5f);
     if (wantLeftGrip != s_leftGripDown) {
         if (!wantLeftGrip && s_leftGripDown) {
@@ -1085,6 +1117,17 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             vrState.leftHapticPulse = 0.35f; // Object grab latch
         }
         s_leftGripDown = wantLeftGrip;
+    }
+
+    // Kinematic Body / Heavy Object Drag Resistance (ADR 0020):
+    // When crouched and hauling an object/corpse backwards or sideways, emit periodic drag friction pulses
+    static DWORD s_lastDragPulseTime = 0;
+    if (s_leftGripDown && (s_isPhysicallyCrouched || s_isStealthPeeking)) {
+        float moveMagnitude = fabsf(vrState.leftController.thumbstickX) + fabsf(vrState.leftController.thumbstickY);
+        if (moveMagnitude > 0.25f && (now - s_lastDragPulseTime > 450)) {
+            s_lastDragPulseTime = now;
+            vrState.leftHapticPulse = 0.38f; // Low-frequency drag friction rumble (85 Hz)
+        }
     }
 
     // Right Grip -> Weapon Reload ('R') (suppressed during ladder climb)
