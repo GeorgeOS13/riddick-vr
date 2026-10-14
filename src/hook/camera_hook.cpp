@@ -741,10 +741,24 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         // In Starbreeze engine: Left Click while Right Click (Block) is held executes Counter-Disarm!
         // When in active Boxer Guard (s_currentBlockEngaged), driving fists forward into an attack (Vz < -1.15 m/s)
         // executes the reactive counter-strike / disarm without canceling block mode.
+        // Guard Rifle Firearm Stripping & Mag Ejection Disarm (ADR 0063)
+        bool dualRifleStrip = s_currentBlockEngaged &&
+                              (rVel.z < -1.15f && lVel.z < -1.15f) &&
+                              (vrState.rightController.trigger > 0.60f && vrState.leftController.trigger > 0.60f);
+
         bool isForwardParry = s_currentBlockEngaged &&
             ((rVel.z < -1.15f && rightLocal.z < -0.15f) || (lVel.z < -1.15f && leftLocal.z < -0.15f));
 
-        if (isForwardParry) {
+        if (dualRifleStrip) {
+            s_lastPunchTime = now;
+            VR_LOG_INFO("Physical Counter: GUARD RIFLE STRIP & MAG EJECTION DISARM (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
+            mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+            mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+            SendKeyTap('R'); // Drop enemy magazine
+            SendKeyTap('1'); // Equip stripped firearm
+            vrState.rightHapticPulse = 0.95f; // Receiver wrenching shockwave (280 Hz)
+            vrState.leftHapticPulse = 0.95f;
+        } else if (isForwardParry) {
             s_lastPunchTime = now;
             VR_LOG_INFO("Physical Gesture: PARRY / COUNTER-STRIKE THRUST (Rz: %.2f, Lz: %.2f while Blocking)", rVel.z, lVel.z);
             mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
@@ -764,6 +778,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             s_lastPunchTime = now;
             const auto& activeVel = (rSpeed > lSpeed) ? rVel : lVel;
             const auto& activeLocal = (rSpeed > lSpeed) ? rightLocal : leftLocal;
+
+            // Heavy Exoskeleton Power Fist Kinetic Shockwave Punch (ADR 0066)
+            bool mechPowerPunch = (rVel.z < -1.60f) && (vrState.rightController.grip > 0.60f);
 
             // Security Drone EMP Overload & Chassis Snap (ADR 0058)
             bool dualGrappleDrone = (rightLocal.z < -0.20f && leftLocal.z < -0.20f) &&
@@ -804,7 +821,15 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             // Inmate Mess Hall Tray Facial Batter (ADR 0060)
             bool leftTrayBatter = (leftLocal.z < -0.18f) && (lVel.z < -1.0f) && (vrState.leftController.grip > 0.50f);
 
-            if (droneEmpSnap) {
+            if (mechPowerPunch) {
+                VR_LOG_INFO("Physical Gesture: EXOSKELETON POWER FIST KINETIC SHOCKWAVE PUNCH (Rz: %.2f m/s)", rVel.z);
+                SendKey('W', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('W', false);
+                vrState.rightHapticPulse = 0.98f; // Piston shockwave blast (100 Hz)
+                vrState.leftHapticPulse = 0.85f;
+            } else if (droneEmpSnap) {
                 VR_LOG_INFO("Physical Combat: SECURITY DRONE EMP OVERLOAD & CHASSIS SNAP (TorqueRelY: %.2f)", fabsf(lVel.y - rVel.y));
                 SendKeyTap('E');
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
@@ -1372,6 +1397,18 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 vrState.rightHapticPulse = 0.45f; // Hydraulic dogging ratchet click (160 Hz)
             }
 
+            // Bio-Containment Decontamination Airlock Lever (ADR 0064)
+            bool rightAtDeconLever = (rightLocal.z > -0.42f && rightLocal.z < -0.18f) &&
+                                     (rightLocal.y > 0.05f && rightLocal.y < 0.35f) &&
+                                     (vrState.rightController.grip > 0.50f) &&
+                                     (rVel.y < -0.60f);
+            if (rightAtDeconLever && (now - s_lastEnvInteractTime > 800)) {
+                s_lastEnvInteractTime = now;
+                VR_LOG_INFO("Environmental Gesture: BIO-CONTAINMENT DECONTAMINATION LEVER PULLED (Ry: %.2f)", rVel.y);
+                SendKeyTap('E');
+                vrState.rightHapticPulse = 0.80f; // Pressurized decontamination air blast whoosh (140 Hz)
+            }
+
             // Atmospheric Decompression Blast Shield Overhead Pull (ADR 0046)
             bool bothHandsOverhead = (leftLocal.y > 0.25f && rightLocal.y > 0.25f);
             bool bothGrippingShield = (vrState.leftController.grip > 0.50f && vrState.rightController.grip > 0.50f);
@@ -1667,6 +1704,20 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (cuppedLeftHand && lSpeed > 0.70f && !s_physicalBlockEngaged && (now - s_lastDiceRattleTime > 120)) {
         s_lastDiceRattleTime = now;
         vrState.leftHapticPulse = 0.30f; // Rapid bone-on-bone dice rattle micro-tap (160 Hz)
+    }
+
+    // Inmate Pit Brawl Dirt / Ash Throw Blind (ADR 0065)
+    static DWORD s_lastAshThrowTime = 0;
+    bool ashThrowFlick = (s_isPhysicallyCrouched || s_isDeepProne) &&
+                         (vrState.rightController.grip < 0.40f && vrState.rightController.trigger < 0.40f) &&
+                         (rVel.y > 0.80f && rVel.z < -0.80f);
+    if (ashThrowFlick && (now - s_lastAshThrowTime > 1200)) {
+        s_lastAshThrowTime = now;
+        VR_LOG_INFO("Combat Dirty Tactic: DIRT / ASH THROWN INTO ENEMY EYES (Vy: %.2f, Vz: %.2f)", rVel.y, rVel.z);
+        SendKeyTap('E');
+        mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+        mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+        vrState.rightHapticPulse = 0.50f; // Fine particulate scatter burst (180 Hz)
     }
 
     // Kinematic Body / Heavy Object Drag Resistance (ADR 0020):

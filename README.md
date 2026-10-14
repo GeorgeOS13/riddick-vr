@@ -201,6 +201,10 @@ The script automatically produces:
 * **Inmate Mess Hall Tray Parry & Batter:** Grip mess tray from cafeteria table ($Y \in [-0.55, -0.25]\text{ m}$) with Left Grip (`E` + Slot '1'); thrust forward ($V_z < -1.0\text{ m/s}$) for facial tray smash (`LMB`, $0.90$).
 * **Hydraulic Pressure Blast Valve Steam Jet:** Strike/kick wall blast valve ($Z \in [-0.40, -0.18]\text{ m}, V_z < -1.10\text{ m/s}$) to pop emergency relief seal (`E` + `'Q'`), unleashing scalding steam jets with $130\text{ Hz}$ ($0.75$) rumble.
 * **Cybernetic Drone Reticle Lead & Decoupled Aim:** Drone cockpit view tracks natural HMD look while heavy servo-driven turret tracks motion aim with dynamic lag filtering ($\alpha = 0.28$) and lock-on confirmation.
+* **Guard Rifle Stripping & Mag Ejection Disarm:** While holding Boxer Guard, squeeze both triggers ($> 0.60$) and thrust forward ($V_z < -1.15\text{ m/s}$) to violently wrench an assailant's rifle away, ejecting their ammo magazine (`R`), and claiming the firearm (`1`) with $280\text{ Hz}$ ($0.95$) receiver shearing haptics.
+* **Bio-Containment Decontamination Airlock Lever:** Grip wall-mounted chamber valve handle ($Z \in [-0.42, -0.18]\text{ m}, Y \in [0.05, 0.35]\text{ m}$) and pull downward ($V_y < -0.60\text{ m/s}$) to cycle quarantine pressure seals (`E`) with $140\text{ Hz}$ ($0.80$) pressurized whoosh haptics.
+* **Inmate Pit Brawl Dirt & Ash Throw Blind:** While crouched or in deep prone, flick open dominant hand upward and forward ($V_y > 0.80\text{ m/s}, V_z < -0.80\text{ m/s}$) without gripping to scoop floor soot/grit and blind adversaries (`E` + `LMB`) with $180\text{ Hz}$ ($0.50$) particulate scatter micro-haptics.
+* **Heavy Exoskeleton Power Fist Kinetic Shockwave Punch:** Clench dominant grip ($> 0.60$) and drive arm forward at high velocity ($V_z < -1.60\text{ m/s}$) to trigger hydraulic piston discharge (`W` + `LMB`), detonating a concussive shockwave ($0.98$ concussive blast at $100\text{ Hz}$) that obliterates armor.
 * **Tactical Eyeshine & Flashlight:** Tap right temple with grip to toggle Eyeshine (`Q`); tap left shoulder to toggle flashlight (`F`).
 
 ---
