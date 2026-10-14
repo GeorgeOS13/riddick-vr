@@ -823,7 +823,20 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             // Inmate Mess Hall Tray Facial Batter (ADR 0060)
             bool leftTrayBatter = (leftLocal.z < -0.18f) && (lVel.z < -1.0f) && (vrState.leftController.grip > 0.50f);
 
-            if (mechPowerPunch) {
+            // Guard Stun Baton Heavy Two-Handed Defibrillator Slam (ADR 0077)
+            bool twoHandedBatonSlam = s_twoHandedStabilizationActive &&
+                                      (lVel.y < -1.30f && rVel.y < -1.30f) &&
+                                      (vrState.rightController.trigger > 0.60f && vrState.leftController.trigger > 0.60f);
+
+            if (twoHandedBatonSlam) {
+                VR_LOG_INFO("Physical Gesture: TWO-HANDED STUN BATON DEFIBRILLATOR SLAM (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
+                SendKey('S', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('S', false);
+                vrState.rightHapticPulse = 0.98f; // Electro-kinetic shockwave blast (280 Hz)
+                vrState.leftHapticPulse = 0.98f;
+            } else if (mechPowerPunch) {
                 VR_LOG_INFO("Physical Gesture: EXOSKELETON POWER FIST KINETIC SHOCKWAVE PUNCH (Rz: %.2f m/s)", rVel.z);
                 SendKey('W', true);
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
@@ -1693,6 +1706,41 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q'); // Thermal diversion signal
                 vrState.rightHapticPulse = 0.85f; // Crystalline ice fracture crack (260 Hz)
             }
+
+            // Subterranean Mining Cart Rail Track Switch Wrench Pull (ADR 0076)
+            static DWORD s_lastTrackSwitchTime = 0;
+            bool rightAtTrackSwitch = (rightLocal.z > -0.42f && rightLocal.z < -0.16f) &&
+                                      (rightLocal.y > -0.55f && rightLocal.y < -0.15f) &&
+                                      (vrState.rightController.grip > 0.50f);
+            bool trackSwitchThrow = (fabsf(rVel.x) > 0.70f);
+            if (rightAtTrackSwitch && trackSwitchThrow && (now - s_lastTrackSwitchTime > 850)) {
+                s_lastTrackSwitchTime = now;
+                VR_LOG_INFO("Environmental Gesture: MINING RAIL TRACK SWITCH WRENCH THROWN (Vx: %.2f)", rVel.x);
+                SendKeyTap('E');
+                vrState.rightHapticPulse = 0.85f; // Heavy iron rail clank & ground shudder (70 Hz)
+            }
+
+            // Dark Athena EVA Airlock Manual Handwheel Decompression Dogging (ADR 0078)
+            static DWORD s_lastAirlockCrankTime = 0;
+            static int s_airlockCrankCount = 0;
+            bool bothAtAirlockWheel = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && rightLocal.z > -0.42f && rightLocal.z < -0.16f) &&
+                                      (leftLocal.y > -0.20f && leftLocal.y < 0.25f && rightLocal.y > -0.20f && rightLocal.y < 0.25f) &&
+                                      (vrState.leftController.grip > 0.50f && vrState.rightController.grip > 0.50f);
+            float dualWheelSpeed = sqrtf(rVel.x * rVel.x + rVel.y * rVel.y);
+            if (bothAtAirlockWheel && dualWheelSpeed > 0.55f && (now - s_lastAirlockCrankTime > 220)) {
+                s_lastAirlockCrankTime = now;
+                s_airlockCrankCount++;
+                VR_LOG_INFO("Environmental Gesture: EVA AIRLOCK HANDWHEEL DOGGING REVOLUTION #%d (Speed: %.2f m/s)", s_airlockCrankCount, dualWheelSpeed);
+                vrState.leftHapticPulse = 0.50f;
+                vrState.rightHapticPulse = 0.50f; // Ratchet tooth click (160 Hz)
+                if (s_airlockCrankCount >= 3) {
+                    s_airlockCrankCount = 0;
+                    VR_LOG_INFO("Environmental Gesture: EVA AIRLOCK BULKHEAD DOGGED SHUT / HERMETIC REPRESSURIZATION TRIGGERED");
+                    SendKeyTap('E');
+                    vrState.leftHapticPulse = 0.85f; // Hermetic clamp thud & seal hiss (100 Hz)
+                    vrState.rightHapticPulse = 0.85f;
+                }
+            }
         }
     }
 
@@ -1865,6 +1913,21 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (cuppedLeftHand && lSpeed > 0.70f && !s_physicalBlockEngaged && (now - s_lastDiceRattleTime > 120)) {
         s_lastDiceRattleTime = now;
         vrState.leftHapticPulse = 0.30f; // Rapid bone-on-bone dice rattle micro-tap (160 Hz)
+    }
+
+    // Interactive Inmate Gambling Card Flipping & Dealing (ADR 0075)
+    static DWORD s_lastCardDealTime = 0;
+    bool cardHandProximity = (rightLocal.y > -0.45f && rightLocal.y < -0.10f) &&
+                             (rightLocal.z > -0.40f && rightLocal.z < -0.15f);
+    bool cardPinchGrip = (vrState.rightController.grip > 0.40f && vrState.rightController.grip < 0.75f) &&
+                         (vrState.rightController.trigger < 0.30f);
+    bool cardFlick = (fabsf(rVel.x) > 0.60f || rVel.z < -0.65f);
+    if (cardHandProximity && cardPinchGrip && cardFlick && !s_physicalBlockEngaged && (now - s_lastCardDealTime > 300)) {
+        s_lastCardDealTime = now;
+        VR_LOG_INFO("Diegetic Interaction: INMATE GAMBLING CARD FLIPPED / DEALT (Vx: %.2f, Vz: %.2f)", rVel.x, rVel.z);
+        SendKeyTap('E');
+        SendKeyTap(VK_RETURN);
+        vrState.rightHapticPulse = 0.35f; // Crisp paper card friction micro-haptic (240 Hz)
     }
 
     // Inmate Pit Brawl Dirt / Ash Throw Blind (ADR 0065)

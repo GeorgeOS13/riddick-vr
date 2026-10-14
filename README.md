@@ -213,6 +213,10 @@ The script automatically produces:
 * **Cargo Container Hydraulic Latch Lever:** Grasp container lock handle ($Z \in [-0.42, -0.16]\text{ m}, Y \in [-0.25, 0.15]\text{ m}$) with grip held and throw upward/outward ($|V| > 0.70\text{ m/s}$) to pop pressurized cargo doors (`E`) with $100\text{ Hz}$ ($0.85$) hydraulic decompression thud.
 * **Corneal Blink & Eye Recovery Wipe:** When blinded by dust or flashbangs, sweep forearm across eyes ($Z \in [-0.22, -0.05]\text{ m}$) or rapidly shake head ($|\Delta\text{yaw}| > 0.15\text{ rad}$) to accelerate visual recovery (`Space`) with $180\text{ Hz}$ ($0.30$) corneal blink micro-haptics.
 * **Subterranean Cryo-Nitrogen Coolant Valve:** Strike or wrench frost-encrusted pipe valve ($Z \in [-0.42, -0.16]\text{ m}, |V| > 1.05\text{ m/s}$) to crack ice seals (`E` + `Q`), venting supercooled cryogenic clouds with $260\text{ Hz}$ ($0.85$) crystalline shatter haptics.
+* **Inmate Gambling Card Dealing & Flipping:** Above table level ($Y \in [-0.45, -0.10]\text{ m}$), pinch cards ($Grip \in [0.40, 0.75]$) and flick wrist laterally ($|V_x| > 0.60\text{ m/s}$) to deal cards (`E` + `Enter`) with $240\text{ Hz}$ ($0.35$) card slide micro-haptics.
+* **Mining Rail Track Switch Lever:** Grasp low track switch handle ($Y \in [-0.55, -0.15]\text{ m}, Z \in [-0.42, -0.16]\text{ m}$) with grip held and swing laterally across tracks ($|V_x| > 0.70\text{ m/s}$) to divert rail routes (`E`) with $70\text{ Hz}$ ($0.85$) iron rail clank.
+* **Two-Handed Stun Baton Defibrillator Slam:** In two-handed stance, hold both triggers ($> 0.60$) and plunge controllers downward violently ($V_y < -1.30\text{ m/s}$) to detonate an explosive electro-kinetic ground shockwave (`S` + `LMB`, dual $0.98$ blast at $280\text{ Hz}$).
+* **EVA Airlock Dogging Spindle Cranking:** Grasp exterior airlock wheel ($Z \in [-0.42, -0.16]\text{ m}$) with both grips held and crank 3 full circular revolutions ($|V| > 0.55\text{ m/s}$) to dog vacuum seals (`E`) with $100\text{ Hz}$ ($0.85$) hermetic clamp thud.
 * **Tactical Eyeshine & Flashlight:** Tap right temple with grip to toggle Eyeshine (`Q`); tap left shoulder to toggle flashlight (`F`).
 
 ---
