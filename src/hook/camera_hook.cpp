@@ -685,10 +685,11 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     static DWORD s_guardPoseReleaseTimer = 0;
     static bool s_currentBlockEngaged = false;
 
-    // 5. Physical Melee Combat Gestures (Jabs, Hooks, Uppercuts)
-    if (!isClimbingActive && (now - s_lastPunchTime > 320)) {
-        if (rSpeed > 1.8f || lSpeed > 1.8f) {
-            // Immediately disengage block if currently blocking so punches are not canceled or stuck
+    // 5. Physical Melee Combat Gestures (Jabs, Hooks, Uppercuts, Ulak Cross-Slashes, Shiv Executions)
+    if (!isClimbingActive && (now - s_lastPunchTime > 260)) {
+        bool dualCrossSlash = (rVel.x < -1.1f && lVel.x > 1.1f) || (rVel.x > 1.1f && lVel.x < -1.1f);
+        if (dualCrossSlash || rSpeed > 1.8f || lSpeed > 1.8f) {
+            // Immediately disengage block if currently blocking so attacks are not canceled or stuck
             if (s_currentBlockEngaged) {
                 mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
                 s_currentBlockEngaged = false;
@@ -699,35 +700,76 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
             s_lastPunchTime = now;
             const auto& activeVel = (rSpeed > lSpeed) ? rVel : lVel;
+            const auto& activeLocal = (rSpeed > lSpeed) ? rightLocal : leftLocal;
 
-            if (activeVel.y > 1.2f) {
+            if (dualCrossSlash) {
+                VR_LOG_INFO("Physical Gesture: DUAL ULAK SCISSOR CROSS-SLASH (Rx: %.2f, Lx: %.2f)", rVel.x, lVel.x);
+                SendKey('A', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('A', false);
+
+                SendKey('D', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('D', false);
+
+                vrState.rightHapticPulse = 0.95f;
+                vrState.leftHapticPulse = 0.95f;
+            } else if (activeVel.y < -1.35f && (activeLocal.y > -0.10f || s_isPhysicallyCrouched)) {
+                VR_LOG_INFO("Physical Gesture: OVERHEAD SHIV PLUNGE / FINISHER (Vy: %.2f m/s, Y: %.2fm)", activeVel.y, activeLocal.y);
+                SendKey('S', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('S', false);
+
+                if (rSpeed > lSpeed) vrState.rightHapticPulse = 0.95f;
+                else vrState.leftHapticPulse = 0.95f;
+            } else if ((s_isPhysicallyCrouched || s_isStealthPeeking) && activeLocal.z < -0.25f && (activeVel.z < -1.1f || fabsf(activeVel.x) > 1.1f)) {
+                VR_LOG_INFO("Physical Gesture: STEALTH TAKEDOWN / THROAT-SLIT initiated (Vz: %.2f, Vx: %.2f)", activeVel.z, activeVel.x);
+                SendKeyTap('E');
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+
+                if (rSpeed > lSpeed) vrState.rightHapticPulse = 0.90f;
+                else vrState.leftHapticPulse = 0.90f;
+            } else if (activeVel.y > 1.2f) {
                 VR_LOG_INFO("Physical Gesture: UPPERCUT detected (Speed: %.2f m/s)", activeVel.y);
                 SendKey('S', true);
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey('S', false);
+
+                if (rSpeed > lSpeed) vrState.rightHapticPulse = 0.9f;
+                else vrState.leftHapticPulse = 0.9f;
             } else if (activeVel.x > 1.2f) {
-                VR_LOG_INFO("Physical Gesture: RIGHT HOOK detected (Speed: %.2f m/s)", activeVel.x);
+                VR_LOG_INFO("Physical Gesture: RIGHT HOOK / BLADE SLASH detected (Speed: %.2f m/s)", activeVel.x);
                 SendKey('D', true);
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey('D', false);
+
+                if (rSpeed > lSpeed) vrState.rightHapticPulse = 0.9f;
+                else vrState.leftHapticPulse = 0.9f;
             } else if (activeVel.x < -1.2f) {
-                VR_LOG_INFO("Physical Gesture: LEFT HOOK detected (Speed: %.2f m/s)", activeVel.x);
+                VR_LOG_INFO("Physical Gesture: LEFT HOOK / BLADE SLASH detected (Speed: %.2f m/s)", activeVel.x);
                 SendKey('A', true);
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey('A', false);
+
+                if (rSpeed > lSpeed) vrState.rightHapticPulse = 0.9f;
+                else vrState.leftHapticPulse = 0.9f;
             } else {
-                VR_LOG_INFO("Physical Gesture: STRAIGHT PUNCH detected (Speed: %.2f m/s)", (rSpeed > lSpeed) ? rSpeed : lSpeed);
+                VR_LOG_INFO("Physical Gesture: STRAIGHT PUNCH / LUNGING BLADE THRUST detected (Speed: %.2f m/s)", (rSpeed > lSpeed) ? rSpeed : lSpeed);
                 SendKey('W', true);
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey('W', false);
-            }
 
-            if (rSpeed > lSpeed) vrState.rightHapticPulse = 0.9f;
-            else vrState.leftHapticPulse = 0.9f;
+                if (rSpeed > lSpeed) vrState.rightHapticPulse = 0.9f;
+                else vrState.leftHapticPulse = 0.9f;
+            }
         }
     }
 
