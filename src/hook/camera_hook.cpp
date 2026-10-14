@@ -765,6 +765,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         bool isForwardParry = s_currentBlockEngaged &&
             ((rVel.z < -1.15f && rightLocal.z < -0.15f) || (lVel.z < -1.15f && leftLocal.z < -0.15f));
 
+        // Inmate Shiv Parrying Riposte & Eye-Gouge Counter (ADR 0092)
+        bool isEyeGougeRiposte = s_currentBlockEngaged &&
+            (rVel.z < -1.10f && rVel.y > 1.05f && rightLocal.y > 0.04f);
+
         if (dualRifleStrip) {
             s_lastPunchTime = now;
             VR_LOG_INFO("Physical Counter: GUARD RIFLE STRIP & MAG EJECTION DISARM (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
@@ -774,6 +778,14 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             SendKeyTap('1'); // Equip stripped firearm
             vrState.rightHapticPulse = 0.95f; // Receiver wrenching shockwave (280 Hz)
             vrState.leftHapticPulse = 0.95f;
+        } else if (isEyeGougeRiposte) {
+            s_lastPunchTime = now;
+            VR_LOG_INFO("Physical Counter: INMATE SHIV EYE-GOUGE RIPOSTE (Rz: %.2f, Ry: %.2f, Ey: %.2f)", rVel.z, rVel.y, rightLocal.y);
+            SendKey('W', true);
+            mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+            mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+            SendKey('W', false);
+            vrState.rightHapticPulse = 0.95f; // Perforation & orbital bone crunch (280 Hz)
         } else if (isForwardParry) {
             s_lastPunchTime = now;
             VR_LOG_INFO("Physical Gesture: PARRY / COUNTER-STRIKE THRUST (Rz: %.2f, Lz: %.2f while Blocking)", rVel.z, lVel.z);
@@ -1208,6 +1220,16 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         SendKeyTap('E'); // Suppress/bypass DNA lock circuit
         vrState.leftHapticPulse = 0.40f; // Neutralized low hum (80 Hz)
         vrState.rightHapticPulse = 0.40f;
+    }
+
+    // Tactical Laser Sighting Module Pressure Pad Foregrip Tap (ADR 0091)
+    static DWORD s_lastLaserToggleTime = 0;
+    bool foregripLaserPad = (vrState.leftController.trigger > 0.50f) || ((vrState.leftController.buttons & RIDDICK_VR_BTN_STICK_LEFT) != 0);
+    if (s_twoHandedStabilizationActive && foregripLaserPad && (now - s_lastLaserToggleTime > 350)) {
+        s_lastLaserToggleTime = now;
+        VR_LOG_INFO("Tactical Firearm: FOREGRIP PRESSURE PAD LASER SIGHT TOGGLED");
+        SendKeyTap('F');
+        vrState.leftHapticPulse = 0.45f; // Crisp micro-switch click (180 Hz)
     }
 
     // Apply exponential smoothing / spherical interpolation on weapon aim pose when two-handed
@@ -1883,6 +1905,33 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 vrState.leftHapticPulse = 0.60f; // Acoustic foam jet extrusion (120 Hz)
                 vrState.rightHapticPulse = 0.75f; // Rapid cure polymerization pop (200 Hz)
+            }
+
+            // Subterranean Hydroponics Plant Specimen Harvesting (ADR 0093)
+            static DWORD s_lastHarvestTime = 0;
+            bool handAtHydroponicTray = ((rightLocal.z > -0.42f && rightLocal.z < -0.14f && rightLocal.y > -0.55f && rightLocal.y < -0.15f && vrState.rightController.grip > 0.45f && vrState.rightController.grip < 0.80f) ||
+                                         (leftLocal.z > -0.42f && leftLocal.z < -0.14f && leftLocal.y > -0.55f && leftLocal.y < -0.15f && vrState.leftController.grip > 0.45f && vrState.leftController.grip < 0.80f));
+            bool upwardPluck = (rVel.y > 0.40f || lVel.y > 0.40f);
+            if (handAtHydroponicTray && upwardPluck && (now - s_lastHarvestTime > 850)) {
+                s_lastHarvestTime = now;
+                VR_LOG_INFO("Environmental Gesture: HYDROPONIC SPECIMEN HARVESTED (Vy: %.2f)", (rVel.y > lVel.y) ? rVel.y : lVel.y);
+                SendKeyTap('E');
+                if (rVel.y > 0.40f) vrState.rightHapticPulse = 0.45f; // Botanical snap click (160 Hz)
+                if (lVel.y > 0.40f) vrState.leftHapticPulse = 0.45f;
+            }
+
+            // Dark Athena Drone Charging Bay Station Disconnect Jerk (ADR 0094)
+            static DWORD s_lastDroneBayJerkTime = 0;
+            bool handInDroneAlcove = ((rightLocal.z > -0.44f && rightLocal.z < -0.16f && rightLocal.y > 0.05f && rightLocal.y < 0.38f && vrState.rightController.grip > 0.60f) ||
+                                      (leftLocal.z > -0.44f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.38f && vrState.leftController.grip > 0.60f));
+            bool rearwardCableYank = (rVel.z > 0.85f || lVel.z > 0.85f);
+            if (handInDroneAlcove && rearwardCableYank && (now - s_lastDroneBayJerkTime > 1500)) {
+                s_lastDroneBayJerkTime = now;
+                VR_LOG_INFO("Environmental Gesture: DRONE RECHARGE UMBILICAL SEVERED (Vz: %.2f)", (rVel.z > lVel.z) ? rVel.z : lVel.z);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                if (rVel.z > 0.85f) vrState.rightHapticPulse = 0.90f; // Inductive arc shudder (240 Hz)
+                if (lVel.z > 0.85f) vrState.leftHapticPulse = 0.90f;
             }
         }
     }
