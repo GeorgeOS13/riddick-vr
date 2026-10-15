@@ -59,6 +59,13 @@ work this wake, then stop. Keep total effort bounded (<= 4 concurrent subagents)
    and stop. Do not spin.
 
 ## Hard rules
+- **NEVER launch the game or anything that injects input.** Do NOT run
+  `tools/semi_play.py`, `tools/self_test_pipeline.py`, `tools/vr-worker.ps1`, or
+  launch `DarkAthena.exe`/`Riddick.exe`/`riddickvr-host.exe`/`opengl32.dll`
+  in a way that reaches a real window. The hook's `SendInput` gesture layer
+  (`src/hook/gesture_tap.cpp`) types into the **live desktop** when the game is
+  foreground and will hijack the user's keyboard/mouse. Build and run only
+  headless/offline checks that do not synthesize input.
 - Do NOT modify anything under the game install directory. No writing game assets.
 - Do NOT `git push --force`, delete branches, or rewrite `main`.
 - Only evidence-backed changes. Separate observations from inferences.
