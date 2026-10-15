@@ -1181,7 +1181,53 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             bool batonExtremeCleave = (rVel.y < -1.45f);
             bool isBatonSkullBreaker = batonOverheadEnergized && batonExtremeCleave;
 
-            if (isBatonSkullBreaker && (now - s_lastSkullBreakerTime > 1500)) {
+            // Security Guard Stun Baton Lateral Cross-Sweep Deflection & Disarm (ADR 0170)
+            static DWORD s_lastBatonDisarmTime = 0;
+            bool batonLateralSweepArmed = (vrState.rightController.grip > 0.60f && vrState.rightController.trigger > 0.65f &&
+                                           rightLocal.y > -0.20f && rightLocal.y < 0.20f);
+            bool batonCrossSweepFast = (fabsf(rVel.x) > 1.25f);
+            bool isBatonLateralDisarm = batonLateralSweepArmed && batonCrossSweepFast;
+
+            // Inmate Pit Brawl Shin Trap & Overhand Hammerfist Ground Finisher (ADR 0169)
+            static DWORD s_lastShinTrapTime = 0;
+            static DWORD s_shinTrapTime = 0;
+            bool shinTrapDeflect = (leftLocal.y < -0.20f && vrState.leftController.grip > 0.55f && lVel.y < -0.85f);
+            if (shinTrapDeflect && (now - s_lastShinTrapTime > 1500)) {
+                if (s_shinTrapTime == 0) {
+                    s_shinTrapTime = now;
+                    VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL SHIN TRAP DEFLECTED (Ly: %.2f)", lVel.y);
+                    vrState.leftHapticPulse = 0.75f; // Shin trap deflection impact (180 Hz)
+                }
+            }
+            bool hammerfistStrike = (s_shinTrapTime > 0 && (now - s_shinTrapTime < 500) && rVel.y < -1.30f);
+
+            if (isBatonLateralDisarm && (now - s_lastBatonDisarmTime > 1500)) {
+                s_lastBatonDisarmTime = now;
+                s_lastPunchTime = now;
+                char dirKey = (rVel.x < 0) ? 'A' : 'D';
+                VR_LOG_INFO("Tactical Melee: STUN BATON LATERAL CROSS-SWEEP DEFLECTION & DISARM (Rx: %.2f)", rVel.x);
+                SendKey(dirKey, true);
+                SendKey('E', true);
+                mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
+                SendKey('E', false);
+                SendKey(dirKey, false);
+                vrState.rightHapticPulse = 0.98f; // Electromagnetic repulsion arc blast (310 Hz)
+                vrState.leftHapticPulse = 0.65f;
+            } else if (hammerfistStrike && (now - s_lastShinTrapTime > 1500)) {
+                s_lastShinTrapTime = now;
+                s_shinTrapTime = 0;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: OVERHAND HAMMERFIST COMPLETED COMBO (Ry: %.2f)", rVel.y);
+                SendKey('S', true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, false);
+                SendKey('S', false);
+                vrState.rightHapticPulse = 0.98f; // Skeletal hammerfist shockwave (280 Hz)
+                vrState.leftHapticPulse = 0.60f;
+            } else if (isBatonSkullBreaker && (now - s_lastSkullBreakerTime > 1500)) {
                 s_lastSkullBreakerTime = now;
                 s_lastPunchTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON CHARGED HIGH-ARC DOWNWARD SKULL BREAKER CLEAVED (Ry: %.2f)", rVel.y);
@@ -3289,6 +3335,40 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_TAB);
                 vrState.rightHapticPulse = 0.90f; // Mechanical seating latch snap (260 Hz)
                 vrState.leftHapticPulse = 0.90f;
+            }
+
+            // Dark Athena EVA Solar Array Debris Deflection Grid Pitch Tilt Pivot (ADR 0167)
+            static DWORD s_lastDebrisGridTime = 0;
+            bool bothAtDebrisGridYoke = (twoHandDist > 0.20f && twoHandDist < 0.40f &&
+                                         leftLocal.z > -0.42f && leftLocal.z < -0.15f && rightLocal.z > -0.42f && rightLocal.z < -0.15f &&
+                                         leftLocal.y > 0.10f && leftLocal.y < 0.40f && rightLocal.y > 0.10f && rightLocal.y < 0.40f &&
+                                         vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f);
+            float gridPitchSpeed = sqrtf(rVel.y * rVel.y + rVel.z * rVel.z);
+            if (bothAtDebrisGridYoke && gridPitchSpeed > 0.60f && (now - s_lastDebrisGridTime > 1500)) {
+                s_lastDebrisGridTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA DEBRIS DEFLECTION GRID TILTED & LOCKED (PitchSpeed: %.2f)", gridPitchSpeed);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap(VK_TAB);
+                vrState.leftHapticPulse = 0.95f;  // Gimbal quadrant detent thud (270 Hz)
+                vrState.rightHapticPulse = 0.95f;
+            }
+
+            // Subterranean Hydroponics Bio-Waste Incinerator Slag Poking Spud Bar Thrust (ADR 0168)
+            static DWORD s_lastSpudBarTime = 0;
+            bool twoHandAtSpudBar = (twoHandDist < 0.28f &&
+                                     rightLocal.z > -0.42f && rightLocal.z < -0.16f && rightLocal.y > -0.25f && rightLocal.y < 0.15f &&
+                                     vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f);
+            bool spudBarLinearThrust = (rVel.z < -1.15f || lVel.z < -1.15f);
+            if (twoHandAtSpudBar && spudBarLinearThrust && (now - s_lastSpudBarTime > 1500)) {
+                s_lastSpudBarTime = now;
+                VR_LOG_INFO("Environmental Gesture: INCINERATOR SLAG DISLODGED VIA SPUD BAR THRUST (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
+                SendKeyTap('E');
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKeyTap('Q');
+                vrState.rightHapticPulse = 0.98f; // Slag percussion fracture blast (260 Hz)
+                vrState.leftHapticPulse = 0.85f;
             }
         }
     }
