@@ -1630,6 +1630,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             bool deckImpactPlunge = (deckImpactStance && isJumpingStance &&
                                      rVel.y < -1.50f && lVel.y < -1.25f);
 
+            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Cervical Compression Ground Finisher (ADR 0253)
+            static DWORD s_lastWhizzerGroundFinisherTime = 0;
+            static char s_whizzerGroundFinisherDirKey = 'A';
+            bool whizzerGroundFinisherStance = (handsDistSledge < 0.26f &&
+                                                leftLocal.y > -0.25f && leftLocal.y < 0.10f &&
+                                                vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
+            bool whizzerGroundFinisherThrow = (whizzerGroundFinisherStance && rVel.y < -1.45f &&
+                                               lVel.y < -1.15f && fabsf(lVel.x) > 0.80f);
+            if (whizzerGroundFinisherThrow && (now - s_lastWhizzerGroundFinisherTime > 2000)) {
+                s_whizzerGroundFinisherDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+            }
+
+            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Deck Arc Dispersion (ADR 0254)
+            static DWORD s_lastOmnidirectionalArcTime = 0;
+            bool omnidirectionalArcStance = (handsDistSledge < 0.28f &&
+                                             vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
+                                             vrState.rightController.trigger > 0.65f);
+            bool omnidirectionalArcPlunge = (omnidirectionalArcStance && isJumpingStance &&
+                                             rVel.y < -1.45f && lVel.y < -1.20f &&
+                                             fabsf(rVel.x - lVel.x) > 0.80f);
+
             // Inmate Pit Brawl Outside Leg Hook Sweep & Ground Knee Drop (ADR 0209)
             static DWORD s_lastOutsideLegSweepTime = 0;
             static DWORD s_outsideLegSweepHookTime = 0;
@@ -1676,7 +1697,39 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_crossBlockHoldStart = 0;
             }
 
-            if (deckImpactPlunge && (now - s_lastDeckImpactTime > 2000)) {
+            if (omnidirectionalArcPlunge && (now - s_lastOmnidirectionalArcTime > 2000)) {
+                s_lastOmnidirectionalArcTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL DECK ARC EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
+                SendKey(VK_SPACE, true);
+                SendKey('W', true);
+                SendKey('Q', true);
+                SendKey(VK_TAB, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_TAB, false);
+                SendKey('Q', false);
+                SendKey('W', false);
+                SendKey(VK_SPACE, false);
+                vrState.rightHapticPulse = 0.98f; // Radial dielectric breakdown wave (360 Hz)
+                vrState.leftHapticPulse = 0.95f;  // Landing seismic dispersion (75 Hz)
+            } else if (whizzerGroundFinisherThrow && (now - s_lastWhizzerGroundFinisherTime > 2000)) {
+                s_lastWhizzerGroundFinisherTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER GROUND FINISHER EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_whizzerGroundFinisherDirKey, rVel.y, lVel.y);
+                SendKey('W', true);
+                SendKey(s_whizzerGroundFinisherDirKey, true);
+                SendKey('C', true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, false);
+                SendKey('C', false);
+                SendKey(s_whizzerGroundFinisherDirKey, false);
+                SendKey('W', false);
+                vrState.rightHapticPulse = 0.98f; // Bone fracture impact shockwave (360 Hz)
+                vrState.leftHapticPulse = 0.90f;  // Downward collar tie drag (220 Hz)
+            } else if (deckImpactPlunge && (now - s_lastDeckImpactTime > 2000)) {
                 s_lastDeckImpactTime = now;
                 s_lastPunchTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON VAULT CONCUSSIVE DECK IMPACT EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
@@ -5205,6 +5258,42 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_RETURN);
                 vrState.rightHapticPulse = 0.95f; // Roller burnish seating snap (280 Hz)
                 vrState.leftHapticPulse = 0.60f;  // Shaft cylindrical friction (140 Hz)
+            }
+
+            // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Axial Play Vernier Caliper Fixture Removal & Stowage (ADR 0251)
+            static DWORD s_lastVernierStowTime = 0;
+            bool handAtHingeAnvilCollar = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
+                                           vrState.leftController.grip > 0.55f);
+            bool handGrippingCaliperChassis = (twoHandDist < 0.22f && vrState.rightController.grip > 0.60f &&
+                                               vrState.rightController.trigger > 0.50f);
+            bool caliperRemovalHaul = (rVel.z > 0.85f);
+            if (handAtHingeAnvilCollar && handGrippingCaliperChassis && caliperRemovalHaul && (now - s_lastVernierStowTime > 1800)) {
+                s_lastVernierStowTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA TRUSS VERNIER CALIPER REMOVED & STOWED (Rz: %.2f)", rVel.z);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap(VK_TAB);
+                SendKeyTap(VK_RETURN);
+                vrState.rightHapticPulse = 0.95f; // Magnetic anvil quick-release clack (290 Hz)
+                vrState.leftHapticPulse = 0.55f;  // Hinge lug clearance (150 Hz)
+            }
+
+            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Phase Angle Optical Tachometer Sensor Alignment (ADR 0252)
+            static DWORD s_lastTachAlignTime = 0;
+            bool handHoldingTachClamp = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
+                                         vrState.leftController.grip > 0.55f);
+            bool handOnSensorGimbal = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
+                                       vrState.rightController.trigger < 0.40f);
+            bool tachGimbalTwist = (fabsf(rVel.x) > 0.65f);
+            if (handHoldingTachClamp && handOnSensorGimbal && tachGimbalTwist && (now - s_lastTachAlignTime > 1800)) {
+                s_lastTachAlignTime = now;
+                VR_LOG_INFO("Environmental Gesture: DRAFT FAN OPTICAL TACHOMETER ALIGNED (Rx: %.2f)", rVel.x);
+                SendKeyTap('E');
+                SendKeyTap('Q');
+                SendKeyTap(VK_TAB);
+                SendKeyTap(VK_SPACE);
+                vrState.rightHapticPulse = 0.55f; // Optical receiver micro-clicks (190 Hz)
+                vrState.leftHapticPulse = 0.95f;  // Optical alignment lock chime (320 Hz)
             }
         }
     }
