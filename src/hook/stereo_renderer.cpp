@@ -1,6 +1,7 @@
 #include "stereo_renderer.h"
 #include "camera_hook.h"
 #include "vr_hand_renderer.h"
+#include "vr_config.h" // GH #9: ComfortEnabled / ComfortMaxDim gate
 #include "logging.h"
 #include <tlhelp32.h>
 #include <algorithm>
@@ -132,6 +133,179 @@ StereoRenderer& StereoRenderer::Instance() {
     static StereoRenderer s_instance;
     return s_instance;
 }
+
+// GH #9: true dynamic locomotion comfort vignette. Fixed-function only
+// (no shaders): nested dark border rings over each eye FBO, alpha scaled by
+// comfortVignette * ComfortMaxDim. File-local dispatch loaded from the real
+// opengl32 (bypasses our own glViewport hook) mirrors VRHandRenderer state
+// save/restore so game render state is bit-identical afterwards.
+namespace {
+
+typedef void (APIENTRY *VigPushAttrib_t)(GLbitfield);
+typedef void (APIENTRY *VigPopAttrib_t)(void);
+typedef void (APIENTRY *VigMatrixMode_t)(GLenum);
+typedef void (APIENTRY *VigPushMatrix_t)(void);
+typedef void (APIENTRY *VigPopMatrix_t)(void);
+typedef void (APIENTRY *VigLoadIdentity_t)(void);
+typedef void (APIENTRY *VigOrtho_t)(GLdouble, GLdouble, GLdouble, GLdouble, GLdouble, GLdouble);
+typedef void (APIENTRY *VigViewport_t)(GLint, GLint, GLsizei, GLsizei);
+typedef void (APIENTRY *VigEnable_t)(GLenum);
+typedef void (APIENTRY *VigDisable_t)(GLenum);
+typedef void (APIENTRY *VigBlendFunc_t)(GLenum, GLenum);
+typedef void (APIENTRY *VigColor4f_t)(GLfloat, GLfloat, GLfloat, GLfloat);
+typedef void (APIENTRY *VigBegin_t)(GLenum);
+typedef void (APIENTRY *VigEnd_t)(void);
+typedef void (APIENTRY *VigVertex2f_t)(GLfloat, GLfloat);
+typedef void (APIENTRY *VigGetIntegerv_t)(GLenum, GLint*);
+typedef void (APIENTRY *VigDepthMask_t)(GLboolean);
+typedef void (APIENTRY *VigUseProgram_t)(GLuint);
+typedef void (APIENTRY *VigBindBuffer_t)(GLenum, GLuint);
+
+struct VignetteGL {
+    VigPushAttrib_t vigPushAttrib = nullptr;
+    VigPopAttrib_t vigPopAttrib = nullptr;
+    VigMatrixMode_t vigMatrixMode = nullptr;
+    VigPushMatrix_t vigPushMatrix = nullptr;
+    VigPopMatrix_t vigPopMatrix = nullptr;
+    VigLoadIdentity_t vigLoadIdentity = nullptr;
+    VigOrtho_t vigOrtho = nullptr;
+    VigViewport_t vigViewport = nullptr;
+    VigEnable_t vigEnable = nullptr;
+    VigDisable_t vigDisable = nullptr;
+    VigBlendFunc_t vigBlendFunc = nullptr;
+    VigColor4f_t vigColor4f = nullptr;
+    VigBegin_t vigBegin = nullptr;
+    VigEnd_t vigEnd = nullptr;
+    VigVertex2f_t vigVertex2f = nullptr;
+    VigGetIntegerv_t vigGetIntegerv = nullptr;
+    VigDepthMask_t vigDepthMask = nullptr;
+    VigUseProgram_t vigUseProgram = nullptr;
+    VigBindBuffer_t vigBindBuffer = nullptr;
+    bool initialized = false;
+
+    void Init() {
+        if (initialized) return;
+        HMODULE hReal = OpenGLProxy::GetRealOpenGLModule();
+        if (!hReal) hReal = GetModuleHandleA("opengl32.dll");
+        if (!hReal) return;
+        #define VIG_LOAD(member, type, glname) member = (type)GetProcAddress(hReal, #glname)
+        VIG_LOAD(vigPushAttrib, VigPushAttrib_t, glPushAttrib);
+        VIG_LOAD(vigPopAttrib, VigPopAttrib_t, glPopAttrib);
+        VIG_LOAD(vigMatrixMode, VigMatrixMode_t, glMatrixMode);
+        VIG_LOAD(vigPushMatrix, VigPushMatrix_t, glPushMatrix);
+        VIG_LOAD(vigPopMatrix, VigPopMatrix_t, glPopMatrix);
+        VIG_LOAD(vigLoadIdentity, VigLoadIdentity_t, glLoadIdentity);
+        VIG_LOAD(vigOrtho, VigOrtho_t, glOrtho);
+        VIG_LOAD(vigViewport, VigViewport_t, glViewport);
+        VIG_LOAD(vigEnable, VigEnable_t, glEnable);
+        VIG_LOAD(vigDisable, VigDisable_t, glDisable);
+        VIG_LOAD(vigBlendFunc, VigBlendFunc_t, glBlendFunc);
+        VIG_LOAD(vigColor4f, VigColor4f_t, glColor4f);
+        VIG_LOAD(vigBegin, VigBegin_t, glBegin);
+        VIG_LOAD(vigEnd, VigEnd_t, glEnd);
+        VIG_LOAD(vigVertex2f, VigVertex2f_t, glVertex2f);
+        VIG_LOAD(vigGetIntegerv, VigGetIntegerv_t, glGetIntegerv);
+        VIG_LOAD(vigDepthMask, VigDepthMask_t, glDepthMask);
+        #undef VIG_LOAD
+        typedef PROC (WINAPI *WglGetProc_t)(LPCSTR);
+        WglGetProc_t wglGetProc = (WglGetProc_t)GetProcAddress(hReal, "wglGetProcAddress");
+        if (wglGetProc) {
+            vigUseProgram = (VigUseProgram_t)wglGetProc("glUseProgram");
+            if (!vigUseProgram) vigUseProgram = (VigUseProgram_t)wglGetProc("glUseProgramObjectARB");
+            vigBindBuffer = (VigBindBuffer_t)wglGetProc("glBindBuffer");
+            if (!vigBindBuffer) vigBindBuffer = (VigBindBuffer_t)wglGetProc("glBindBufferARB");
+        }
+        initialized = (vigPushAttrib && vigPopAttrib && vigBegin && vigVertex2f && vigColor4f &&
+                       vigMatrixMode && vigOrtho && vigViewport && vigEnable && vigBlendFunc);
+    }
+};
+
+static VignetteGL s_vgl;
+
+void Quad2(float x0, float y0, float x1, float y1) {
+    s_vgl.vigVertex2f(x0, y0);
+    s_vgl.vigVertex2f(x1, y0);
+    s_vgl.vigVertex2f(x1, y1);
+    s_vgl.vigVertex2f(x0, y1);
+}
+
+// Rectangular radial-ish gradient: K nested border rings, outermost darkest.
+void ApplyComfortVignetteToEye(GLuint fbo, float maxAlpha, uint32_t eyeW, uint32_t eyeH) {
+    if (maxAlpha < 0.01f || !fbo || !eyeW || !eyeH) return;
+    s_vgl.Init();
+    if (!s_vgl.initialized) return;
+    if (!OpenGLProxy::real_glBindFramebuffer) return;
+
+    OpenGLProxy::real_glBindFramebuffer(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, fbo);
+
+    s_vgl.vigPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_CURRENT_BIT |
+                        GL_VIEWPORT_BIT | GL_DEPTH_BUFFER_BIT | GL_LIGHTING_BIT |
+                        GL_POLYGON_BIT | GL_TEXTURE_BIT);
+    GLint prevMatrixMode = GL_MODELVIEW;
+    if (s_vgl.vigGetIntegerv) s_vgl.vigGetIntegerv(0x0BA0 /* GL_MATRIX_MODE */, &prevMatrixMode);
+    GLint prevProgram = 0;
+    GLint prevArrayBuffer = 0;
+    GLint prevElementArrayBuffer = 0;
+    if (s_vgl.vigGetIntegerv) {
+        s_vgl.vigGetIntegerv(0x8B8D /* GL_CURRENT_PROGRAM */, &prevProgram);
+        s_vgl.vigGetIntegerv(0x8894 /* GL_ARRAY_BUFFER_BINDING */, &prevArrayBuffer);
+        s_vgl.vigGetIntegerv(0x8895 /* GL_ELEMENT_ARRAY_BUFFER_BINDING */, &prevElementArrayBuffer);
+    }
+    if (s_vgl.vigUseProgram) s_vgl.vigUseProgram(0);
+    if (s_vgl.vigBindBuffer) {
+        s_vgl.vigBindBuffer(0x8892 /* GL_ARRAY_BUFFER */, 0);
+        s_vgl.vigBindBuffer(0x8893 /* GL_ELEMENT_ARRAY_BUFFER */, 0);
+    }
+    if (OpenGLProxy::glColorMask) OpenGLProxy::glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+
+    s_vgl.vigViewport(0, 0, (GLsizei)eyeW, (GLsizei)eyeH);
+    s_vgl.vigMatrixMode(GL_PROJECTION);
+    s_vgl.vigPushMatrix();
+    s_vgl.vigLoadIdentity();
+    s_vgl.vigOrtho(0.0, 1.0, 0.0, 1.0, -1.0, 1.0);
+    s_vgl.vigMatrixMode(GL_MODELVIEW);
+    s_vgl.vigPushMatrix();
+    s_vgl.vigLoadIdentity();
+
+    s_vgl.vigDisable(GL_DEPTH_TEST);
+    if (s_vgl.vigDepthMask) s_vgl.vigDepthMask(GL_FALSE);
+    s_vgl.vigDisable(GL_LIGHTING);
+    s_vgl.vigDisable(GL_CULL_FACE);
+    s_vgl.vigDisable(GL_TEXTURE_2D);
+    s_vgl.vigEnable(GL_BLEND);
+    s_vgl.vigBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    static const int kRings = 6;
+    static const float kStep = 0.07f; // 6 rings cover 0.42 from each edge; center stays clear
+    s_vgl.vigBegin(GL_QUADS);
+    for (int i = 0; i < kRings; ++i) {
+        float t = (float)(kRings - i) / (float)kRings; // 1.0 outermost -> ~0.17 innermost
+        float a = maxAlpha * t * t;                    // quadratic falloff toward center
+        if (a < 0.004f) continue;
+        s_vgl.vigColor4f(0.0f, 0.0f, 0.0f, (a > 1.0f) ? 1.0f : a);
+        float o = (float)i * kStep;
+        float n = o + kStep;
+        Quad2(o, 1.0f - n, 1.0f - o, 1.0f - o); // top strip
+        Quad2(o, o, 1.0f - o, n);               // bottom strip
+        Quad2(o, n, n, 1.0f - n);               // left strip
+        Quad2(1.0f - n, n, 1.0f - o, 1.0f - n); // right strip
+    }
+    s_vgl.vigEnd();
+
+    s_vgl.vigMatrixMode(GL_MODELVIEW);
+    s_vgl.vigPopMatrix();
+    s_vgl.vigMatrixMode(GL_PROJECTION);
+    s_vgl.vigPopMatrix();
+    if (s_vgl.vigUseProgram) s_vgl.vigUseProgram((GLuint)prevProgram);
+    if (s_vgl.vigBindBuffer) {
+        s_vgl.vigBindBuffer(0x8892, (GLuint)prevArrayBuffer);
+        s_vgl.vigBindBuffer(0x8893, (GLuint)prevElementArrayBuffer);
+    }
+    s_vgl.vigMatrixMode((GLenum)prevMatrixMode);
+    s_vgl.vigPopAttrib();
+}
+
+} // namespace (file-local)
 
 bool StereoRenderer::Initialize(HDC hdc, HGLRC hglrc) {
     if (m_initialized) return true;
@@ -605,6 +779,23 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
 
             // Render always-visible 3D VR tactical hands into Right Eye buffer
             VRHandRenderer::Instance().RenderHands(m_sharedState, false, m_eyeWidth, m_eyeHeight);
+
+            // GH #9: true dynamic locomotion comfort vignette. Peripheral
+            // dimming over each eye FBO (desktop mirror untouched). Zero cost
+            // at rest: skipped when comfortVignette < 0.01 or INI-disabled.
+            {
+                float vig = m_sharedState.comfortVignette;
+                if (vig < 0.0f) vig = 0.0f;
+                if (vig > 1.0f) vig = 1.0f;
+                if (g_vrConfig.comfortEnabled && vig >= 0.01f && g_vrConfig.comfortMaxDim > 0.001f) {
+                    float maxAlpha = vig * g_vrConfig.comfortMaxDim;
+                    if (maxAlpha > 1.0f) maxAlpha = 1.0f;
+                    if (maxAlpha >= 0.01f) {
+                        ApplyComfortVignetteToEye(m_leftFbo, maxAlpha, m_eyeWidth, m_eyeHeight);
+                        ApplyComfortVignetteToEye(m_rightFbo, maxAlpha, m_eyeWidth, m_eyeHeight);
+                    }
+                }
+            }
 
             // Force alpha channel to fully opaque 1.0f on both eye buffers to eliminate
             // Virtual Desktop / VDXR green screen chroma keying and transparency flashes
