@@ -183,6 +183,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         case DLL_PROCESS_ATTACH: {
             g_hHookModule = hModule;
             DisableThreadLibraryCalls(hModule);
+            // Loader-lock-safe attach breadcrumb (OutputDebugString never touches
+            // the loader lock; visible in DebugView/dbgview without file IO).
+            // Answers "did the proxy DLL load?" when the game stalls pre-GL.
+            OutputDebugStringA("RiddickVR: opengl32 proxy attached (init deferred to first wglCreateContext)\r\n");
             break;
         }
         case DLL_PROCESS_DETACH: {

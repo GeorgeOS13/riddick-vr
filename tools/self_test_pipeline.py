@@ -139,6 +139,11 @@ def _run_pipeline_inner(max_frames=120, dump_interval=15, timeout=25, artifacts_
     # from this run (stale logs previously caused false HITs).
     log_mark = LOG_FILE.stat().st_size if LOG_FILE.exists() else 0
     print(f"[Pipeline] Hook log mark: {LOG_FILE} @ byte {log_mark}")
+    # Pre-GL stall baseline: hook DLL attach writes here at process start.
+    # If the game never reaches GL init (display/driver stall), this stays put.
+    import tempfile
+    attach_mark = Path(tempfile.gettempdir()) / "riddick_vr_hook_debug.txt"
+    attach_size = attach_mark.stat().st_size if attach_mark.exists() else 0
 
     # 1. Start mock OpenXR companion host
     host_cmd = [
@@ -223,6 +228,12 @@ def _run_pipeline_inner(max_frames=120, dump_interval=15, timeout=25, artifacts_
         if LOG_FILE.exists():
             fresh = LOG_FILE.read_bytes()[log_mark:]
             print(f"[Pipeline] riddick_vr.log FRESH tail (bytes since mark {log_mark}):\n" + fresh.decode(errors="ignore")[-1000:])
+        # Pre-GL stall diagnosis (GH #41): game alive but hook DLL never attached
+        # (display/driver stall, modal dialog) vs hook attached but no frames.
+        attach_now = attach_mark.stat().st_size if attach_mark.exists() else 0
+        if attach_now <= attach_size and game_proc.poll() is None:
+            print("[Pipeline] GAME-STUCK-PRE-GL: game process alive but hook DLL never attached.")
+            print("[Pipeline] Likely display/driver stall or blocking modal - check worker.log guidance, not a code regression.")
         return False
 
     all_passed = True
