@@ -923,13 +923,21 @@ void OpenXRManager::UpdateTracking(RiddickVRSharedState& state, XrTime predicted
             }
         }
 
-        // Recenter
+        // Recenter (GH #37): edge-triggered single-frame pulse. The host
+        // publishes a fresh state{} every frame (RenderFrame), which clears a
+        // level flag after one frame; the hook consumes the rising edge for
+        // calibration. A held button therefore recenters exactly once.
+        // (Full sequence-counter consume-after-ack is follow-up.)
         getInfo.action = m_recenterBtnAction;
         getInfo.subactionPath = m_rightHandPath;
         XrActionStateBoolean btnRecenter{XR_TYPE_ACTION_STATE_BOOLEAN};
-        if (XR_SUCCEEDED(xrGetActionStateBoolean(m_session, &getInfo, &btnRecenter)) && btnRecenter.currentState) {
-            state.shouldRecenter = true;
+        static bool s_prevRecenterHeld = false;
+        bool recenterHeld = false;
+        if (XR_SUCCEEDED(xrGetActionStateBoolean(m_session, &getInfo, &btnRecenter)) && btnRecenter.isActive) {
+            recenterHeld = btnRecenter.currentState;
         }
+        state.shouldRecenter = recenterHeld && !s_prevRecenterHeld;
+        s_prevRecenterHeld = recenterHeld;
 
         // GH #21/#38: no haptic dispatch here (deleted dead path). This state
         // is freshly zeroed by the caller, so pulse-gated ApplyHapticFeedback
