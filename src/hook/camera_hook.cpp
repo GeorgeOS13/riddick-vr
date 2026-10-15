@@ -882,17 +882,21 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_snapTurnArmed = true;
             }
         } else {
-            // Pure Smooth Turn: continuous rotation with progressive cubic curve
-            // Zero sudden 350-pixel snaps at stick limits
+            // Pure Smooth Turn: continuous rotation with progressive cubic curve and sub-pixel accumulation
+            // Zero truncation stutter or sudden snaps at stick limits
             constexpr float SMOOTH_DEADZONE = 0.20f;
+            static float s_accumulatedSmoothTurnX = 0.0f;
             if (fabsf(stickX) > SMOOTH_DEADZONE) {
                 float norm = (fabsf(stickX) - SMOOTH_DEADZONE) / (1.0f - SMOOTH_DEADZONE);
-                float curvedSpeed = norm * norm * 18.0f; // Smooth cubic ramp
-                int deltaX = static_cast<int>(std::copysign(curvedSpeed, stickX));
-                if (deltaX == 0 && norm > 0.05f) {
-                    deltaX = (stickX > 0.0f) ? 1 : -1;
+                float curvedSpeed = norm * norm * 20.0f; // Smooth progressive velocity
+                s_accumulatedSmoothTurnX += std::copysign(curvedSpeed, stickX);
+                int deltaX = static_cast<int>(s_accumulatedSmoothTurnX);
+                if (deltaX != 0) {
+                    s_accumulatedSmoothTurnX -= deltaX;
+                    mouse_event(MOUSEEVENTF_MOVE, deltaX, 0, 0, 0);
                 }
-                mouse_event(MOUSEEVENTF_MOVE, deltaX, 0, 0, 0);
+            } else {
+                s_accumulatedSmoothTurnX = 0.0f;
             }
         }
     }
