@@ -1410,7 +1410,22 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                        vrState.rightController.trigger > 0.65f);
             bool batonVaultPlunge = (rVel.y < -1.35f);
 
-            // Security Guard Stun Baton Forward Two-Handed Cross-Chest Block & Arc Thrust Disruption (ADR 0198)
+            // Inmate Pit Brawl Outside Leg Hook Sweep & Ground Knee Drop (ADR 0209)
+            static DWORD s_lastOutsideLegSweepTime = 0;
+            static DWORD s_outsideLegSweepHookTime = 0;
+            static char s_outsideLegSweepDirKey = 'A';
+            bool outsideLegSweepHook = (leftLocal.y < -0.30f && fabsf(lVel.x) > 0.90f);
+            if (outsideLegSweepHook && (now - s_lastOutsideLegSweepTime > 2000)) {
+                if (s_outsideLegSweepHookTime == 0) {
+                    s_outsideLegSweepHookTime = now;
+                    s_outsideLegSweepDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                    VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL OUTSIDE LEG HOOKED (Dir: %c, Lx: %.2f)", s_outsideLegSweepDirKey, lVel.x);
+                    vrState.leftHapticPulse = 0.85f; // Sweep trip torque (200 Hz)
+                }
+            }
+            bool outsideLegKneeDrop = (s_outsideLegSweepHookTime > 0 && (now - s_outsideLegSweepHookTime < 500) && rVel.y < -1.25f);
+
+            // Security Guard Stun Baton Forward Two-Handed Cross-Chest Block & Arc Thrust Disruption (ADR 0198 & 0210)
             static DWORD s_lastCrossThrustTime = 0;
             static DWORD s_crossBlockHoldStart = 0;
             bool crossChestGuardStance = (handsDistSledge > 0.20f && handsDistSledge < 0.38f &&
@@ -1420,9 +1435,17 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                           vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
                                           vrState.leftController.trigger > 0.65f && vrState.rightController.trigger > 0.65f);
             bool isCrossThrustReady = false;
+            bool isCrossThrustOvercharged = false;
             if (crossChestGuardStance) {
                 if (s_crossBlockHoldStart == 0) s_crossBlockHoldStart = now;
-                if (now - s_crossBlockHoldStart >= 300) {
+                DWORD crossHoldDuration = now - s_crossBlockHoldStart;
+                if (crossHoldDuration >= 500) {
+                    vrState.leftHapticPulse = 0.90f;  // Escalating supercharge hum (340 Hz)
+                    vrState.rightHapticPulse = 0.90f;
+                    if (rVel.z < -1.30f && lVel.z < -1.10f) {
+                        isCrossThrustOvercharged = true;
+                    }
+                } else if (crossHoldDuration >= 300) {
                     vrState.leftHapticPulse = 0.65f;  // Electrostatic barrier hum (240 Hz)
                     vrState.rightHapticPulse = 0.65f;
                     if (rVel.z < -1.25f && lVel.z < -1.05f) {
@@ -1433,7 +1456,43 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_crossBlockHoldStart = 0;
             }
 
-            if (crossParryRiposte && (now - s_lastCrossParryTime > 2000)) {
+            if (isCrossThrustOvercharged && (now - s_lastCrossThrustTime > 2000)) {
+                s_lastCrossThrustTime = now;
+                s_crossBlockHoldStart = 0;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Tactical Melee: STUN BATON CROSS-CHEST OVERCHARGE DETONATION DISCHARGED");
+                mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
+                SendKey('W', true);
+                SendKey(VK_SPACE, true);
+                SendKey('Q', true);
+                SendKey(VK_RETURN, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_RETURN, false);
+                SendKey('Q', false);
+                SendKey(VK_SPACE, false);
+                SendKey('W', false);
+                mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
+                vrState.rightHapticPulse = 0.98f; // Catastrophic dielectric breakdown blast (360 Hz)
+                vrState.leftHapticPulse = 0.98f;
+            } else if (outsideLegKneeDrop && (now - s_lastOutsideLegSweepTime > 2000)) {
+                s_lastOutsideLegSweepTime = now;
+                s_outsideLegSweepHookTime = 0;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL KNEE DROP FINISHER EXECUTED (Ry: %.2f)", rVel.y);
+                SendKey(s_outsideLegSweepDirKey, true);
+                SendKey('C', true);
+                SendKey(VK_SPACE, true);
+                SendKey('S', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('S', false);
+                SendKey(VK_SPACE, false);
+                SendKey('C', false);
+                SendKey(s_outsideLegSweepDirKey, false);
+                vrState.rightHapticPulse = 0.98f; // Concussive knee-drop mat impact (320 Hz)
+                vrState.leftHapticPulse = 0.95f;
+            } else if (crossParryRiposte && (now - s_lastCrossParryTime > 2000)) {
                 s_lastCrossParryTime = now;
                 s_crossParryDeflectTime = 0;
                 s_lastPunchTime = now;
@@ -4205,6 +4264,40 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 vrState.rightHapticPulse = 0.95f; // Clinker fracture crunch (280 Hz)
                 vrState.leftHapticPulse = 0.65f;  // Gritty slurry grating friction (180 Hz)
+            }
+
+            // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Grease Nipple Cap Removal (ADR 0207)
+            static DWORD s_lastGreaseCapTime = 0;
+            bool handAtGreaseFitting = (rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > 0.08f && rightLocal.y < 0.38f &&
+                                        vrState.rightController.grip > 0.45f && vrState.rightController.grip < 0.85f &&
+                                        vrState.rightController.trigger < 0.40f);
+            bool greaseCapTwist = (fabsf(rVel.x) > 0.65f);
+            if (handAtGreaseFitting && greaseCapTwist && (now - s_lastGreaseCapTime > 1800)) {
+                s_lastGreaseCapTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA TRUSS GREASE NIPPLE CAP UNTHREADED (Rx: %.2f)", rVel.x);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap(VK_TAB);
+                SendKeyTap('Q');
+                vrState.rightHapticPulse = 0.90f; // Thread unseating detent click (270 Hz)
+                vrState.leftHapticPulse = 0.55f;  // Thread friction drag (170 Hz)
+            }
+
+            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Combustion Air Damper Linkage Cotter Pin Extraction (ADR 0208)
+            static DWORD s_lastDamperCotterTime = 0;
+            bool handAtDamperClevis = (leftLocal.z > -0.40f && leftLocal.z < -0.16f && leftLocal.y > -0.15f && leftLocal.y < 0.25f &&
+                                       vrState.leftController.grip > 0.55f);
+            bool handAtCotterEyelet = (twoHandDist < 0.22f && vrState.rightController.grip > 0.60f);
+            bool cotterExtractionHaul = (rVel.z > 0.90f);
+            if (handAtDamperClevis && handAtCotterEyelet && cotterExtractionHaul && (now - s_lastDamperCotterTime > 1800)) {
+                s_lastDamperCotterTime = now;
+                VR_LOG_INFO("Environmental Gesture: HYDROPONICS DAMPER COTTER PIN EXTRACTED & FREED (Rz: %.2f)", rVel.z);
+                SendKeyTap('E');
+                SendKeyTap('Q');
+                SendKeyTap(VK_TAB);
+                SendKeyTap(VK_RETURN);
+                vrState.rightHapticPulse = 0.98f; // Cotter pin release snap (290 Hz)
+                vrState.leftHapticPulse = 0.65f;  // Corroded clevis drag (210 Hz)
             }
         }
     }
