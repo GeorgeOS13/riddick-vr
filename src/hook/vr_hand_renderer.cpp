@@ -164,6 +164,11 @@ VRHandRenderer& VRHandRenderer::Instance() {
     return s_instance;
 }
 
+void VRHandRenderer::SetHandFade(float leftFade, float rightFade) {
+    m_leftFade = (std::clamp)(leftFade, 0.0f, 1.0f);
+    m_rightFade = (std::clamp)(rightFade, 0.0f, 1.0f);
+}
+
 void VRHandRenderer::RenderHands(const RiddickVRSharedState& state, bool isLeftEye, uint32_t eyeWidth, uint32_t eyeHeight) {
     const auto& leftCtrl = state.leftController;
     const auto& rightCtrl = state.rightController;
@@ -390,6 +395,9 @@ void VRHandRenderer::DrawTacticalHand(HandSide side, float grip, float trigger, 
                                       float interactionGlow, bool holdingCartridge, bool palmHeal, float grabGlow) {
     s_gl.glPushMatrix();
 
+    // GH #46: select per-hand fade for this hand; all primitives multiply by it.
+    m_currentFade = (side == HandSide::Left) ? m_leftFade : m_rightFade;
+
     // Squeeze factor: grip trigger curls middle, ring, pinky
     float effectiveGrip = (std::max)(grip, isBoxerGuard ? 0.90f : 0.0f);
     float effectiveTrigger = (std::max)(trigger, isBoxerGuard ? 0.90f : 0.0f);
@@ -449,76 +457,77 @@ void VRHandRenderer::DrawTacticalHand(HandSide side, float grip, float trigger, 
 
     // 5. Interaction visuals: reload proximity glow, NanoMED cartridge, heal glow.
     // Fixed-function only, no new state leaks (restored via PopAttrib in RenderHands).
+    // GH #46: warm diegetic palette - amber receiver, warm-orange NanoMED,
+    // soft green scanner, warm-shifted cyan grab (all harmonized, fade-scaled).
     if (interactionGlow > 0.01f) {
         float g = interactionGlow;
-        // Amber receiver-proximity highlight above knuckles.
-        DrawBeveledBox(-0.030f, 0.032f, -0.052f, 0.030f, 0.040f, -0.028f,
-                       0.25f + 0.65f * g, 0.26f + 0.45f * g, 0.28f);
+        // Warm amber receiver-proximity highlight above knuckles.
+        DrawBeveledBox(-0.023f, 0.024f, -0.052f, 0.023f, 0.030f, -0.028f,
+                       0.30f + 0.60f * g, 0.24f + 0.38f * g, 0.16f + 0.06f * g);
     }
     if (holdingCartridge) {
-        // Orange NanoMED cartridge block held in palm (waist draw visual).
-        DrawBeveledBox(-0.018f, -0.012f, -0.030f, 0.018f, 0.012f, 0.010f,
-                       0.85f, 0.45f, 0.10f);
-        DrawBeveledBox(-0.018f, 0.012f, -0.030f, 0.018f, 0.018f, 0.010f,
-                       0.95f, 0.70f, 0.20f);
+        // Warm NanoMED cartridge block held in palm (waist draw visual).
+        DrawBeveledBox(-0.014f, -0.009f, -0.030f, 0.014f, 0.009f, 0.010f,
+                       0.82f, 0.48f, 0.14f);
+        DrawBeveledBox(-0.014f, 0.009f, -0.030f, 0.014f, 0.014f, 0.010f,
+                       0.95f, 0.68f, 0.22f);
     }
     if (palmHeal) {
-        // Soft green scanner glow under palm.
-        DrawBeveledBox(-0.028f, -0.022f, -0.036f, 0.028f, -0.014f, 0.028f,
-                       0.15f, 0.75f, 0.35f);
+        // Soft warm green scanner glow under palm.
+        DrawBeveledBox(-0.021f, -0.017f, -0.036f, 0.021f, -0.011f, 0.028f,
+                       0.18f, 0.72f, 0.34f);
     }
     if (grabGlow > 0.01f) {
-        // Cool cyan grab highlight on fingertips region (object/person volumes).
+        // Warm-shifted cyan grab highlight on fingertips region (object/person volumes).
         float g = grabGlow;
-        DrawBeveledBox(-0.030f, -0.006f, -0.062f, 0.030f, 0.026f, -0.040f,
-                       0.20f + 0.25f * g, 0.65f + 0.25f * g, 0.75f + 0.20f * g);
+        DrawBeveledBox(-0.023f, -0.005f, -0.062f, 0.023f, 0.020f, -0.040f,
+                       0.22f + 0.24f * g, 0.60f + 0.24f * g, 0.62f + 0.22f * g);
     }
 
+    m_currentFade = 1.0f;
     s_gl.glPopMatrix();
 }
 
 void VRHandRenderer::DrawForearmGauntlet(HandSide side) {
-    // Riddick's Prisoner Restraint Gauntlet / Vambrace
-    // Tapered cylindrical sleeve extending from wrist (+0.04m) back along forearm (+0.20m)
-    DrawTaperedCylinder(0.040f, 0.038f, 0.200f, 0.047f, 10, 0.12f, 0.12f, 0.14f);
+    // GH #46: Butcher Bay prison-uniform sleeve cuff (slim, ~25% narrower).
+    // Weathered grey-beige fabric sleeve, no armor - just cloth + wrist skin.
+    DrawTaperedCylinder(0.040f, 0.0285f, 0.200f, 0.035f, 10, 0.46f, 0.44f, 0.38f);
 
-    // Raised dorsal armor plate (+Y dorsal surface)
-    DrawBeveledBox(-0.024f, 0.032f, 0.045f, 0.024f, 0.042f, 0.175f, 0.22f, 0.23f, 0.25f);
+    // Cuff fold: rolled sleeve hem near wrist (fabric ring, slightly darker).
+    DrawTaperedCylinder(0.048f, 0.0295f, 0.060f, 0.0300f, 10, 0.40f, 0.38f, 0.32f);
+    DrawTaperedCylinder(0.120f, 0.0315f, 0.130f, 0.0325f, 10, 0.42f, 0.40f, 0.34f);
 
-    // Metallic reinforcement rings & rivets
-    DrawTaperedCylinder(0.048f, 0.039f, 0.058f, 0.040f, 10, 0.35f, 0.36f, 0.39f);
-    DrawTaperedCylinder(0.120f, 0.042f, 0.130f, 0.043f, 10, 0.30f, 0.31f, 0.34f);
+    // Bare wrist skin between cuff and palm (weathered mid-brown-grey).
+    DrawTaperedCylinder(0.020f, 0.0240f, 0.048f, 0.0260f, 10, 0.50f, 0.40f, 0.32f);
 
-    // Left gauntlet: Beveled mounting bracket directly beneath the Diegetic Wrist Health HUD
+    // Left wrist: beveled mounting bracket directly beneath the Diegetic Wrist Health HUD (kept).
     if (side == HandSide::Left) {
-        DrawBeveledBox(-0.022f, 0.040f, 0.065f, 0.005f, 0.046f, 0.085f, 0.45f, 0.46f, 0.50f);
+        DrawBeveledBox(-0.017f, 0.030f, 0.065f, 0.004f, 0.035f, 0.085f, 0.45f, 0.46f, 0.50f);
     }
 }
 
 void VRHandRenderer::DrawPalmAndKnuckleGuard(HandSide side) {
-    // 1. Central Palm Body (Carpal/Metacarpal block)
-    // Dark ballistic nylon / carbon fiber weave
-    DrawBeveledBox(-0.034f, -0.016f, -0.042f, 0.034f, 0.020f, 0.038f, 0.13f, 0.13f, 0.15f);
+    (void)side;
+    // GH #46: slim bare prisoner hand (~25% narrower), weathered mid-brown-grey skin.
+    // 1. Central palm body (carpal/metacarpal block) - skin base.
+    DrawBeveledBox(-0.0255f, -0.012f, -0.042f, 0.0255f, 0.015f, 0.038f, 0.52f, 0.41f, 0.33f);
 
-    // 2. Palm Underside Ribbed Grip Pad (-Y palmar surface)
-    DrawBeveledBox(-0.030f, -0.020f, -0.038f, 0.030f, -0.015f, 0.030f, 0.09f, 0.09f, 0.10f);
+    // 2. Palm underside shading (-Y palmar surface, slightly deeper skin tone).
+    DrawBeveledBox(-0.0225f, -0.015f, -0.038f, 0.0225f, -0.011f, 0.030f, 0.46f, 0.36f, 0.29f);
 
-    // 3. Reinforced Carbon-Fiber Knuckle Protector (Boxer Knuckles)
-    // Sits across metacarpal heads at z = [-0.048, -0.032] and +Y dorsal side
-    DrawBeveledBox(-0.033f, 0.018f, -0.048f, 0.033f, 0.031f, -0.030f, 0.25f, 0.26f, 0.28f);
+    // 3. Dorsal knuckle shading (subtle, skin-on-skin - no armor plate).
+    DrawBeveledBox(-0.0248f, 0.0135f, -0.048f, 0.0248f, 0.0233f, -0.030f, 0.55f, 0.44f, 0.35f);
 
-    // Knuckle studs / metallic striking ridges across each metacarpal
-    for (int i = 0; i < 4; ++i) {
-        float kx = -0.024f + i * 0.016f;
-        DrawBeveledBox(kx - 0.006f, 0.028f, -0.050f, kx + 0.006f, 0.034f, -0.038f, 0.40f, 0.42f, 0.45f);
-    }
+    // 4. Subtle knuckle wraps: cloth/leather wrap band across metacarpal heads
+    // (replaces tactical studs; muted wrap tone).
+    DrawBeveledBox(-0.0248f, 0.021f, -0.050f, 0.0248f, 0.0255f, -0.038f, 0.40f, 0.33f, 0.28f);
 }
 
 void VRHandRenderer::DrawArticulatedFinger(HandSide side, int fingerIndex, float curl, float splayAngle, float lengthScale) {
     s_gl.glPushMatrix();
 
-    // Knuckle root positions across distal palm (z = -0.045m)
-    float baseOffsets[4] = { -0.024f, -0.008f, 0.008f, 0.024f };
+    // Knuckle root positions across distal palm (z = -0.045m), slim ~25% spacing
+    float baseOffsets[4] = { -0.018f, -0.006f, 0.006f, 0.018f };
     float xOffset = baseOffsets[fingerIndex];
     if (side == HandSide::Right) {
         xOffset = -xOffset;
@@ -541,32 +550,32 @@ void VRHandRenderer::DrawArticulatedFinger(HandSide side, int fingerIndex, float
     float lProx  = 0.026f * lengthScale;
     float lInter = 0.020f * lengthScale;
     float lDist  = 0.015f * lengthScale;
-    float w      = 0.0065f * lengthScale;
+    float w      = 0.0049f * lengthScale; // GH #46: slim fingers (~25% narrower)
 
-    // --- Segment 1: Proximal Phalanx ---
+    // --- Segment 1: Proximal Phalanx (bare skin) ---
     s_gl.glRotatef(-angleProx, 1.0f, 0.0f, 0.0f); // Rotate downward/inward towards palm
-    DrawBeveledBox(-w, -w, -lProx, w, w, 0.0f, 0.16f, 0.16f, 0.18f);
+    DrawBeveledBox(-w, -w, -lProx, w, w, 0.0f, 0.52f, 0.41f, 0.33f);
 
-    // Segment 1 dorsal armor plate
-    DrawBeveledBox(-w * 0.85f, w * 0.9f, -lProx * 0.9f, w * 0.85f, w * 1.3f, -lProx * 0.1f, 0.28f, 0.29f, 0.32f);
+    // Segment 1 dorsal shading (subtle skin highlight, no armor)
+    DrawBeveledBox(-w * 0.85f, w * 0.9f, -lProx * 0.9f, w * 0.85f, w * 1.3f, -lProx * 0.1f, 0.55f, 0.44f, 0.35f);
 
     s_gl.glTranslatef(0.0f, 0.0f, -lProx);
 
     // --- Segment 2: Intermediate Phalanx ---
     s_gl.glRotatef(-angleInter, 1.0f, 0.0f, 0.0f);
-    DrawBeveledBox(-w * 0.9f, -w * 0.9f, -lInter, w * 0.9f, w * 0.9f, 0.0f, 0.15f, 0.15f, 0.17f);
+    DrawBeveledBox(-w * 0.9f, -w * 0.9f, -lInter, w * 0.9f, w * 0.9f, 0.0f, 0.49f, 0.38f, 0.30f);
 
-    // Segment 2 joint knuckle ring
-    DrawTaperedCylinder(-lInter * 0.15f, w * 0.95f, 0.0f, w * 0.95f, 6, 0.32f, 0.33f, 0.36f);
+    // Segment 2 joint crease (skin crease shading, replaces knuckle ring)
+    DrawTaperedCylinder(-lInter * 0.15f, w * 0.95f, 0.0f, w * 0.95f, 6, 0.38f, 0.29f, 0.23f);
 
     s_gl.glTranslatef(0.0f, 0.0f, -lInter);
 
     // --- Segment 3: Distal Phalanx (Fingertip) ---
     s_gl.glRotatef(-angleDist, 1.0f, 0.0f, 0.0f);
-    DrawBeveledBox(-w * 0.8f, -w * 0.8f, -lDist, w * 0.8f, w * 0.8f, 0.0f, 0.14f, 0.14f, 0.16f);
+    DrawBeveledBox(-w * 0.8f, -w * 0.8f, -lDist, w * 0.8f, w * 0.8f, 0.0f, 0.46f, 0.36f, 0.29f);
 
-    // Fingertip tactility rubber grip pad
-    DrawBeveledBox(-w * 0.7f, -w * 1.0f, -lDist * 0.9f, w * 0.7f, -w * 0.7f, -lDist * 0.1f, 0.08f, 0.08f, 0.09f);
+    // Fingertip pad shading (deeper skin tone)
+    DrawBeveledBox(-w * 0.7f, -w * 1.0f, -lDist * 0.9f, w * 0.7f, -w * 0.7f, -lDist * 0.1f, 0.40f, 0.31f, 0.25f);
 
     s_gl.glPopMatrix();
 }
@@ -576,8 +585,8 @@ void VRHandRenderer::DrawArticulatedThumb(HandSide side, float curl) {
 
     float xSign = (side == HandSide::Left) ? -1.0f : 1.0f;
 
-    // Thumb originates from radial/palmar side
-    s_gl.glTranslatef(xSign * 0.034f, -0.008f, 0.005f);
+    // Thumb originates from radial/palmar side (slim spacing)
+    s_gl.glTranslatef(xSign * 0.026f, -0.008f, 0.005f);
 
     // Thumb rest angle: angled forward and pitched inward
     s_gl.glRotatef(xSign * 28.0f, 0.0f, 1.0f, 0.0f);
@@ -589,28 +598,30 @@ void VRHandRenderer::DrawArticulatedThumb(HandSide side, float curl) {
 
     float lProx = 0.024f;
     float lDist = 0.020f;
-    float w = 0.0075f;
+    float w = 0.0056f; // GH #46: slim thumb (~25% narrower)
 
-    // Proximal Thumb Segment
+    // Proximal Thumb Segment (bare skin)
     s_gl.glRotatef(xSign * angleProx * 0.5f, 0.0f, 1.0f, 0.0f);
     s_gl.glRotatef(-angleProx, 1.0f, 0.0f, 0.0f);
-    DrawBeveledBox(-w, -w, -lProx, w, w, 0.0f, 0.16f, 0.16f, 0.18f);
+    DrawBeveledBox(-w, -w, -lProx, w, w, 0.0f, 0.52f, 0.41f, 0.33f);
 
     s_gl.glTranslatef(0.0f, 0.0f, -lProx);
 
     // Distal Thumb Segment (folds over curled fingers when making a fist)
     s_gl.glRotatef(xSign * angleDist * 0.6f, 0.0f, 1.0f, 0.0f);
     s_gl.glRotatef(-angleDist, 1.0f, 0.0f, 0.0f);
-    DrawBeveledBox(-w * 0.9f, -w * 0.9f, -lDist, w * 0.9f, w * 0.9f, 0.0f, 0.15f, 0.15f, 0.17f);
+    DrawBeveledBox(-w * 0.9f, -w * 0.9f, -lDist, w * 0.9f, w * 0.9f, 0.0f, 0.49f, 0.38f, 0.30f);
 
-    // Thumb armor plate
-    DrawBeveledBox(-w * 0.8f, w * 0.8f, -lDist * 0.85f, w * 0.8f, w * 1.2f, -lDist * 0.15f, 0.28f, 0.29f, 0.32f);
+    // Thumb nail-side shading (subtle skin highlight, no armor)
+    DrawBeveledBox(-w * 0.8f, w * 0.8f, -lDist * 0.85f, w * 0.8f, w * 1.2f, -lDist * 0.15f, 0.55f, 0.44f, 0.35f);
 
     s_gl.glPopMatrix();
 }
 
 void VRHandRenderer::DrawBeveledBox(float x0, float y0, float z0, float x1, float y1, float z1, float r, float g, float b) {
-    s_gl.glColor3f(r, g, b);
+    // GH #46: darkening-path fade - multiply toward dark (no blending state touched).
+    float f = (std::clamp)(m_currentFade, 0.0f, 1.0f);
+    s_gl.glColor3f(r * f, g * f, b * f);
     s_gl.glBegin(GL_QUADS);
 
     // Front (+Z)
@@ -659,7 +670,8 @@ void VRHandRenderer::DrawBeveledBox(float x0, float y0, float z0, float x1, floa
 }
 
 void VRHandRenderer::DrawTaperedCylinder(float z0, float r0, float z1, float r1, int slices, float r, float g, float b) {
-    s_gl.glColor3f(r, g, b);
+    float f = (std::clamp)(m_currentFade, 0.0f, 1.0f);
+    s_gl.glColor3f(r * f, g * f, b * f);
     s_gl.glBegin(GL_QUAD_STRIP);
     for (int i = 0; i <= slices; ++i) {
         float angle = i * (6.2831853f / slices);
