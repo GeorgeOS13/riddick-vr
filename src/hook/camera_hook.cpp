@@ -10417,7 +10417,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         // Crouch toggle is mapped to Button X and physical crouch stance.
 
         // Right Thumbstick Click -> Recenter HMD & Cinema Screen & Reset Standing Eye Height
-        if (stickRight && !prevStickRight) {
+        // Gated by !leftGripHeld so toggling snap/smooth turn mode does not unintentionally reset view
+        if (stickRight && !prevStickRight && !leftGripHeld) {
             vrState.shouldRecenter = true;
             s_hasPrevHmdOrientation = false;
             if (vrState.hmdPose.isValid) {

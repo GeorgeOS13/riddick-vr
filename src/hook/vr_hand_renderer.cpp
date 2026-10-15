@@ -267,7 +267,7 @@ void VRHandRenderer::RenderHands(const RiddickVRSharedState& state, bool isLeftE
     if (leftCtrl.gripPose.isValid) {
         s_gl.glPushMatrix();
         ApplyControllerPose(leftCtrl.gripPose);
-        DrawTacticalHand(HandSide::Left, leftCtrl.grip, leftCtrl.trigger, isBoxerGuard);
+        DrawTacticalHand(HandSide::Left, leftCtrl.grip, leftCtrl.trigger, isBoxerGuard, leftCtrl.buttons);
         s_gl.glPopMatrix();
     }
 
@@ -275,7 +275,7 @@ void VRHandRenderer::RenderHands(const RiddickVRSharedState& state, bool isLeftE
     if (rightCtrl.gripPose.isValid) {
         s_gl.glPushMatrix();
         ApplyControllerPose(rightCtrl.gripPose);
-        DrawTacticalHand(HandSide::Right, rightCtrl.grip, rightCtrl.trigger, isBoxerGuard);
+        DrawTacticalHand(HandSide::Right, rightCtrl.grip, rightCtrl.trigger, isBoxerGuard, rightCtrl.buttons);
         s_gl.glPopMatrix();
     }
 
@@ -293,15 +293,42 @@ void VRHandRenderer::RenderHands(const RiddickVRSharedState& state, bool isLeftE
     s_gl.glPopAttrib();
 }
 
-void VRHandRenderer::DrawTacticalHand(HandSide side, float grip, float trigger, bool isBoxerGuard) {
+void VRHandRenderer::DrawTacticalHand(HandSide side, float grip, float trigger, bool isBoxerGuard, uint32_t buttons) {
     s_gl.glPushMatrix();
 
-    // Squeeze factor: grip trigger curls middle, ring, pinky; trigger curls index
+    // Squeeze factor: grip trigger curls middle, ring, pinky
     float effectiveGrip = (std::max)(grip, isBoxerGuard ? 0.90f : 0.0f);
     float effectiveTrigger = (std::max)(trigger, isBoxerGuard ? 0.90f : 0.0f);
 
-    // If fist is clenched (grip > 0.45), index finger joins the fist
-    float indexCurl = (effectiveGrip > 0.45f) ? (std::max)(effectiveTrigger, effectiveGrip) : effectiveTrigger;
+    // Capacitive sensing and trigger discipline (ADR 0411):
+    // If boxer guard is active, both hands clench into complete fists
+    // Otherwise, index finger respects capacitive touch & trigger pull (trigger discipline)
+    bool triggerTouch = (buttons & RIDDICK_VR_TOUCH_TRIGGER) != 0 || trigger > 0.05f;
+    bool thumbTouch = (buttons & (RIDDICK_VR_TOUCH_THUMBSTICK | RIDDICK_VR_TOUCH_THUMBREST |
+                                 RIDDICK_VR_BTN_A | RIDDICK_VR_BTN_B | RIDDICK_VR_BTN_X | RIDDICK_VR_BTN_Y)) != 0;
+
+    float indexCurl = 0.0f;
+    if (isBoxerGuard) {
+        indexCurl = 0.92f;
+    } else if (effectiveGrip > 0.70f && trigger > 0.40f) {
+        // Tight dual clench creates a full fist
+        indexCurl = (std::max)(effectiveTrigger, effectiveGrip);
+    } else if (triggerTouch) {
+        // Finger resting on trigger guard or pulling trigger
+        indexCurl = 0.15f + 0.80f * effectiveTrigger;
+    } else {
+        // Extended pointing / trigger discipline along barrel
+        indexCurl = 0.0f;
+    }
+
+    float thumbCurl = 0.0f;
+    if (isBoxerGuard) {
+        thumbCurl = 0.88f;
+    } else if (thumbTouch) {
+        thumbCurl = 0.35f + 0.50f * effectiveGrip;
+    } else {
+        thumbCurl = 0.08f;
+    }
 
     // 1. Forearm Gauntlet & Wrist Vambrace
     DrawForearmGauntlet(side);
@@ -322,7 +349,7 @@ void VRHandRenderer::DrawTacticalHand(HandSide side, float grip, float trigger, 
     DrawArticulatedFinger(side, 3, effectiveGrip, splayPinky,  0.80f); // Pinky
 
     // 4. Articulated Thumb
-    DrawArticulatedThumb(side, effectiveGrip);
+    DrawArticulatedThumb(side, thumbCurl);
 
     s_gl.glPopMatrix();
 }

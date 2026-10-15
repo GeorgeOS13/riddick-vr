@@ -23,7 +23,7 @@ private:
     ~VRHandRenderer() = default;
 
     // Renders an individual tactical glove (left or right)
-    void DrawTacticalHand(HandSide side, float grip, float trigger, bool isBoxerGuard);
+    void DrawTacticalHand(HandSide side, float grip, float trigger, bool isBoxerGuard, uint32_t buttons);
 
     // Procedural tactical glove geometry components
     void DrawForearmGauntlet(HandSide side);
