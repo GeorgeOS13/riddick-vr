@@ -16,6 +16,9 @@ constexpr uint32_t RIDDICK_VR_BTN_Y           = 1 << 3;
 constexpr uint32_t RIDDICK_VR_BTN_STICK_LEFT  = 1 << 4;
 constexpr uint32_t RIDDICK_VR_BTN_STICK_RIGHT = 1 << 5;
 constexpr uint32_t RIDDICK_VR_BTN_MENU        = 1 << 6;
+constexpr uint32_t RIDDICK_VR_TOUCH_TRIGGER    = 1 << 7;
+constexpr uint32_t RIDDICK_VR_TOUCH_THUMBSTICK = 1 << 8;
+constexpr uint32_t RIDDICK_VR_TOUCH_THUMBREST  = 1 << 9;
 
 #pragma pack(push, 4)
 

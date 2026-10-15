@@ -864,9 +864,22 @@ void OpenXRManager::UpdateTracking(RiddickVRSharedState& state, XrTime predicted
             state.rightController.grip = rightGrip.currentState;
         }
 
-        // Read Buttons
+        // Read Buttons & Capacitive Touch States (ADR 0386)
         state.leftController.buttons = 0;
         state.rightController.buttons = 0;
+
+        if (state.leftController.trigger > 0.05f) {
+            state.leftController.buttons |= RIDDICK_VR_TOUCH_TRIGGER;
+        }
+        if (fabsf(state.leftController.thumbstickX) > 0.08f || fabsf(state.leftController.thumbstickY) > 0.08f) {
+            state.leftController.buttons |= RIDDICK_VR_TOUCH_THUMBSTICK;
+        }
+        if (state.rightController.trigger > 0.05f) {
+            state.rightController.buttons |= RIDDICK_VR_TOUCH_TRIGGER;
+        }
+        if (fabsf(state.rightController.thumbstickX) > 0.08f || fabsf(state.rightController.thumbstickY) > 0.08f) {
+            state.rightController.buttons |= RIDDICK_VR_TOUCH_THUMBSTICK;
+        }
 
         getInfo.action = m_primaryBtnAction;
         getInfo.subactionPath = m_rightHandPath;
@@ -1201,9 +1214,20 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
             static XrPosef s_cinemaQuadPose = { {0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, -1.8f} };
             static bool s_hasCinemaPose = false;
             static float s_cinemaYaw = 0.0f;
+            static float s_cinemaTransitionAlpha = 0.0f; // ADR 0385: 0.0 (Action Projection) <-> 1.0 (Virtual Cinema Quad)
 
+            // Smooth transition rate: ~150ms transition (alpha step 0.08 per frame at 72-90 Hz)
             if (clientState.cinemaMode) {
-                // Floating Virtual Cinema Screen for Menus and Cutscenes (ADR 0375)
+                s_cinemaTransitionAlpha = (s_cinemaTransitionAlpha < 1.0f) ? (s_cinemaTransitionAlpha + 0.08f) : 1.0f;
+            } else {
+                s_cinemaTransitionAlpha = (s_cinemaTransitionAlpha > 0.0f) ? (s_cinemaTransitionAlpha - 0.08f) : 0.0f;
+            }
+
+            // Smoothstep curve: t in [0, 1]
+            float t = s_cinemaTransitionAlpha * s_cinemaTransitionAlpha * (3.0f - 2.0f * s_cinemaTransitionAlpha);
+
+            if (s_cinemaTransitionAlpha > 0.001f) {
+                // Virtual Cinema Screen Active or In-Transition (ADR 0375 & ADR 0385)
                 float qx = m_locatedViews[0].pose.orientation.x;
                 float qy = m_locatedViews[0].pose.orientation.y;
                 float qz = m_locatedViews[0].pose.orientation.z;
@@ -1232,9 +1256,18 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
 
                 float fwdX = -sinf(s_cinemaYaw);
                 float fwdZ = -cosf(s_cinemaYaw);
-                s_cinemaQuadPose.position.x = m_locatedViews[0].pose.position.x + fwdX * 1.8f;
+
+                // ADR 0385: Smooth screen depth & scale expansion interpolation during mode transition
+                // At t = 1.0: distance = 1.80m, width = 2.0m (comfortable virtual cinema)
+                // At t -> 0.0: expands to distance = 0.85m, width = 3.6m (expanding cinematic portal into 3D world)
+                float cinemaDist = 0.85f + t * 0.95f;
+                float quadW = 3.6f - t * 1.6f;
+                constexpr float srcAspect = 16.0f / 9.0f;
+                float quadH = quadW / srcAspect;
+
+                s_cinemaQuadPose.position.x = m_locatedViews[0].pose.position.x + fwdX * cinemaDist;
                 s_cinemaQuadPose.position.y = m_locatedViews[0].pose.position.y;
-                s_cinemaQuadPose.position.z = m_locatedViews[0].pose.position.z + fwdZ * 1.8f;
+                s_cinemaQuadPose.position.z = m_locatedViews[0].pose.position.z + fwdZ * cinemaDist;
                 s_wasCinemaMode = true;
 
                 quadLayer.layerFlags = 0;
@@ -1243,7 +1276,6 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
                 quadLayer.subImage.swapchain = m_swapchains[0].handle;
 
                 // Crop to the exact 16:9 active region (matching stereo_renderer.cpp blit)
-                constexpr float srcAspect = 16.0f / 9.0f;
                 int32_t dstW = m_swapchains[0].width;
                 int32_t dstH = static_cast<int32_t>(dstW / srcAspect);
                 if (dstH > static_cast<int32_t>(m_swapchains[0].height)) {
@@ -1256,10 +1288,20 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
                 quadLayer.subImage.imageRect.offset = {dstX, dstY};
                 quadLayer.subImage.imageRect.extent = {dstW, dstH};
                 quadLayer.pose = s_cinemaQuadPose;
-                quadLayer.size.width = 2.0f;
-                quadLayer.size.height = 1.125f; // 16:9 aspect ratio
+                quadLayer.size.width = quadW;
+                quadLayer.size.height = quadH;
 
-                layers.push_back((XrCompositionLayerBaseHeader*)&quadLayer);
+                if (t >= 0.999f) {
+                    layers.push_back((XrCompositionLayerBaseHeader*)&quadLayer);
+                } else {
+                    // Transition phase: base is 3D projection layer, quad is expanding portal overlay
+                    layer.layerFlags = 0;
+                    layer.space = m_appSpace;
+                    layer.viewCount = 2;
+                    layer.views = projViews;
+                    layers.push_back((XrCompositionLayerBaseHeader*)&layer);
+                    layers.push_back((XrCompositionLayerBaseHeader*)&quadLayer);
+                }
             } else {
                 s_wasCinemaMode = false;
                 // IMMERSIVE 3D ACTION MODE:
@@ -1543,6 +1585,8 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
 
             state.leftController.isConnected = true;
             state.rightController.isConnected = true;
+            state.leftController.buttons = RIDDICK_VR_TOUCH_TRIGGER | RIDDICK_VR_TOUCH_THUMBSTICK;
+            state.rightController.buttons = RIDDICK_VR_TOUCH_TRIGGER | RIDDICK_VR_TOUCH_THUMBSTICK;
             state.leftController.gripPose.position = { -0.2f, 1.2f, -0.3f };
             state.rightController.gripPose.position = { 0.2f, 1.2f, -0.3f };
             state.leftController.gripPose.orientation = { 0, 0, 0, 1 };

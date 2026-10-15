@@ -93,6 +93,10 @@ Key technical choices, trade-offs, and implementation strategies are documented 
 | [**ADR-0380**](docs/adr/0380-diegetic-temple-and-shoulder-gesture-bounding-box.md) | Diegetic Temple & Shoulder Gesture Spatial Bounding Box | Controls: 3D bounding boxes preventing accidental Eyeshine/Flashlight during climbing |
 | [**ADR-0381**](docs/adr/0381-ladder-rung-forward-cone-filtering-and-holster-decoupling.md) | Ladder Rung Forward-Cone Filtering & Holster Decoupling | Locomotion: Forward depth corridor (Z in [-0.55, -0.16]) decoupling ladder grabs from holsters |
 | [**ADR-0382**](docs/adr/0382-off-hand-throwing-trajectory-forward-vector-gating.md) | Off-Hand Throwing Trajectory Forward Vector Gating | Physics: Forward trajectory gating (Vz < -0.65 m/s) preventing accidental throws |
+| [**ADR-0383**](docs/adr/0383-physical-ads-eye-relief-alignment-and-parallax-mitigation.md) | Physical 6DOF Aim-Down-Sights (ADS) Eye-Relief Alignment | Gunplay: Eye-level corridor detection with tactile confirmation and parallax damping |
+| [**ADR-0384**](docs/adr/0384-directsound-openal-spatial-audio-listener-yaw-sync.md) | DirectSound & OpenAL 3D Spatial Audio Listener Sync | Audio: Continuous closed-loop sync aligning engine audio listener with physical HMD yaw |
+| [**ADR-0385**](docs/adr/0385-virtual-cinema-mode-depth-expansion-interpolation.md) | Virtual Cinema Mode Depth & Scale Expansion Interpolation | UI & Visuals: Smooth 150ms screen depth/scale glide eliminating single-frame visual pops |
+| [**ADR-0386**](docs/adr/0386-touch-capacitive-sensor-hand-pose-disambiguation.md) | Motion Controller Capacitive Touch State & Disambiguation | Controls: Protocol touch bitflags disambiguating resting fingers from active ladder grabs |
 
 
 ---

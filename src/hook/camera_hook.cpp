@@ -326,6 +326,39 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 bool isReloading = (now - s_lastReloadGestureTime <= 1100);
                 bool isAiming = s_isAimingOrBlocking || (vrState.leftController.trigger > 0.5f);
 
+                // ADR 0383: Physical 6DOF Aim-Down-Sights (ADS) Eye-Relief Alignment & Parallax Mitigation
+                static bool s_isPhysicalADS = false;
+                static DWORD s_adsEnterStartTime = 0;
+                static bool s_adsHapticFired = false;
+
+                RiddickVRVector3 ctrlLocal = WorldToHmdLocal(ctrlPose.position, vrState.hmdPose);
+                // Dominant eye sight line corridor:
+                // Y: [-0.18m, 0.08m] (chin to eye level)
+                // Z: [-0.36m, -0.10m] (10cm to 36cm eye relief)
+                // X: [0.02m, 0.22m] (dominant right eye alignment corridor)
+                bool inAdsCorridor = (ctrlLocal.y >= -0.18f && ctrlLocal.y <= 0.08f) &&
+                                    (ctrlLocal.z >= -0.36f && ctrlLocal.z <= -0.10f) &&
+                                    (ctrlLocal.x >= 0.02f && ctrlLocal.x <= 0.22f);
+
+                if (inAdsCorridor && !isReloading && !s_physicalBlockEngaged) {
+                    if (s_adsEnterStartTime == 0) {
+                        s_adsEnterStartTime = now;
+                    } else if (now - s_adsEnterStartTime > 50) { // 50ms hold to confirm ADS
+                        s_isPhysicalADS = true;
+                        if (!s_adsHapticFired) {
+                            vrState.rightHapticPulse = 0.18f; // Tactile detent on sight picture acquisition
+                            s_adsHapticFired = true;
+                        }
+                    }
+                } else {
+                    // Spatial exit hysteresis: requires moving clearly outside the corridor
+                    if (ctrlLocal.y < -0.24f || ctrlLocal.z < -0.42f || ctrlLocal.x < -0.05f || ctrlLocal.x > 0.28f) {
+                        s_isPhysicalADS = false;
+                        s_adsEnterStartTime = 0;
+                        s_adsHapticFired = false;
+                    }
+                }
+
                 if (ctrlPose.isValid && !s_physicalBlockEngaged && !isReloading) {
                     float cx = ctrlPose.orientation.x;
                     float cy = ctrlPose.orientation.y;
@@ -401,8 +434,11 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                     pullPitch = (ctrlPitch > 0.0f) ? (ctrlPitch - AIM_DEADZONE) : (ctrlPitch + AIM_DEADZONE);
                                 }
 
-                                // Aim weights: tightened during ADS / Two-handed stabilization, lighter during hip fire
-                                if (s_twoHandedStabilizationActive || isAiming) {
+                                // Aim weights: tightened during physical ADS and two-handed stabilization, lighter during hip fire
+                                if (s_isPhysicalADS) {
+                                    wAim = 0.90f; // Ultra-fine 1:1 iron sight tracking
+                                    wPull = 0.12f;
+                                } else if (s_twoHandedStabilizationActive || isAiming) {
                                     wAim = 0.75f;
                                     wPull = 0.08f;
                                 } else {
@@ -427,10 +463,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 float mouseDeltaY = -combinedPitch * SENSITIVITY_PITCH;
 
                 // Two-Handed Firearm Stabilization (ADR 0005): dampens micro-tremors and aiming jitter
-                if (s_twoHandedStabilizationActive) {
-                    constexpr float STABILIZE_DAMPING = 0.65f;
-                    mouseDeltaX *= STABILIZE_DAMPING;
-                    mouseDeltaY *= STABILIZE_DAMPING;
+                if (s_twoHandedStabilizationActive || s_isPhysicalADS) {
+                    float stabilizeDamping = s_isPhysicalADS ? 0.50f : 0.65f;
+                    mouseDeltaX *= stabilizeDamping;
+                    mouseDeltaY *= stabilizeDamping;
+                }
+
+                // ADR 0384: DirectSound & OpenAL 3D Spatial Audio Listener Yaw Synchronization
+                // Keep the in-engine camera yaw (which drives the audio listener forward vector) in continuous sync with HMD yaw
+                static float s_engineAudioListenerYaw = 0.0f;
+                s_engineAudioListenerYaw += (-mouseDeltaX / SENSITIVITY_YAW);
+                while (s_engineAudioListenerYaw > 3.14159265f) s_engineAudioListenerYaw -= 6.2831853f;
+                while (s_engineAudioListenerYaw < -3.14159265f) s_engineAudioListenerYaw += 6.2831853f;
+
+                float listenerYawError = currentYaw - s_engineAudioListenerYaw;
+                while (listenerYawError > 3.14159265f) listenerYawError -= 6.2831853f;
+                while (listenerYawError < -3.14159265f) listenerYawError += 6.2831853f;
+
+                if (fabsf(listenerYawError) > 0.015f) { // Error threshold ~0.85 degrees
+                    float syncCorrection = listenerYawError * 0.12f * SENSITIVITY_YAW;
+                    mouseDeltaX -= syncCorrection;
+                    s_engineAudioListenerYaw += (syncCorrection / SENSITIVITY_YAW);
                 }
 
                 s_accumulatedLookX += mouseDeltaX;
@@ -444,6 +497,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     s_accumulatedLookY -= moveY;
                     mouse_event(MOUSEEVENTF_MOVE, moveX, moveY, 0, 0);
                 }
+
             }
         }
     } else {
@@ -630,8 +684,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
     // Grab initiate: hand raised in front of chest/chin (Y > 0.15m, Z in [-0.55, -0.16]) and grip squeezed (> 0.5f)
     // ADR 0381: Spatial forward-cone depth filtering decouples ladder grabs from over-shoulder weapon drawing!
+    // ADR 0386: Capacitive sensor disambiguation: ensure fingers are curled around rung rather than resting
     if (!s_leftHoldingRung) {
-        if (leftLocal.y > 0.15f && (leftLocal.z >= -0.55f && leftLocal.z <= -0.16f) && vrState.leftController.grip > 0.5f) {
+        bool leftTouchEngaged = (vrState.leftController.buttons & RIDDICK_VR_TOUCH_TRIGGER) != 0 || vrState.leftController.trigger > 0.20f;
+        if (leftLocal.y > 0.15f && (leftLocal.z >= -0.55f && leftLocal.z <= -0.16f) && vrState.leftController.grip > 0.5f && leftTouchEngaged) {
             s_leftHoldingRung = true;
             VR_LOG_INFO("Physical Gesture: LADDER RUNG GRABBED (Left hand, Y: %.2fm, Z: %.2fm)", leftLocal.y, leftLocal.z);
             vrState.leftHapticPulse = 0.35f;
@@ -644,7 +700,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     }
 
     if (!s_rightHoldingRung) {
-        if (rightLocal.y > 0.15f && (rightLocal.z >= -0.55f && rightLocal.z <= -0.16f) && vrState.rightController.grip > 0.5f) {
+        bool rightTouchEngaged = (vrState.rightController.buttons & RIDDICK_VR_TOUCH_TRIGGER) != 0 || vrState.rightController.trigger > 0.20f;
+        if (rightLocal.y > 0.15f && (rightLocal.z >= -0.55f && rightLocal.z <= -0.16f) && vrState.rightController.grip > 0.5f && rightTouchEngaged) {
             s_rightHoldingRung = true;
             VR_LOG_INFO("Physical Gesture: LADDER RUNG GRABBED (Right hand, Y: %.2fm, Z: %.2fm)", rightLocal.y, rightLocal.z);
             vrState.rightHapticPulse = 0.35f;
