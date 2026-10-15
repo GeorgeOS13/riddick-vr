@@ -6207,10 +6207,13 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         powf(leftLocal.z - rightLocal.z, 2)
     );
 
-    if (!s_physicalBlockEngaged && !isClimbingActive && (now - s_lastReloadGestureTime > 1100)) {
-        bool offHandAtReceiver = (reloadHandDist < 0.20f && vrState.leftController.grip > 0.35f && (leftLocal.y < -0.10f || rightLocal.z < -0.25f));
-        bool handAtWaistPouch = (leftLocal.y < -0.38f && vrState.leftController.grip > 0.38f) ||
-                                (rightLocal.y < -0.38f && vrState.rightController.grip > 0.50f);
+    // ADR 0394: Tactical Weapon Reload Ergonomics & Off-Hand Mag-Well Gating
+    // Suppress reload when already in two-handed stabilization to prevent accidental reloads while aiming.
+    // Off-hand reaching to dominant weapon receiver requires upward seating motion (lVel.y > 0.35 m/s).
+    // Waist pouch reach strictly tracks off-hand (leftLocal), eliminating accidental reloads when resting dominant arm.
+    if (!s_physicalBlockEngaged && !isClimbingActive && !s_twoHandedStabilizationActive && (now - s_lastReloadGestureTime > 1200)) {
+        bool offHandMagInsert = (reloadHandDist < 0.18f && vrState.leftController.grip > 0.50f && lVel.y > 0.35f);
+        bool offHandWaistPouch = (leftLocal.y < -0.38f && leftLocal.x > -0.35f && leftLocal.x < -0.05f && vrState.leftController.grip > 0.50f);
 
         // Cybernetic Drone HUD Battery Power Cell Hot-Swap Ejection (ADR 0082)
         bool cellEjectFlick = (reloadHandDist < 0.18f && vrState.leftController.grip > 0.50f && lVel.y < -0.70f);
@@ -6220,10 +6223,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             SendKeyTap('R');
             vrState.leftHapticPulse = 0.75f; // Magnetic cell disconnect snap (140 Hz)
             vrState.rightHapticPulse = 0.50f;
-        } else if (offHandAtReceiver || handAtWaistPouch) {
+        } else if (offHandMagInsert || offHandWaistPouch) {
             s_lastReloadGestureTime = now;
             VR_LOG_INFO("Tactical Gesture: MANUAL WEAPON RELOAD triggered (%s, HandDist: %.2fm, LeftY: %.2f)",
-                offHandAtReceiver ? "Weapon Receiver / Mag-Well" : "Waist Ammo Pouch", reloadHandDist, leftLocal.y);
+                offHandMagInsert ? "Weapon Receiver / Mag-Well" : "Waist Ammo Pouch", reloadHandDist, leftLocal.y);
             SendKeyTap('R');
             vrState.leftHapticPulse = 0.55f;
             vrState.rightHapticPulse = 0.75f;
