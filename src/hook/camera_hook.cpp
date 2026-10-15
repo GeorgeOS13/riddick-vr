@@ -3545,6 +3545,182 @@ static EnvIntent UpdateEnvGestures(EnvState& st, DWORD now,
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// GH #17 step 8: section 8 aim/block/fire state + detection.
+// All six Update-local statics (right-trigger hysteresis level, auto-fire
+// hold/cyclic timers, chaingun recoil-comp timer, tranq charge timer/flag)
+// hoisted here. Detection lives in UpdateAim below; ALL side effects
+// (SendMouseClick/HapticRequest/VR_LOG_INFO plus s_headlook.recoilKickPitch,
+// s_melee.currentBlockEngaged, s_isAimingOrBlocking writes) stay at the call
+// site in CameraHook::Update with identical strings. No behavior change:
+// same hysteresis (press > 0.65 / release >= 0.45), suppression gates
+// (reload/block/climb), recoil values, slot profiles (ADR 0376), cadences
+// (150 ms auto-fire delay, 90 ms cyclic/comp ticks, 300 ms comp arm,
+// 800 ms tranq ramp, 450 ms tranq discharge floor), and punch-recovery gate
+// (GH #31: 200 ms since last punch/finisher).
+// ---------------------------------------------------------------------------
+struct AimState {
+    bool rightTriggerDown = false;
+    DWORD triggerHoldStartTime = 0;
+    DWORD lastCyclicFireHaptic = 0;
+    DWORD lastRecoilCompTime = 0;
+    DWORD tranqChargeStartTime = 0;
+    bool isChargingTranq = false;
+};
+static AimState s_aim;
+
+struct AimIntent {
+    bool fireChanged = false;   // edge: SendMouseClick(true, fireDown)
+    bool fireDown = false;      // new level
+    int fireSlot = 1;           // weapon slot at rising edge (ADR 0376)
+    bool fireTwoHanded = false; // stabilization at rising edge
+    float recoilKickPitch = 0.0f; // slot profile pitch (rising edge)
+    float fireHapticRightAmp = 0.0f;
+    int fireHapticRightPrio = kHapticUi;
+    float fireHapticLeftAmp = 0.0f; // 0 = none (one-handed)
+    int fireHapticLeftPrio = kHapticUi;
+    bool cyclicPulse = false;   // 90 ms auto-fire tick: right 0.68 ladder haptic
+    bool foregripCyclic = false; // + left 0.42 ambient foregrip transmission
+    bool recoilComp = false;    // chaingun comp tick: haptics + pitch *= 0.35
+    bool tranqCharging = false; // level: escalating capacitor hum haptic
+    float tranqChargeAmp = 0.0f;
+    bool tranqDischarged = false; // edge (charge > 450 ms): log + snap haptic
+    DWORD tranqChargeTotalMs = 0;
+    bool wantBlock = false;     // level: mirrors to s_isAimingOrBlocking
+    bool blockEngage = false;   // edge (punch-gated): RIGHTDOWN + logs/haptics
+    bool blockEngagePhysical = false; // true: boxer-guard log variant
+    bool blockDisengage = false; // edge: RIGHTUP + log
+};
+
+static AimIntent UpdateAim(AimState& st, DWORD now,
+                           float domTrigger, float offTrigger, float offGrip,
+                           bool reloadActive, bool physicalBlockEngaged,
+                           bool isClimbingActive, bool twoHandedActive,
+                           int weaponSlot,
+                           DWORD lastPunchTime, DWORD lastFinisherTime,
+                           bool blockEngaged) {
+    AimIntent out;
+    // Right Trigger -> Fire hysteresis (GH #24) + suppression gates.
+    bool wantRightTrigger = st.rightTriggerDown ? (domTrigger >= 0.45f) : (domTrigger > 0.65f);
+    if (wantRightTrigger && (reloadActive || physicalBlockEngaged || isClimbingActive)) {
+        wantRightTrigger = false;
+    }
+    if (wantRightTrigger != st.rightTriggerDown) {
+        st.rightTriggerDown = wantRightTrigger;
+        out.fireChanged = true;
+        out.fireDown = wantRightTrigger;
+        if (wantRightTrigger) {
+            out.fireSlot = weaponSlot;
+            out.fireTwoHanded = twoHandedActive;
+            // ADR 0376: Weapon Slot Recoil & Haptic Profile Calibration.
+            switch (weaponSlot) {
+                case 3: // Melee / Shivs / Ulaks
+                    out.recoilKickPitch = 0.005f;
+                    out.fireHapticRightAmp = 0.45f;
+                    out.fireHapticRightPrio = kHapticUi;
+                    break;
+                case 2: // Sidearm / Pistol / Tranq Gun
+                    out.recoilKickPitch = twoHandedActive ? 0.012f : 0.024f;
+                    out.fireHapticRightAmp = twoHandedActive ? 0.50f : 0.62f;
+                    out.fireHapticRightPrio = kHapticLadder;
+                    if (twoHandedActive) {
+                        out.fireHapticLeftAmp = 0.35f;
+                        out.fireHapticLeftPrio = kHapticUi;
+                    }
+                    break;
+                case 1: // Primary Shotgun / Combat Long-Arm
+                    out.recoilKickPitch = twoHandedActive ? 0.028f : 0.055f;
+                    out.fireHapticRightAmp = twoHandedActive ? 0.80f : 0.95f;
+                    out.fireHapticRightPrio = kHapticFinisher;
+                    if (twoHandedActive) {
+                        out.fireHapticLeftAmp = 0.65f;
+                        out.fireHapticLeftPrio = kHapticLadder;
+                    }
+                    break;
+                case 4: // Tactical Assault Rifle / Ordnance
+                    out.recoilKickPitch = twoHandedActive ? 0.015f : 0.028f;
+                    out.fireHapticRightAmp = twoHandedActive ? 0.60f : 0.72f;
+                    out.fireHapticRightPrio = kHapticReload;
+                    if (twoHandedActive) {
+                        out.fireHapticLeftAmp = 0.45f;
+                        out.fireHapticLeftPrio = kHapticUi;
+                    }
+                    break;
+                case 5: // Heavy Weapon / SCAR Gun / Rotary Chaingun
+                default:
+                    out.recoilKickPitch = twoHandedActive ? 0.025f : 0.065f;
+                    out.fireHapticRightAmp = twoHandedActive ? 0.85f : 0.98f;
+                    out.fireHapticRightPrio = kHapticFinisher;
+                    if (twoHandedActive) {
+                        out.fireHapticLeftAmp = 0.75f;
+                        out.fireHapticLeftPrio = kHapticReload;
+                    }
+                    break;
+            }
+        }
+    }
+
+    // Sustained Automatic Fire & Mech Rotary Cannon cadence (ADR 0024).
+    if (wantRightTrigger) {
+        if (st.triggerHoldStartTime == 0) {
+            st.triggerHoldStartTime = now;
+        } else if (now - st.triggerHoldStartTime > 150) {
+            if (now - st.lastCyclicFireHaptic > 90) {
+                st.lastCyclicFireHaptic = now;
+                out.cyclicPulse = true;
+                out.foregripCyclic = twoHandedActive;
+            }
+        }
+    } else {
+        st.triggerHoldStartTime = 0;
+    }
+
+    // Heavy Mech Rotary Chaingun Dual-Hand Recoil Compensation (ADR 0107).
+    bool isDualHandBracedChaingun = twoHandedActive && (domTrigger > 0.80f) && (offGrip > 0.60f);
+    if (isDualHandBracedChaingun && (st.triggerHoldStartTime != 0) && (now - st.triggerHoldStartTime > 300)) {
+        if (now - st.lastRecoilCompTime > 90) {
+            st.lastRecoilCompTime = now;
+            out.recoilComp = true;
+        }
+    }
+
+    // Security Tranq Gun Tactile Capacitor Charging (ADR 0039).
+    bool isAimingStance = (offTrigger > 0.40f) || twoHandedActive;
+    if (isAimingStance && domTrigger > 0.35f && domTrigger < 0.90f) {
+        if (!st.isChargingTranq) {
+            st.isChargingTranq = true;
+            st.tranqChargeStartTime = now;
+        }
+        DWORD chargeElapsed = now - st.tranqChargeStartTime;
+        float chargeRatio = (chargeElapsed < 800) ? (chargeElapsed / 800.0f) : 1.0f;
+        out.tranqCharging = true;
+        out.tranqChargeAmp = 0.20f + 0.50f * chargeRatio;
+    } else {
+        if (st.isChargingTranq) {
+            st.isChargingTranq = false;
+            DWORD chargeTotal = now - st.tranqChargeStartTime;
+            if (chargeTotal > 450) {
+                out.tranqDischarged = true;
+                out.tranqChargeTotalMs = chargeTotal;
+            }
+        }
+    }
+
+    // Block / Aim level + punch-gated edges (GH #31).
+    out.wantBlock = physicalBlockEngaged || (offTrigger > 0.5f);
+    if (out.wantBlock != blockEngaged) {
+        if (out.wantBlock) {
+            if ((now - lastPunchTime > 200) && (now - lastFinisherTime > 200)) {
+                out.blockEngage = true;
+                out.blockEngagePhysical = physicalBlockEngaged;
+            }
+        } else {
+            out.blockDisengage = true;
+        }
+    }
+    return out;
+}
+
 void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (!m_initialized || !vrState.vrActive) return;
 
@@ -8451,132 +8627,71 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // 8. Aim & Block (Unified Physical Boxer Guard + Left Trigger Aim/Block)
     // In Riddick:
     // Right Mouse Button (ACTION_SECONDARYFIRE 241) = Guard / Block when unarmed/melee, Aim/Zoom when holding firearms.
-    static bool s_rightTriggerDown = false;
-
-    // Right Trigger -> Fire / Primary Attack / UI Select Click
-    // GH #24: press > 0.65 / release < 0.45 hysteresis so hover/gesture
-    // jitter cannot desync the held fire state; suppressed while reloading,
-    // guarding, or climbing (gesture volumes own the trigger there).
+    // GH #17 step 8: detection delegated to UpdateAim (explicit AimState,
+    // no behavior change); side effects (clicks/haptics/logs) stay here.
     // Track C #14 southpaw: dominant controller owns the trigger.
-    float trigVal = (g_vrConfig.southpaw ? vrState.leftController.trigger : vrState.rightController.trigger);
-    bool wantRightTrigger = s_rightTriggerDown ? (trigVal >= 0.45f) : (trigVal > 0.65f);
-    bool reloadActive = (now - s_reload.lastReloadGestureTime <= 1100);
-    if (wantRightTrigger && (reloadActive || s_physicalBlockEngaged || isClimbingActive)) {
-        wantRightTrigger = false;
-    }
-    if (wantRightTrigger != s_rightTriggerDown) {
-        SendMouseClick(true, wantRightTrigger); // GH #33: SendInput helper
-        s_rightTriggerDown = wantRightTrigger;
-        if (wantRightTrigger) {
+    bool aimReloadActive = (now - s_reload.lastReloadGestureTime <= 1100);
+    AimIntent aimIntent = UpdateAim(s_aim, now,
+        (g_vrConfig.southpaw ? vrState.leftController.trigger : vrState.rightController.trigger),
+        offCtrl.trigger, offCtrl.grip,
+        aimReloadActive, s_physicalBlockEngaged, isClimbingActive,
+        s_twoHandedStabilizationActive, s_activeWeaponSlot,
+        s_melee.lastPunchTime, s_melee.lastFinisherTime, s_melee.currentBlockEngaged);
+    if (aimIntent.fireChanged) {
+        SendMouseClick(true, aimIntent.fireDown); // GH #33: SendInput helper
+        if (aimIntent.fireDown) {
             // ADR 0376: Weapon Slot Recoil & Haptic Profile Calibration
-            switch (s_activeWeaponSlot) {
-                case 3: // Melee / Shivs / Ulaks
-                    s_headlook.recoilKickPitch = 0.005f;
-                    HapticRequest(1, (0.45f), kHapticUi);
-                    break;
-                case 2: // Sidearm / Pistol / Tranq Gun
-                    s_headlook.recoilKickPitch = s_twoHandedStabilizationActive ? 0.012f : 0.024f;
-                    HapticRequest(1, (s_twoHandedStabilizationActive ? 0.50f : 0.62f), kHapticLadder);
-                    if (s_twoHandedStabilizationActive) HapticRequest(0, (0.35f), kHapticUi);
-                    break;
-                case 1: // Primary Shotgun / Combat Long-Arm
-                    s_headlook.recoilKickPitch = s_twoHandedStabilizationActive ? 0.028f : 0.055f;
-                    HapticRequest(1, (s_twoHandedStabilizationActive ? 0.80f : 0.95f), kHapticFinisher);
-                    if (s_twoHandedStabilizationActive) HapticRequest(0, (0.65f), kHapticLadder);
-                    break;
-                case 4: // Tactical Assault Rifle / Ordnance
-                    s_headlook.recoilKickPitch = s_twoHandedStabilizationActive ? 0.015f : 0.028f;
-                    HapticRequest(1, (s_twoHandedStabilizationActive ? 0.60f : 0.72f), kHapticReload);
-                    if (s_twoHandedStabilizationActive) HapticRequest(0, (0.45f), kHapticUi);
-                    break;
-                case 5: // Heavy Weapon / SCAR Gun / Rotary Chaingun
-                default:
-                    s_headlook.recoilKickPitch = s_twoHandedStabilizationActive ? 0.025f : 0.065f;
-                    HapticRequest(1, (s_twoHandedStabilizationActive ? 0.85f : 0.98f), kHapticFinisher);
-                    if (s_twoHandedStabilizationActive) HapticRequest(0, (0.75f), kHapticReload);
-                    break;
+            s_headlook.recoilKickPitch = aimIntent.recoilKickPitch;
+            HapticRequest(1, aimIntent.fireHapticRightAmp, aimIntent.fireHapticRightPrio);
+            if (aimIntent.fireHapticLeftAmp > 0.0f) {
+                HapticRequest(0, aimIntent.fireHapticLeftAmp, aimIntent.fireHapticLeftPrio);
             }
         }
     }
 
     // Sustained Automatic Fire & Mech Rotary Cannon Haptic Feedback (ADR 0024):
-    static DWORD s_triggerHoldStartTime = 0;
-    static DWORD s_lastCyclicFireHaptic = 0;
-    if (wantRightTrigger) {
-        if (s_triggerHoldStartTime == 0) {
-            s_triggerHoldStartTime = now;
-        } else if (now - s_triggerHoldStartTime > 150) {
-            // Automatic fire / Rotary chaingun cycling every 90ms
-            if (now - s_lastCyclicFireHaptic > 90) {
-                s_lastCyclicFireHaptic = now;
-                HapticRequest(1, (0.68f), kHapticLadder);
-                if (s_twoHandedStabilizationActive) {
-                    HapticRequest(0, (0.42f), kHapticAmbient); // Foregrip cyclic transmission
-                }
-            }
+    // Automatic fire / Rotary chaingun cycling every 90ms
+    if (aimIntent.cyclicPulse) {
+        HapticRequest(1, (0.68f), kHapticLadder);
+        if (aimIntent.foregripCyclic) {
+            HapticRequest(0, (0.42f), kHapticAmbient); // Foregrip cyclic transmission
         }
-    } else {
-        s_triggerHoldStartTime = 0;
     }
 
     // Heavy Mech Rotary Chaingun Dual-Hand Recoil Compensation (ADR 0107)
-    static DWORD s_lastRecoilCompTime = 0;
-    bool isDualHandBracedChaingun = s_twoHandedStabilizationActive && (domCtrl.trigger > 0.80f) && (offCtrl.grip > 0.60f); // Track C #14
-    if (isDualHandBracedChaingun && (s_triggerHoldStartTime != 0) && (now - s_triggerHoldStartTime > 300)) {
-        if (now - s_lastRecoilCompTime > 90) {
-            s_lastRecoilCompTime = now;
-            HapticRequest(1, (0.65f), kHapticLadder); // Mechanical bolt cycling (160 Hz)
-            HapticRequest(0, (0.70f), kHapticReload);  // Heavy hydraulic chassis counter-torque (110 Hz)
-            s_headlook.recoilKickPitch *= 0.35f;       // Active kinematic muzzle climb clamp
-        }
+    if (aimIntent.recoilComp) {
+        HapticRequest(1, (0.65f), kHapticLadder); // Mechanical bolt cycling (160 Hz)
+        HapticRequest(0, (0.70f), kHapticReload);  // Heavy hydraulic chassis counter-torque (110 Hz)
+        s_headlook.recoilKickPitch *= 0.35f;       // Active kinematic muzzle climb clamp
     }
 
     // Security Tranq Gun Tactile Capacitor Charging (ADR 0039)
-    static DWORD s_tranqChargeStartTime = 0;
-    static bool s_isChargingTranq = false;
-    bool isAimingStance = (offCtrl.trigger > 0.40f) || s_twoHandedStabilizationActive; // Track C #14
-    if (isAimingStance && domCtrl.trigger > 0.35f && domCtrl.trigger < 0.90f) { // Track C #14
-        if (!s_isChargingTranq) {
-            s_isChargingTranq = true;
-            s_tranqChargeStartTime = now;
-        }
-        DWORD chargeElapsed = now - s_tranqChargeStartTime;
-        float chargeRatio = (chargeElapsed < 800) ? (chargeElapsed / 800.0f) : 1.0f;
-        HapticRequest(1, (0.20f + 0.50f * chargeRatio), kHapticUi); // Escalating electrostatic capacitor hum (80 -> 260 Hz)
-    } else {
-        if (s_isChargingTranq) {
-            s_isChargingTranq = false;
-            DWORD chargeTotal = now - s_tranqChargeStartTime;
-            if (chargeTotal > 450) {
-                VR_LOG_INFO("Tactical Weapon: TRANQ GUN PEAK CHARGE DART DISCHARGED (Charge: %ums)", chargeTotal);
-                HapticRequest(1, (0.85f), kHapticReload); // Electric discharge snap (280 Hz)
-            }
-        }
+    if (aimIntent.tranqCharging) {
+        HapticRequest(1, aimIntent.tranqChargeAmp, kHapticUi); // Escalating electrostatic capacitor hum (80 -> 260 Hz)
+    }
+    if (aimIntent.tranqDischarged) {
+        VR_LOG_INFO("Tactical Weapon: TRANQ GUN PEAK CHARGE DART DISCHARGED (Charge: %ums)", aimIntent.tranqChargeTotalMs);
+        HapticRequest(1, (0.85f), kHapticReload); // Electric discharge snap (280 Hz)
     }
 
     // Block / Aim: Engaged physically via Boxer Guard pose OR manually via Left Trigger
-    bool wantBlock = s_physicalBlockEngaged || (offCtrl.trigger > 0.5f); // Track C #14
-    s_isAimingOrBlocking = wantBlock;
-    if (wantBlock != s_melee.currentBlockEngaged) {
-        if (wantBlock) {
-            // GH #31: punch recovery covers reactive strikes and finishers.
-            if ((now - s_melee.lastPunchTime > 200) && (now - s_melee.lastFinisherTime > 200)) {
-                SendMouseClick(false, true); // GH #33: foreground-guarded (was mouse_event RIGHTDOWN)
-                s_melee.currentBlockEngaged = true;
-                if (s_physicalBlockEngaged) {
-                    VR_LOG_INFO("Combat State: BOXER GUARD / BLOCK MODE engaged (Physical Gesture)");
-                    HapticRequest(0, (0.35f), kHapticUi);
-                    HapticRequest(1, (0.35f), kHapticUi);
-                } else {
-                    VR_LOG_INFO("Combat State: AIM / BLOCK engaged (Left Trigger)");
-                    HapticRequest(0, (0.3f), kHapticUi);
-                }
-            }
+    s_isAimingOrBlocking = aimIntent.wantBlock;
+    if (aimIntent.blockEngage) {
+        // GH #31: punch recovery covers reactive strikes and finishers.
+        SendMouseClick(false, true); // GH #33: foreground-guarded (was mouse_event RIGHTDOWN)
+        s_melee.currentBlockEngaged = true;
+        if (aimIntent.blockEngagePhysical) {
+            VR_LOG_INFO("Combat State: BOXER GUARD / BLOCK MODE engaged (Physical Gesture)");
+            HapticRequest(0, (0.35f), kHapticUi);
+            HapticRequest(1, (0.35f), kHapticUi);
         } else {
-            SendMouseClick(false, false); // GH #33: foreground-guarded (was mouse_event RIGHTUP)
-            s_melee.currentBlockEngaged = false;
-            VR_LOG_INFO("Combat State: AIM / BLOCK disengaged");
+            VR_LOG_INFO("Combat State: AIM / BLOCK engaged (Left Trigger)");
+            HapticRequest(0, (0.3f), kHapticUi);
         }
+    } else if (aimIntent.blockDisengage) {
+        SendMouseClick(false, false); // GH #33: foreground-guarded (was mouse_event RIGHTUP)
+        s_melee.currentBlockEngaged = false;
+        VR_LOG_INFO("Combat State: AIM / BLOCK disengaged");
     }
 
     // 9. Left & Right Grip Mapping (Interactions, Physical Throwing, Body Dragging, Climbing, Reload - ADR 0017 & 0020)
