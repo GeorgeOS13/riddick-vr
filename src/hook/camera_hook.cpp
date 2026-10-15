@@ -1756,6 +1756,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                              rVel.y < -1.75f && lVel.y < -1.50f &&
                                              fabsf(rVel.x - lVel.x) > 1.10f);
 
+            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Cervical Compression Grating Hyperextension Finisher (ADR 0277)
+            static DWORD s_lastHyperextensionFinisherTime = 0;
+            static char s_hyperextensionFinisherDirKey = 'A';
+            bool hyperextensionFinisherStance = (handsDistSledge < 0.26f &&
+                                                 leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                                 vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
+            bool hyperextensionFinisherThrow = (hyperextensionFinisherStance && rVel.y < -1.75f &&
+                                                lVel.y < -1.50f && fabsf(lVel.x) > 0.85f);
+            if (hyperextensionFinisherThrow && (now - s_lastHyperextensionFinisherTime > 2000)) {
+                s_hyperextensionFinisherDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+            }
+
+            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Harmonic Deck Quake (ADR 0278)
+            static DWORD s_lastPlasmaHarmonicQuakeTime = 0;
+            bool plasmaHarmonicQuakeStance = (handsDistSledge < 0.28f &&
+                                              vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
+                                              vrState.rightController.trigger > 0.65f);
+            bool plasmaHarmonicQuakePlunge = (plasmaHarmonicQuakeStance && isJumpingStance &&
+                                              rVel.y < -1.80f && lVel.y < -1.55f &&
+                                              fabsf(rVel.x - lVel.x) > 1.15f);
+
             // Inmate Pit Brawl Outside Leg Hook Sweep & Ground Knee Drop (ADR 0209)
             static DWORD s_lastOutsideLegSweepTime = 0;
             static DWORD s_outsideLegSweepHookTime = 0;
@@ -1802,7 +1823,49 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_crossBlockHoldStart = 0;
             }
 
-            if (plasmaResonantWavePlunge && (now - s_lastPlasmaResonantWaveTime > 2000)) {
+            if (plasmaHarmonicQuakePlunge && (now - s_lastPlasmaHarmonicQuakeTime > 2000)) {
+                s_lastPlasmaHarmonicQuakeTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA HARMONIC DECK QUAKE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
+                SendKey(VK_SPACE, true);
+                SendKey('W', true);
+                SendKey('Q', true);
+                SendKey(VK_TAB, true);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                SendKey('C', true);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey('C', false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_TAB, false);
+                SendKey('Q', false);
+                SendKey('W', false);
+                SendKey(VK_SPACE, false);
+                vrState.rightHapticPulse = 0.98f; // Harmonic plasma quake wave (360 Hz)
+                vrState.leftHapticPulse = 0.98f;  // Structural deck recoil (130 Hz)
+            } else if (hyperextensionFinisherThrow && (now - s_lastHyperextensionFinisherTime > 2000)) {
+                s_lastHyperextensionFinisherTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER HYPEREXTENSION FINISHER EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_hyperextensionFinisherDirKey, rVel.y, lVel.y);
+                SendKey('W', true);
+                SendKey(s_hyperextensionFinisherDirKey, true);
+                SendKey('C', true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, false);
+                SendKey('C', false);
+                SendKey(s_hyperextensionFinisherDirKey, false);
+                SendKey('W', false);
+                vrState.rightHapticPulse = 0.98f; // Cervical hyperextension fracture shockwave (360 Hz)
+                vrState.leftHapticPulse = 0.92f;  // Whizzer collar tie drag (260 Hz)
+            } else if (plasmaResonantWavePlunge && (now - s_lastPlasmaResonantWaveTime > 2000)) {
                 s_lastPlasmaResonantWaveTime = now;
                 s_lastPunchTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT DETONATION EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
@@ -5761,6 +5824,42 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 vrState.rightHapticPulse = 0.95f; // Elastomeric boot detent snap (270 Hz)
                 vrState.leftHapticPulse = 0.55f;  // Gland adapter friction (140 Hz)
+            }
+
+            // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode Ceramic Insulator Wafer Lock Tab Plier Crimp (ADR 0275)
+            static DWORD s_lastWaferTabCrimpTime = 0;
+            bool handAtDiodePlateCollar = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
+                                           vrState.leftController.grip > 0.55f);
+            bool handOnTabCrimper = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
+                                     vrState.rightController.trigger > 0.50f);
+            bool waferTabCrimpStroke = (rVel.y < -0.65f);
+            if (handAtDiodePlateCollar && handOnTabCrimper && waferTabCrimpStroke && (now - s_lastWaferTabCrimpTime > 1800)) {
+                s_lastWaferTabCrimpTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA SOLAR DIODE WAFER TAB CRIMPED (Ry: %.2f)", rVel.y);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap(VK_TAB);
+                SendKeyTap('Q');
+                vrState.rightHapticPulse = 0.95f; // Tab deformation crimp snap (300 Hz)
+                vrState.leftHapticPulse = 0.55f;  // Bracket clamp tension (160 Hz)
+            }
+
+            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Signal Cable Heat-Shrink Sleeve Heat Gun Pass (ADR 0276)
+            static DWORD s_lastTachHeatShrinkTime = 0;
+            bool handAtCableBootCollar = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
+                                          vrState.leftController.grip > 0.55f);
+            bool handOnHeatGunNozzle = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
+                                        vrState.rightController.trigger < 0.40f);
+            bool tachHeatGunSweep = (fabsf(rVel.x) > 0.65f);
+            if (handAtCableBootCollar && handOnHeatGunNozzle && tachHeatGunSweep && (now - s_lastTachHeatShrinkTime > 1800)) {
+                s_lastTachHeatShrinkTime = now;
+                VR_LOG_INFO("Environmental Gesture: DRAFT FAN TACHOMETER HEAT SHRINK SLEEVE CURED (Rx: %.2f)", rVel.x);
+                SendKeyTap('E');
+                SendKeyTap('Q');
+                SendKeyTap(VK_TAB);
+                SendKeyTap(VK_RETURN);
+                vrState.rightHapticPulse = 0.95f; // Hot-air blower buzz (250 Hz)
+                vrState.leftHapticPulse = 0.55f;  // Curing sleeve contraction (150 Hz)
             }
         }
     }
