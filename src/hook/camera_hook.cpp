@@ -1472,6 +1472,24 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             bool isJumpingMotion = ((vrState.rightController.buttons & RIDDICK_VR_BTN_B) != 0 || rVel.y > 0.85f || lVel.y > 0.85f);
             bool javelinVaultStrike = (javelinVaultStance && isJumpingMotion && rVel.z < -1.40f && lVel.z < -1.20f);
 
+            // Inmate Pit Brawl Double Collar Tie Whizzer Takedown & Arm Trap (ADR 0221)
+            static DWORD s_lastWhizzerTime = 0;
+            static char s_whizzerDirKey = 'A';
+            bool whizzerClinchGrip = (handsDistSledge < 0.25f &&
+                                      rightLocal.y > -0.15f && rightLocal.y < 0.15f &&
+                                      vrState.rightController.grip > 0.65f && vrState.leftController.grip > 0.65f);
+            bool whizzerDownWhip = (whizzerClinchGrip && rVel.y < -1.15f && fabsf(lVel.x) > 0.90f);
+            if (whizzerDownWhip && (now - s_lastWhizzerTime > 2000)) {
+                s_whizzerDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+            }
+
+            // Security Guard Stun Baton Forward High-Arc Kinetic Hammerfist Deck Strike (ADR 0222)
+            static DWORD s_lastHammerfistTime = 0;
+            bool batonHammerfistElevated = (rightLocal.y > 0.15f &&
+                                            vrState.rightController.grip > 0.65f &&
+                                            vrState.rightController.trigger > 0.65f);
+            bool batonHammerfistPlunge = (batonHammerfistElevated && rVel.y < -1.35f && rVel.z < -0.80f);
+
             // Inmate Pit Brawl Outside Leg Hook Sweep & Ground Knee Drop (ADR 0209)
             static DWORD s_lastOutsideLegSweepTime = 0;
             static DWORD s_outsideLegSweepHookTime = 0;
@@ -1518,7 +1536,37 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_crossBlockHoldStart = 0;
             }
 
-            if (javelinVaultStrike && (now - s_lastJavelinVaultTime > 2000)) {
+            if (batonHammerfistPlunge && (now - s_lastHammerfistTime > 2000)) {
+                s_lastHammerfistTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Tactical Melee: STUN BATON KINETIC HAMMERFIST DECK STRIKE EXECUTED (Ry: %.2f, Rz: %.2f)", rVel.y, rVel.z);
+                SendKey('S', true);
+                SendKey('W', true);
+                SendKey('Q', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('Q', false);
+                SendKey('W', false);
+                SendKey('S', false);
+                vrState.rightHapticPulse = 0.98f; // High-voltage arc detonation blast (330 Hz)
+                vrState.leftHapticPulse = 0.70f;  // Forearm bone recoil (70 Hz)
+            } else if (whizzerDownWhip && (now - s_lastWhizzerTime > 2000)) {
+                s_lastWhizzerTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER TAKEDOWN EXECUTED (Dir: %c, Ry: %.2f)", s_whizzerDirKey, rVel.y);
+                SendKey('W', true);
+                SendKey(s_whizzerDirKey, true);
+                SendKey('C', true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, false);
+                SendKey('C', false);
+                SendKey(s_whizzerDirKey, false);
+                SendKey('W', false);
+                vrState.leftHapticPulse = 0.85f;  // Overhook shoulder lever strain (210 Hz)
+                vrState.rightHapticPulse = 0.98f; // Concussive mat impact (45 Hz)
+            } else if (javelinVaultStrike && (now - s_lastJavelinVaultTime > 2000)) {
                 s_lastJavelinVaultTime = now;
                 s_lastPunchTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON JAVELIN VAULT LEAP THRUST EXECUTED (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
@@ -4497,6 +4545,41 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 vrState.rightHapticPulse = 0.98f; // Metallic torque stop thud (270 Hz)
                 vrState.leftHapticPulse = 0.55f;  // Copper crush washer deformation (160 Hz)
+            }
+
+            // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Axial Retaining Cap Screw Driver Torque (ADR 0219)
+            static DWORD s_lastRetainingScrewTime = 0;
+            bool handAtHingeScrewBoss = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
+                                         vrState.leftController.grip > 0.55f);
+            bool handHoldingHexDriver = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
+                                         vrState.rightController.trigger < 0.40f);
+            bool hexDriverScrewTorque = (fabsf(rVel.x) > 0.65f);
+            if (handAtHingeScrewBoss && handHoldingHexDriver && hexDriverScrewTorque && (now - s_lastRetainingScrewTime > 1800)) {
+                s_lastRetainingScrewTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA TRUSS RETAINING CAP SCREW TORQUED & LOCKED (Rx: %.2f)", rVel.x);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap(VK_TAB);
+                SendKeyTap(VK_RETURN);
+                vrState.rightHapticPulse = 0.95f; // Mechanical torque stop thud (290 Hz)
+                vrState.leftHapticPulse = 0.60f;  // Helical thread tightening friction (170 Hz)
+            }
+
+            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Bearing Housing Oil Level Sight-Glass Inspection & Vent (ADR 0220)
+            static DWORD s_lastDraftFanVentTime = 0;
+            bool handAtDraftFanPedestal = (rightLocal.z > -0.42f && rightLocal.z < -0.16f && rightLocal.y > 0.05f && rightLocal.y < 0.35f &&
+                                           vrState.rightController.grip > 0.45f && vrState.rightController.grip < 0.85f &&
+                                           vrState.rightController.trigger < 0.40f);
+            bool draftFanVentTwist = (fabsf(rVel.x) > 0.65f);
+            if (handAtDraftFanPedestal && draftFanVentTwist && (now - s_lastDraftFanVentTime > 1800)) {
+                s_lastDraftFanVentTime = now;
+                VR_LOG_INFO("Environmental Gesture: HYDROPONICS DRAFT FAN BEARING VENT UNSEATED & PURGED (Rx: %.2f)", rVel.x);
+                SendKeyTap('E');
+                SendKeyTap('Q');
+                SendKeyTap(VK_TAB);
+                SendKeyTap(VK_SPACE);
+                vrState.rightHapticPulse = 0.85f; // Pneumatic vent surge (95 Hz)
+                vrState.leftHapticPulse = 0.55f;  // Knurled brass thread friction (150 Hz)
             }
         }
     }
