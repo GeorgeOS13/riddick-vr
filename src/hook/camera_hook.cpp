@@ -3453,6 +3453,98 @@ static LadderIntent UpdateLadder(LadderState& st, DWORD now,
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// GH #17 step 11: section 6d environmental interaction gesture state +
+// detection. The Update-local static s_lastEnvInteractTime (shared 800 ms
+// gate) hoisted here. Detection lives in UpdateEnvGestures below; ALL side
+// effects (SendKeyTap/HapticRequest/VR_LOG_INFO) stay at the call site in
+// CameraHook::Update with identical strings. No behavior change: same
+// volumes (Z < -0.20 vent pull / Z < -0.34 poke / Z < -0.30 palm), velocity
+// thresholds, grip/trigger gates, cooldown (800 ms), and evaluation order
+// (vent pry first, then right/left poke, then right/left palm).
+// NOTE: only the live (compiled) prefix is extracted here — the ~3000-line
+// #if 0-disabled legacy chain (ADR 0398: cryo-pod/keypad, vent unthread,
+// breaker, handwheel, decon lever, turret, drone shunt, crane, container,
+// airlock, rock-bolter-class, ...) stays inline for step 12.
+// ---------------------------------------------------------------------------
+struct EnvState {
+    DWORD lastEnvInteractTime = 0;
+};
+static EnvState s_env;
+
+struct EnvIntent {
+    bool ventPry = false;      // edge: log + 'E'/SPACE taps + 0.75 reload haptics
+    float ventLz = 0.0f;
+    float ventRz = 0.0f;
+    bool bioRight = false;     // edge: log + 'E' tap + 0.40 UI haptic (right)
+    float bioRightZ = 0.0f;
+    bool bioLeft = false;      // edge: log + 'E' tap + 0.40 UI haptic (left)
+    float bioLeftZ = 0.0f;
+    bool nanomedRight = false; // edge: log + 'E' tap + 0.50 UI haptic (right palm)
+    float nanomedRightZ = 0.0f;
+    bool nanomedLeft = false;  // edge: log + 'E' tap + 0.50 UI haptic (left palm)
+    float nanomedLeftZ = 0.0f;
+};
+
+static EnvIntent UpdateEnvGestures(EnvState& st, DWORD now,
+                                   const RiddickVRVector3& leftLocal,
+                                   const RiddickVRVector3& rightLocal,
+                                   const RiddickVRVector3& lVel,
+                                   const RiddickVRVector3& rVel,
+                                   float leftGrip, float rightGrip,
+                                   float leftTrigger, float rightTrigger,
+                                   bool isClimbingActive,
+                                   bool physicalBlockEngaged,
+                                   bool twoHandedActive) {
+    EnvIntent out;
+    if (!isClimbingActive && !physicalBlockEngaged && !twoHandedActive && (now - st.lastEnvInteractTime > 800)) {
+        // Vent Grate Prying (Dual-Hand Pull)
+        bool bothHandsForward = (leftLocal.z < -0.20f && rightLocal.z < -0.20f);
+        bool bothGripping = (leftGrip > 0.50f && rightGrip > 0.50f);
+        bool bothPullingBack = (lVel.z > 0.28f && rVel.z > 0.28f);
+
+        if (bothHandsForward && bothGripping && bothPullingBack) {
+            st.lastEnvInteractTime = now;
+            out.ventPry = true;
+            out.ventLz = lVel.z;
+            out.ventRz = rVel.z;
+        } else {
+            // Biometric Terminal / Retinal Scanner Poke (Single-Hand Pointed Poke)
+            bool rightPointing = (rightTrigger < 0.20f && rightGrip > 0.40f);
+            bool rightPoke = (rightLocal.z < -0.34f && rVel.z < -0.28f);
+
+            bool leftPointing = (leftTrigger < 0.20f && leftGrip > 0.40f);
+            bool leftPoke = (leftLocal.z < -0.34f && lVel.z < -0.28f);
+
+            // NanoMED Medical Regeneration Station Palm Touch (Flat Palm Contact - ADR 0019)
+            bool rightPalmOpen = (rightTrigger < 0.20f && rightGrip < 0.25f);
+            bool rightPalmTouch = (rightLocal.z < -0.30f && rVel.z < -0.25f);
+
+            bool leftPalmOpen = (leftTrigger < 0.20f && leftGrip < 0.25f);
+            bool leftPalmTouch = (leftLocal.z < -0.30f && lVel.z < -0.25f);
+
+            if (rightPointing && rightPoke) {
+                st.lastEnvInteractTime = now;
+                out.bioRight = true;
+                out.bioRightZ = rightLocal.z;
+            } else if (leftPointing && leftPoke) {
+                st.lastEnvInteractTime = now;
+                out.bioLeft = true;
+                out.bioLeftZ = leftLocal.z;
+            } else if (rightPalmOpen && rightPalmTouch) {
+                st.lastEnvInteractTime = now;
+                out.nanomedRight = true;
+                out.nanomedRightZ = rightLocal.z;
+            } else if (leftPalmOpen && leftPalmTouch) {
+                st.lastEnvInteractTime = now;
+                out.nanomedLeft = true;
+                out.nanomedLeftZ = leftLocal.z;
+            }
+        }
+    }
+    return out;
+}
+
 void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (!m_initialized || !vrState.vrActive) return;
 
@@ -8247,56 +8339,37 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // 6d. Interactive Environmental Manipulation, Vent Prying, and Retinal Biometrics (ADR 0016)
     // - Physical Vent Grate Prying: Both hands extended forward (Z < -0.20m) and pulling backward (Vz > +0.28 m/s) with grips held
     // - Biometric Terminal / Retinal Poke: Index pointing forward into terminal plane (Z < -0.34m, Vz < -0.28 m/s)
-    static DWORD s_lastEnvInteractTime = 0;
-    if (!isClimbingActive && !s_physicalBlockEngaged && !s_twoHandedStabilizationActive && (now - s_lastEnvInteractTime > 800)) {
-        // Vent Grate Prying (Dual-Hand Pull)
-        bool bothHandsForward = (leftLocal.z < -0.20f && rightLocal.z < -0.20f);
-        bool bothGripping = (vrState.leftController.grip > 0.50f && vrState.rightController.grip > 0.50f);
-        bool bothPullingBack = (lVel.z > 0.28f && rVel.z > 0.28f);
-
-        if (bothHandsForward && bothGripping && bothPullingBack) {
-            s_lastEnvInteractTime = now;
-            VR_LOG_INFO("Environmental Gesture: VENTILATION GRATE PRY / DUCT OPEN executed (Lz: %.2f, Rz: %.2f)", lVel.z, rVel.z);
+    // GH #17 step 11: detection delegated to UpdateEnvGestures (explicit
+    // EnvState); side effects (keys/haptics/logs) stay at call site.
+    EnvIntent envIntent = UpdateEnvGestures(s_env, now,
+        leftLocal, rightLocal, lVel, rVel,
+        vrState.leftController.grip, vrState.rightController.grip,
+        vrState.leftController.trigger, vrState.rightController.trigger,
+        isClimbingActive, s_physicalBlockEngaged, s_twoHandedStabilizationActive);
+    if (envIntent.ventPry) {
+        VR_LOG_INFO("Environmental Gesture: VENTILATION GRATE PRY / DUCT OPEN executed (Lz: %.2f, Rz: %.2f)", envIntent.ventLz, envIntent.ventRz);
+        SendKeyTap('E');
+        SendKeyTap(VK_SPACE);
+        HapticRequest(0, (0.75f), kHapticReload); // Heavy mechanical wrenching pulse
+        HapticRequest(1, (0.75f), kHapticReload);
+    } else {
+        if (envIntent.bioRight) {
+            VR_LOG_INFO("Environmental Gesture: BIOMETRIC TERMINAL TOUCH / RETINAL SCANNER (Right Hand, Z: %.2fm)", envIntent.bioRightZ);
             SendKeyTap('E');
-            SendKeyTap(VK_SPACE);
-            HapticRequest(0, (0.75f), kHapticReload); // Heavy mechanical wrenching pulse
-            HapticRequest(1, (0.75f), kHapticReload);
-        } else {
-            // Biometric Terminal / Retinal Scanner Poke (Single-Hand Pointed Poke)
-            bool rightPointing = (vrState.rightController.trigger < 0.20f && vrState.rightController.grip > 0.40f);
-            bool rightPoke = (rightLocal.z < -0.34f && rVel.z < -0.28f);
-
-            bool leftPointing = (vrState.leftController.trigger < 0.20f && vrState.leftController.grip > 0.40f);
-            bool leftPoke = (leftLocal.z < -0.34f && lVel.z < -0.28f);
-
-            // NanoMED Medical Regeneration Station Palm Touch (Flat Palm Contact - ADR 0019)
-            bool rightPalmOpen = (vrState.rightController.trigger < 0.20f && vrState.rightController.grip < 0.25f);
-            bool rightPalmTouch = (rightLocal.z < -0.30f && rVel.z < -0.25f);
-
-            bool leftPalmOpen = (vrState.leftController.trigger < 0.20f && vrState.leftController.grip < 0.25f);
-            bool leftPalmTouch = (leftLocal.z < -0.30f && lVel.z < -0.25f);
-
-            if (rightPointing && rightPoke) {
-                s_lastEnvInteractTime = now;
-                VR_LOG_INFO("Environmental Gesture: BIOMETRIC TERMINAL TOUCH / RETINAL SCANNER (Right Hand, Z: %.2fm)", rightLocal.z);
-                SendKeyTap('E');
-                HapticRequest(1, (0.40f), kHapticUi); // Digital tactile beep
-            } else if (leftPointing && leftPoke) {
-                s_lastEnvInteractTime = now;
-                VR_LOG_INFO("Environmental Gesture: BIOMETRIC TERMINAL TOUCH / RETINAL SCANNER (Left Hand, Z: %.2fm)", leftLocal.z);
-                SendKeyTap('E');
-                HapticRequest(0, (0.40f), kHapticUi); // Digital tactile beep
-            } else if (rightPalmOpen && rightPalmTouch) {
-                s_lastEnvInteractTime = now;
-                VR_LOG_INFO("Environmental Gesture: NANOMED MEDICAL REGENERATION STATION TOUCH (Right Palm, Z: %.2fm)", rightLocal.z);
-                SendKeyTap('E');
-                HapticRequest(1, (0.50f), kHapticUi); // Bio-restorative soothing haptic wave
-            } else if (leftPalmOpen && leftPalmTouch) {
-                s_lastEnvInteractTime = now;
-                VR_LOG_INFO("Environmental Gesture: NANOMED MEDICAL REGENERATION STATION TOUCH (Left Palm, Z: %.2fm)", leftLocal.z);
-                SendKeyTap('E');
-                HapticRequest(0, (0.50f), kHapticUi); // Bio-restorative soothing haptic wave
-            }
+            HapticRequest(1, (0.40f), kHapticUi); // Digital tactile beep
+        } else if (envIntent.bioLeft) {
+            VR_LOG_INFO("Environmental Gesture: BIOMETRIC TERMINAL TOUCH / RETINAL SCANNER (Left Hand, Z: %.2fm)", envIntent.bioLeftZ);
+            SendKeyTap('E');
+            HapticRequest(0, (0.40f), kHapticUi); // Digital tactile beep
+        } else if (envIntent.nanomedRight) {
+            VR_LOG_INFO("Environmental Gesture: NANOMED MEDICAL REGENERATION STATION TOUCH (Right Palm, Z: %.2fm)", envIntent.nanomedRightZ);
+            SendKeyTap('E');
+            HapticRequest(1, (0.50f), kHapticUi); // Bio-restorative soothing haptic wave
+        } else if (envIntent.nanomedLeft) {
+            VR_LOG_INFO("Environmental Gesture: NANOMED MEDICAL REGENERATION STATION TOUCH (Left Palm, Z: %.2fm)", envIntent.nanomedLeftZ);
+            SendKeyTap('E');
+            HapticRequest(0, (0.50f), kHapticUi); // Bio-restorative soothing haptic wave
+        }
 
 #if 0 // Disabled legacy procedural environmental gestures (ADR 0398) to prevent spurious key bursts
             // Cryo-Pod / Hibernation Canopy Emergency Seal Ejection (Dual Palm Push - ADR 0028)
@@ -8304,7 +8377,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                     (lVel.z < -0.28f && rVel.z < -0.28f) &&
                                     (vrState.leftController.trigger < 0.30f && vrState.rightController.trigger < 0.30f);
             if (bothHandsPushing) {
-                s_lastEnvInteractTime = now;
+                s_env.lastEnvInteractTime = now;
                 VR_LOG_INFO("Environmental Gesture: CRYO-POD / HIBERNATION CANOPY EMERGENCY EJECTION (Lz: %.2f, Rz: %.2f)", lVel.z, rVel.z);
                 SendKeyTap('E');
                 SendKeyTap(VK_SPACE);
@@ -8341,7 +8414,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                      (vrState.rightController.grip > 0.45f) &&
                                      (fabsf(rVel.x) > 0.45f || fabsf(rVel.y) > 0.45f);
             if (rightAtVentCorner) {
-                s_lastEnvInteractTime = now;
+                s_env.lastEnvInteractTime = now;
                 VR_LOG_INFO("Environmental Gesture: VENT FASTENER UNTHREADING RATCHET (Z: %.2fm, Vx: %.2f)", rightLocal.z, rVel.x);
                 SendKeyTap('E');
                 HapticRequest(1, (0.45f), kHapticUi); // Mechanical ratchet tooth click (160 Hz)
@@ -8350,8 +8423,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             // Tactical Circuit Breaker Sabotage & Power Box Lever (ADR 0043)
             bool rightAtBreakerBox = (rightLocal.z > -0.45f && rightLocal.z < -0.20f) && (vrState.rightController.grip > 0.50f) && (rVel.y < -0.40f);
             bool leftAtBreakerBox = (leftLocal.z > -0.45f && leftLocal.z < -0.20f) && (vrState.leftController.grip > 0.50f) && (lVel.y < -0.40f);
-            if ((rightAtBreakerBox || leftAtBreakerBox) && (now - s_lastEnvInteractTime > 800)) {
-                s_lastEnvInteractTime = now;
+            if ((rightAtBreakerBox || leftAtBreakerBox) && (now - s_env.lastEnvInteractTime > 800)) {
+                s_env.lastEnvInteractTime = now;
                 VR_LOG_INFO("Environmental Gesture: CIRCUIT BREAKER SABOTAGE / POWER CUT executed (Vy: %.2f)", rightAtBreakerBox ? rVel.y : lVel.y);
                 SendKeyTap('E');
                 if (rightAtBreakerBox) HapticRequest(1, (0.80f), kHapticReload); // Heavy mechanical contactor snap (140 Hz)
@@ -8374,8 +8447,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                      (rightLocal.y > 0.05f && rightLocal.y < 0.35f) &&
                                      (vrState.rightController.grip > 0.50f) &&
                                      (rVel.y < -0.60f);
-            if (rightAtDeconLever && (now - s_lastEnvInteractTime > 800)) {
-                s_lastEnvInteractTime = now;
+            if (rightAtDeconLever && (now - s_env.lastEnvInteractTime > 800)) {
+                s_env.lastEnvInteractTime = now;
                 VR_LOG_INFO("Environmental Gesture: BIO-CONTAINMENT DECONTAMINATION LEVER PULLED (Ry: %.2f)", rVel.y);
                 SendKeyTap('E');
                 HapticRequest(1, (0.80f), kHapticReload); // Pressurized decontamination air blast whoosh (140 Hz)
@@ -8385,8 +8458,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             bool bothHandsOverhead = (leftLocal.y > 0.25f && rightLocal.y > 0.25f);
             bool bothGrippingShield = (vrState.leftController.grip > 0.50f && vrState.rightController.grip > 0.50f);
             bool bothPullingShieldDown = (lVel.y < -0.50f && rVel.y < -0.50f);
-            if (bothHandsOverhead && bothGrippingShield && bothPullingShieldDown && (now - s_lastEnvInteractTime > 800)) {
-                s_lastEnvInteractTime = now;
+            if (bothHandsOverhead && bothGrippingShield && bothPullingShieldDown && (now - s_env.lastEnvInteractTime > 800)) {
+                s_env.lastEnvInteractTime = now;
                 VR_LOG_INFO("Environmental Gesture: EMERGENCY BLAST SHIELD LOWERED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
                 SendKeyTap('E');
                 HapticRequest(0, (0.95f), kHapticFinisher); // Heavy bulkhead slam impact (120 Hz)
@@ -8415,8 +8488,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             bool bothOverheadMech = (leftLocal.y > 0.20f && rightLocal.y > 0.20f) &&
                                     (vrState.leftController.grip > 0.50f && vrState.rightController.grip > 0.50f) &&
                                     (lVel.y < -0.45f && rVel.y < -0.45f);
-            if (bothOverheadMech && (now - s_lastEnvInteractTime > 800)) {
-                s_lastEnvInteractTime = now;
+            if (bothOverheadMech && (now - s_env.lastEnvInteractTime > 800)) {
+                s_env.lastEnvInteractTime = now;
                 VR_LOG_INFO("Environmental Gesture: MECH COCKPIT CANOPY SLAMMED & SEALED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
                 SendKeyTap('E');
                 HapticRequest(0, (0.85f), kHapticReload); // Pneumatic hermetic lock surge (120 Hz)
@@ -8532,8 +8605,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                      (leftLocal.z > -0.25f && leftLocal.z < 0.10f && rightLocal.z > -0.25f && rightLocal.z < 0.10f);
             bool bothPalmsUp = (vrState.leftController.grip < 0.60f && vrState.rightController.grip < 0.60f);
             bool bothShovingUp = (lVel.y > 0.85f && rVel.y > 0.85f);
-            if (hmdLookingUp && bothOverheadHatch && bothPalmsUp && bothShovingUp && (now - s_lastEnvInteractTime > 800)) {
-                s_lastEnvInteractTime = now;
+            if (hmdLookingUp && bothOverheadHatch && bothPalmsUp && bothShovingUp && (now - s_env.lastEnvInteractTime > 800)) {
+                s_env.lastEnvInteractTime = now;
                 VR_LOG_INFO("Environmental Gesture: OVERHEAD VENT HATCH SHOVED OPEN (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
                 SendKeyTap('E');
                 SendKeyTap(VK_SPACE);
@@ -11318,7 +11391,6 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
 #endif
         }
-    }
 
     // 7. Tactical Eyeshine & Flashlight Gestures (ADR 0012)
     // - Right Hand Temple Tap (Y > 0.08m, X > 0.12m): Toggles Eyeshine / Night Vision ('Q') with 0.85 haptic pulse
