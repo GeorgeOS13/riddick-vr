@@ -1167,8 +1167,43 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
                 projViews[eye].pose.position = m_locatedViews[eye].pose.position;
                 projViews[eye].pose.orientation = ExtractRoll(m_locatedViews[eye].pose.orientation);
 
-                // In action mode, map the native headset lens FOV 1:1 to cover 100% of the physical lenses with zero black bars
-                projViews[eye].fov = m_locatedViews[eye].fov;
+                // Configure in-game action FOV with aspect matching (ADR 0007 / ADR 0399):
+                // Enforce true 16:9 aspect ratio in tangent space so rendered world geometry
+                // is geometrically 1:1 and never squished horizontally.
+                const XrFovf& baseFov = m_locatedViews[eye].fov;
+                float tanLeft = tanf(baseFov.angleLeft);
+                float tanRight = tanf(baseFov.angleRight);
+                float tanUp = tanf(baseFov.angleUp);
+                float tanDown = tanf(baseFov.angleDown);
+
+                float vSpanBase = tanUp - tanDown;
+                float hSpanBase = tanRight - tanLeft;
+                float vc = (tanUp + tanDown) * 0.5f;
+                float hc = (tanRight + tanLeft) * 0.5f;
+
+                constexpr float ACTION_UNZOOM_FACTOR = 1.05f;
+                constexpr float TARGET_ASPECT = 16.0f / 9.0f;
+
+                float targetVSpan = vSpanBase * ACTION_UNZOOM_FACTOR;
+                float targetHSpan = targetVSpan * TARGET_ASPECT;
+
+                if (targetHSpan < hSpanBase * ACTION_UNZOOM_FACTOR) {
+                    targetHSpan = hSpanBase * ACTION_UNZOOM_FACTOR;
+                    targetVSpan = targetHSpan / TARGET_ASPECT;
+                }
+                if (targetVSpan < vSpanBase * ACTION_UNZOOM_FACTOR) {
+                    targetVSpan = vSpanBase * ACTION_UNZOOM_FACTOR;
+                    targetHSpan = targetVSpan * TARGET_ASPECT;
+                }
+
+                float halfH = targetHSpan * 0.5f;
+                float halfV = targetVSpan * 0.5f;
+
+                projViews[eye].fov.angleLeft = atanf(hc - halfH);
+                projViews[eye].fov.angleRight = atanf(hc + halfH);
+                projViews[eye].fov.angleDown = atanf(vc - halfV);
+                projViews[eye].fov.angleUp = atanf(vc + halfV);
+
                 projViews[eye].subImage.swapchain = m_swapchains[eye].handle;
                 projViews[eye].subImage.imageRect.offset = {0, 0};
                 projViews[eye].subImage.imageRect.extent = { (int32_t)m_swapchains[eye].width, (int32_t)m_swapchains[eye].height };
@@ -1178,20 +1213,10 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
             static XrPosef s_cinemaQuadPose = { {0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, -1.8f} };
             static bool s_hasCinemaPose = false;
             static float s_cinemaYaw = 0.0f;
-            static float s_cinemaTransitionAlpha = 0.0f; // ADR 0385: 0.0 (Action Projection) <-> 1.0 (Virtual Cinema Quad)
 
-            // Smooth transition rate: ~150ms transition (alpha step 0.08 per frame at 72-90 Hz)
             if (clientState.cinemaMode) {
-                s_cinemaTransitionAlpha = (s_cinemaTransitionAlpha < 1.0f) ? (s_cinemaTransitionAlpha + 0.08f) : 1.0f;
-            } else {
-                s_cinemaTransitionAlpha = (s_cinemaTransitionAlpha > 0.0f) ? (s_cinemaTransitionAlpha - 0.08f) : 0.0f;
-            }
-
-            // Smoothstep curve: t in [0, 1]
-            float t = s_cinemaTransitionAlpha * s_cinemaTransitionAlpha * (3.0f - 2.0f * s_cinemaTransitionAlpha);
-
-            if (s_cinemaTransitionAlpha > 0.001f) {
-                // Virtual Cinema Screen Active or In-Transition (ADR 0375 & ADR 0385)
+                // Floating Virtual Cinema Screen for Menus and Cutscenes (ADR 0375 / ADR 0399)
+                // Strict binary mode: render ONLY the 16:9 cinema quad at 1.8m (no expanding portal POV switch)
                 float qx = m_locatedViews[0].pose.orientation.x;
                 float qy = m_locatedViews[0].pose.orientation.y;
                 float qz = m_locatedViews[0].pose.orientation.z;
@@ -1221,17 +1246,14 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
                 float fwdX = -sinf(s_cinemaYaw);
                 float fwdZ = -cosf(s_cinemaYaw);
 
-                // ADR 0385: Smooth screen depth & scale expansion interpolation during mode transition
-                // At t = 1.0: distance = 1.80m, width = 2.0m (comfortable virtual cinema)
-                // At t -> 0.0: expands to distance = 0.85m, width = 3.6m (expanding cinematic portal into 3D world)
-                float cinemaDist = 0.85f + t * 0.95f;
-                float quadW = 3.6f - t * 1.6f;
-                constexpr float srcAspect = 16.0f / 9.0f;
-                float quadH = quadW / srcAspect;
+                constexpr float CINEMA_DIST = 1.80f;
+                constexpr float QUAD_W = 2.00f;
+                constexpr float SRC_ASPECT = 16.0f / 9.0f;
+                constexpr float QUAD_H = QUAD_W / SRC_ASPECT;
 
-                s_cinemaQuadPose.position.x = m_locatedViews[0].pose.position.x + fwdX * cinemaDist;
+                s_cinemaQuadPose.position.x = m_locatedViews[0].pose.position.x + fwdX * CINEMA_DIST;
                 s_cinemaQuadPose.position.y = m_locatedViews[0].pose.position.y;
-                s_cinemaQuadPose.position.z = m_locatedViews[0].pose.position.z + fwdZ * cinemaDist;
+                s_cinemaQuadPose.position.z = m_locatedViews[0].pose.position.z + fwdZ * CINEMA_DIST;
                 s_wasCinemaMode = true;
 
                 quadLayer.layerFlags = 0;
@@ -1241,10 +1263,10 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
 
                 // Crop to the exact 16:9 active region (matching stereo_renderer.cpp blit)
                 int32_t dstW = m_swapchains[0].width;
-                int32_t dstH = static_cast<int32_t>(dstW / srcAspect);
+                int32_t dstH = static_cast<int32_t>(dstW / SRC_ASPECT);
                 if (dstH > static_cast<int32_t>(m_swapchains[0].height)) {
                     dstH = m_swapchains[0].height;
-                    dstW = static_cast<int32_t>(dstH * srcAspect);
+                    dstW = static_cast<int32_t>(dstH * SRC_ASPECT);
                 }
                 int32_t dstX = (m_swapchains[0].width - dstW) / 2;
                 int32_t dstY = (m_swapchains[0].height - dstH) / 2;
@@ -1252,23 +1274,13 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
                 quadLayer.subImage.imageRect.offset = {dstX, dstY};
                 quadLayer.subImage.imageRect.extent = {dstW, dstH};
                 quadLayer.pose = s_cinemaQuadPose;
-                quadLayer.size.width = quadW;
-                quadLayer.size.height = quadH;
+                quadLayer.size.width = QUAD_W;
+                quadLayer.size.height = QUAD_H;
 
-                if (t >= 0.999f) {
-                    layers.push_back((XrCompositionLayerBaseHeader*)&quadLayer);
-                } else {
-                    // Transition phase: base is 3D projection layer, quad is expanding portal overlay
-                    layer.layerFlags = 0;
-                    layer.space = m_appSpace;
-                    layer.viewCount = 2;
-                    layer.views = projViews;
-                    layers.push_back((XrCompositionLayerBaseHeader*)&layer);
-                    layers.push_back((XrCompositionLayerBaseHeader*)&quadLayer);
-                }
+                layers.push_back((XrCompositionLayerBaseHeader*)&quadLayer);
             } else {
                 s_wasCinemaMode = false;
-                // IMMERSIVE 3D ACTION MODE:
+                // IMMERSIVE 3D ACTION MODE: Edge-to-edge projection layer with zero black bars
                 layer.layerFlags = 0;
                 layer.space = m_appSpace;
                 layer.viewCount = 2;

@@ -242,6 +242,16 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     uint32_t btns = vrState.rightController.buttons | vrState.leftController.buttons;
     static uint32_t s_prevButtons = 0;
     static bool s_cinemaModeState = true; // Default to Cinema Mode for initial game boot & main menu
+    static bool s_wasIn3D = false;
+
+    bool has3D = OpenGLProxy::Has3DGameplayProjection();
+
+    // Auto-transition into Full 3D VR Immersion the moment the game loads its 3D gameplay projection
+    if (has3D && !s_wasIn3D) {
+        s_cinemaModeState = false;
+        s_wasIn3D = true;
+        VR_LOG_INFO("3D Gameplay projection intercepted: transitioned from Menu Quad to Full 3D VR Immersion");
+    }
 
     // 1. Manual Cinema Mode Toggle via Button Y
     if ((btns & RIDDICK_VR_BTN_Y) && !(s_prevButtons & RIDDICK_VR_BTN_Y)) {
@@ -253,18 +263,17 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     bool btnMenu = (btns & RIDDICK_VR_BTN_MENU) != 0;
     bool prevBtnMenu = (s_prevButtons & RIDDICK_VR_BTN_MENU) != 0;
     if (btnMenu && !prevBtnMenu) {
-        s_cinemaModeState = true;
+        s_cinemaModeState = !s_cinemaModeState;
+        VR_LOG_INFO("Cinema Screen Mode toggled via Menu Button: %s", s_cinemaModeState ? "ON (Virtual Cinema Quad)" : "OFF (Full 3D VR Immersion)");
     }
 
-    // 3. Locomotion or Look Engagement Auto-Transitions from Menu to 3D Action Mode (0 black bars)
-    if (s_cinemaModeState && (fabsf(vrState.leftController.thumbstickX) > 0.35f ||
-                              fabsf(vrState.leftController.thumbstickY) > 0.35f ||
-                              fabsf(vrState.rightController.thumbstickX) > 0.35f)) {
-        s_cinemaModeState = false;
-        VR_LOG_INFO("Player engaged locomotion/look: auto-transitioned to Full 3D VR Immersion (0 black bars)");
+    // In menus/boot sequence (before 3D gameplay begins): strictly Cinema Mode quad screen.
+    // In 3D gameplay: cinemaMode is only engaged on pause/menu/toggle.
+    if (!has3D) {
+        vrState.cinemaMode = true;
+    } else {
+        vrState.cinemaMode = s_cinemaModeState || cursorShowing;
     }
-
-    vrState.cinemaMode = s_cinemaModeState || cursorShowing;
 
     // 0. Decoupled Motion Controller Aim Steering & Head Tracking Look Input (ADR 0008)
     // Only apply in-game look when not in cinema menu mode
@@ -6134,39 +6143,37 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     }
 
     // 5b. Physical Boxer Guard Pose Detection ("holding both fists up in front of the VR")
-    // Criteria:
-    // - Both controllers raised in front of chin/face level relative to HMD (y in -0.28 to +0.18)
-    // - Both controllers in front of face (z in -0.42 to -0.12)
-    // - Both hands close together horizontally (|x_left - x_right| < 0.35m)
-    // - Both controllers gripped / fists clenched (> 0.40 grip)
-    // - Hands steady (not throwing a punch, rSpeed < 1.4 m/s and lSpeed < 1.4 m/s)
-    // - Outside punch execution recovery window (> 250ms since last punch)
+    // Criteria (ADR 0400):
+    // - Both controllers raised in front of chest/chin/face level relative to HMD (y in -0.36 to +0.25)
+    // - Both controllers in front of face (z in -0.58 to -0.10)
+    // - Both hands natural shield distance (|x_left - x_right| < 0.48m)
+    // - Hands steady (not throwing a punch, rSpeed < 1.3 m/s and lSpeed < 1.3 m/s)
+    // - Outside punch execution recovery window (> 200ms since last punch)
     // - Not actively holding ladder rungs or climbing
-    bool chinLevel = (leftLocal.y >= -0.28f && leftLocal.y <= 0.18f) &&
-                     (rightLocal.y >= -0.28f && rightLocal.y <= 0.18f);
-    bool inFrontOfFace = (leftLocal.z >= -0.42f && leftLocal.z <= -0.12f) &&
-                         (rightLocal.z >= -0.42f && rightLocal.z <= -0.12f);
-    bool handsClose = fabsf(leftLocal.x - rightLocal.x) < 0.35f;
-    bool fistsClenched = (vrState.leftController.grip > 0.40f && vrState.rightController.grip > 0.40f);
-    bool handsSteady = (rSpeed < 1.4f && lSpeed < 1.4f);
-    bool notPunching = (now - s_lastPunchTime > 250);
+    bool chinLevel = (leftLocal.y >= -0.36f && leftLocal.y <= 0.25f) &&
+                     (rightLocal.y >= -0.36f && rightLocal.y <= 0.25f);
+    bool inFrontOfFace = (leftLocal.z >= -0.58f && leftLocal.z <= -0.10f) &&
+                         (rightLocal.z >= -0.58f && rightLocal.z <= -0.10f);
+    bool handsClose = fabsf(leftLocal.x - rightLocal.x) < 0.48f;
+    bool handsSteady = (rSpeed < 1.3f && lSpeed < 1.3f);
+    bool notPunching = (now - s_lastPunchTime > 200);
 
-    bool guardPoseDetected = !isClimbingActive && chinLevel && inFrontOfFace && handsClose && fistsClenched && handsSteady && notPunching;
+    bool guardPoseDetected = !isClimbingActive && chinLevel && inFrontOfFace && handsClose && handsSteady && notPunching;
 
     // Temporal Hysteresis & Debouncing:
-    // Require guard pose to hold for ~60ms to engage (prevents false-triggers during punches)
+    // Require guard pose to hold for ~50ms to engage (prevents false-triggers during punches)
     if (guardPoseDetected) {
         s_guardPoseReleaseTimer = 0;
         if (s_guardPoseHoldTimer == 0) {
             s_guardPoseHoldTimer = now;
-        } else if (now - s_guardPoseHoldTimer >= 60) {
+        } else if (now - s_guardPoseHoldTimer >= 50) {
             s_physicalBlockEngaged = true;
         }
     } else {
         s_guardPoseHoldTimer = 0;
         if (s_physicalBlockEngaged) {
             // If throwing a punch, release block instantly (0ms)
-            if (rSpeed > 1.5f || lSpeed > 1.5f) {
+            if (rSpeed > 1.4f || lSpeed > 1.4f) {
                 s_physicalBlockEngaged = false;
                 s_guardPoseReleaseTimer = 0;
             } else {
