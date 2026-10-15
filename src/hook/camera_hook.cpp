@@ -793,23 +793,51 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (wantA != s_aPressed) { SendKey('A', wantA); s_aPressed = wantA; }
     if (wantD != s_dPressed) { SendKey('D', wantD); s_dPressed = wantD; }
 
+    // Left Thumbstick Click Sprint & Outer Deflection Run (ADR 0391)
+    static bool s_sprintActive = false;
+    static bool s_prevStickLeftClick = false;
+    static bool s_shiftDown = false;
+    bool stickLeftClick = (btns & RIDDICK_VR_BTN_STICK_LEFT) != 0;
+
+    if (stickLeftClick && !s_prevStickLeftClick && wantW) {
+        s_sprintActive = !s_sprintActive;
+        if (s_sprintActive) {
+            vrState.leftHapticPulse = 0.25f; // Crisp tactile click on sprint engage
+        }
+    }
+    s_prevStickLeftClick = stickLeftClick;
+
+    // Disengage sprint if player stops moving forward or enters crouch/prone
+    if (!wantW || s_isPhysicallyCrouched || s_isDeepProne || isClimbingActive) {
+        s_sprintActive = false;
+    }
+
+    bool isSprinting = wantW && (s_sprintActive || stickLY > 0.92f);
+    if (isSprinting != s_shiftDown) {
+        SendKey(VK_SHIFT, isSprinting);
+        s_shiftDown = isSprinting;
+    }
+
     // Prone crawl pacing (ADR 0030): rhythmic tactile crawl heartbeat in deep prone
     static DWORD s_lastPronePulseTime = 0;
     if (s_isDeepProne && (wantW || wantS || wantA || wantD) && (now - s_lastPronePulseTime > 600)) {
         s_lastPronePulseTime = now;
-        vrState.leftHapticPulse = 0.15f; // Subtle stealth crawl pulse (85 Hz)
+        vrState.leftHapticPulse = 0.12f; // Subtle stealth crawl pulse (85 Hz)
     }
 
-    // EVA Spacewalk Magnetic Boots Stride Cadence (ADR 0040)
-    static DWORD s_lastMagBootStepTime = 0;
-    static bool s_magBootLeftFoot = false;
-    if (!s_isPhysicallyCrouched && !s_isDeepProne && !isClimbingActive && (wantW || wantS || wantA || wantD) && (now - s_lastMagBootStepTime > 520)) {
-        s_lastMagBootStepTime = now;
-        s_magBootLeftFoot = !s_magBootLeftFoot;
-        if (s_magBootLeftFoot) {
-            vrState.leftHapticPulse = 0.35f; // Low-frequency magnetic boot lock (75 Hz)
+    // Refined Locomotion Footstep Cadence (ADR 0392):
+    // Subtle, low-amplitude tactile gait ticks during upright locomotion (0.06f walk, 0.12f sprint)
+    static DWORD s_lastStepPulseTime = 0;
+    static bool s_stepLeftFoot = false;
+    DWORD stepInterval = isSprinting ? 360 : 540;
+    if (!s_isPhysicallyCrouched && !s_isDeepProne && !isClimbingActive && (wantW || wantS || wantA || wantD) && (now - s_lastStepPulseTime > stepInterval)) {
+        s_lastStepPulseTime = now;
+        s_stepLeftFoot = !s_stepLeftFoot;
+        float stepPulse = isSprinting ? 0.12f : 0.06f;
+        if (s_stepLeftFoot) {
+            vrState.leftHapticPulse = stepPulse;
         } else {
-            vrState.rightHapticPulse = 0.35f;
+            vrState.rightHapticPulse = stepPulse;
         }
     }
 
