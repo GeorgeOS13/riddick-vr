@@ -1511,6 +1511,25 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                           vrState.rightController.trigger > 0.65f);
             bool batonShieldBashThrust = (batonShieldBashStance && rVel.z < -1.35f && lVel.z < -1.15f);
 
+            // Inmate Pit Brawl Clinch Thai Plum Elbow Spike & Cranial Fracture (ADR 0229)
+            static DWORD s_lastThaiPlumElbowTime = 0;
+            static char s_thaiPlumElbowDirKey = 'A';
+            bool thaiPlumElbowStance = (handsDistSledge < 0.25f &&
+                                        leftLocal.y > -0.10f && rightLocal.y > 0.15f &&
+                                        vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
+            bool thaiPlumElbowPlunge = (thaiPlumElbowStance && rVel.y < -1.30f && lVel.z > 0.60f);
+            if (thaiPlumElbowPlunge && (now - s_lastThaiPlumElbowTime > 2000)) {
+                s_thaiPlumElbowDirKey = (rVel.x > 0.0f) ? 'D' : 'A';
+            }
+
+            // Security Guard Stun Baton Forward High-Voltage Grounding Thrust & Arc Discharge Ring (ADR 0230)
+            static DWORD s_lastGroundingThrustTime = 0;
+            bool groundingThrustStance = ((leftLocal.y < -0.25f || s_isPhysicallyCrouched) &&
+                                          handsDistSledge < 0.24f &&
+                                          vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
+                                          vrState.rightController.trigger > 0.65f);
+            bool groundingThrustLunge = (groundingThrustStance && rVel.z < -1.35f && lVel.z < -1.10f);
+
             // Inmate Pit Brawl Outside Leg Hook Sweep & Ground Knee Drop (ADR 0209)
             static DWORD s_lastOutsideLegSweepTime = 0;
             static DWORD s_outsideLegSweepHookTime = 0;
@@ -1557,7 +1576,37 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_crossBlockHoldStart = 0;
             }
 
-            if (batonShieldBashThrust && (now - s_lastBatonBashTime > 2000)) {
+            if (groundingThrustLunge && (now - s_lastGroundingThrustTime > 2000)) {
+                s_lastGroundingThrustTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Tactical Melee: STUN BATON GROUNDING THRUST & ARC RING EXECUTED (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
+                SendKey('C', true);
+                SendKey('W', true);
+                SendKey('Q', true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, false);
+                SendKey('Q', false);
+                SendKey('W', false);
+                SendKey('C', false);
+                vrState.rightHapticPulse = 0.98f; // Closed-circuit dielectric breakdown (350 Hz)
+                vrState.leftHapticPulse = 0.90f;  // Floor conduit surge (60 Hz)
+            } else if (thaiPlumElbowPlunge && (now - s_lastThaiPlumElbowTime > 2000)) {
+                s_lastThaiPlumElbowTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL THAI PLUM ELBOW SPIKE STRUCK (Dir: %c, Ry: %.2f)", s_thaiPlumElbowDirKey, rVel.y);
+                SendKey('W', true);
+                SendKey(s_thaiPlumElbowDirKey, true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, false);
+                SendKey(s_thaiPlumElbowDirKey, false);
+                SendKey('W', false);
+                vrState.leftHapticPulse = 0.85f;  // Cervical collar tension (220 Hz)
+                vrState.rightHapticPulse = 0.98f; // Cranial bone fracture shockwave (350 Hz)
+            } else if (batonShieldBashThrust && (now - s_lastBatonBashTime > 2000)) {
                 s_lastBatonBashTime = now;
                 s_lastPunchTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON KINETIC SHIELD BASH & ARC BURST EXECUTED (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
@@ -4667,6 +4716,46 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_RETURN);
                 vrState.rightHapticPulse = 0.95f; // Forged dog-clamp seating thuds (270 Hz)
                 vrState.leftHapticPulse = 0.95f;  // Cast-iron clamp hinge swing (130 Hz)
+            }
+
+            // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Thermal Blanket Velcro Sealing Flap (ADR 0227)
+            static DWORD s_lastThermalBlanketTime = 0;
+            bool handHoldingBlanketFlap = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
+                                           vrState.leftController.grip > 0.55f);
+            bool handPressingVelcroSeam = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
+                                           vrState.rightController.trigger > 0.50f);
+            bool velcroSeamStroke = (fabsf(rVel.y) > 0.50f || fabsf(rVel.x) > 0.50f);
+            if (handHoldingBlanketFlap && handPressingVelcroSeam && velcroSeamStroke && (now - s_lastThermalBlanketTime > 1800)) {
+                s_lastThermalBlanketTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA TRUSS THERMAL BLANKET VELCRO SEAM SEALED (Ry: %.2f, Rx: %.2f)", rVel.y, rVel.x);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap(VK_TAB);
+                SendKeyTap('Q');
+                vrState.rightHapticPulse = 0.90f; // Magnetic border snap click (260 Hz)
+                vrState.leftHapticPulse = 0.55f;  // Velcro seam friction (180 Hz)
+            }
+
+            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Primary Air Plenum Ash Hoist Bucket Winch Crank (ADR 0228)
+            static DWORD s_lastAshWinchTime = 0;
+            static int s_ashWinchRevs = 0;
+            bool handAtAshWinch = (rightLocal.z > -0.42f && rightLocal.z < -0.16f && rightLocal.y > -0.20f && rightLocal.y < 0.25f &&
+                                   vrState.rightController.grip > 0.55f);
+            float ashWinchSpeed = sqrtf(rVel.x * rVel.x + rVel.y * rVel.y);
+            if (handAtAshWinch && ashWinchSpeed > 0.48f && (now - s_lastAshWinchTime > 250)) {
+                s_lastAshWinchTime = now;
+                s_ashWinchRevs++;
+                VR_LOG_INFO("Environmental Gesture: HYDROPONICS ASH HOIST WINCH CRANK #%d (Speed: %.2f)", s_ashWinchRevs, ashWinchSpeed);
+                vrState.rightHapticPulse = 0.55f; // Cable drum winding rumble (140 Hz)
+                if (s_ashWinchRevs >= 3) {
+                    s_ashWinchRevs = 0;
+                    VR_LOG_INFO("Environmental Gesture: ASH HOIST BUCKET ELEVATED TO HEARTH FLOOR");
+                    SendKeyTap('E');
+                    SendKeyTap('Q');
+                    SendKeyTap(VK_SPACE);
+                    SendKeyTap(VK_TAB);
+                    vrState.rightHapticPulse = 0.95f; // Hoist dog ratchet thud (220 Hz)
+                }
             }
         }
     }
