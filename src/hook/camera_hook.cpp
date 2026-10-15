@@ -1259,6 +1259,31 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             bool kimuraCrank = (rVel.y > 1.05f && fabsf(rVel.x) > 0.85f);
             bool isKimuraFracture = kimuraGrip && kimuraCrank;
 
+            // Inmate Pit Brawl Standing Arm-Triangle Choke & Tracheal Clamp (ADR 0185)
+            static DWORD s_lastArmTriangleTime = 0;
+            static DWORD s_armTriangleStartTime = 0;
+            bool armTriangleGrapple = (leftLocal.z > -0.35f && leftLocal.z < -0.10f && vrState.leftController.grip > 0.65f &&
+                                       handsDistSledge < 0.20f && vrState.rightController.grip > 0.65f &&
+                                       vrState.leftController.trigger > 0.60f && vrState.rightController.trigger > 0.60f);
+            bool isArmTriangleReady = false;
+            if (armTriangleGrapple) {
+                if (s_armTriangleStartTime == 0) s_armTriangleStartTime = now;
+                if (now - s_armTriangleStartTime >= 300 && (now - s_lastArmTriangleTime > 2000)) {
+                    isArmTriangleReady = true;
+                }
+            } else {
+                s_armTriangleStartTime = 0;
+            }
+
+            // Security Guard Stun Baton Upward Diagonal Cross-Parry & Counter-Discharge (ADR 0186)
+            static DWORD s_lastDiagonalParryTime = 0;
+            bool batonDiagonalParryGrip = (handsDistSledge < 0.24f &&
+                                           vrState.rightController.grip > 0.60f && vrState.rightController.trigger > 0.65f &&
+                                           vrState.leftController.grip > 0.50f &&
+                                           rightLocal.y > 0.05f && rightLocal.y < 0.35f);
+            bool batonDiagonalParryThrust = (rVel.y > 1.15f && fabsf(rVel.x) > 0.85f);
+            bool isBatonDiagonalParry = batonDiagonalParryGrip && batonDiagonalParryThrust;
+
             // Security Guard Stun Baton Radial Kinetic Sweep & Electrical Stun Ring (ADR 0182)
             static DWORD s_lastRadialSweepTime = 0;
             bool batonRadialGrip = (handsDistSledge < 0.25f &&
@@ -1268,7 +1293,36 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                      ((rVel.x > 0.0f && lVel.x > 0.0f) || (rVel.x < 0.0f && lVel.x < 0.0f)));
             bool isBatonRadialSweep = batonRadialGrip && batonRadialSweep;
 
-            if (isBatonRadialSweep && (now - s_lastRadialSweepTime > 2000)) {
+            if (isBatonDiagonalParry && (now - s_lastDiagonalParryTime > 1800)) {
+                s_lastDiagonalParryTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Tactical Melee: STUN BATON UPWARD DIAGONAL CROSS-PARRY & DISCHARGE EXECUTED (Ry: %.2f, Rx: %.2f)", rVel.y, rVel.x);
+                mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
+                SendKey('W', true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, false);
+                SendKey('W', false);
+                vrState.rightHapticPulse = 0.98f; // Kinetic deflection shockwave (330 Hz)
+                vrState.leftHapticPulse = 0.75f;  // Off-hand conductive arc feedback (160 Hz)
+            } else if (isArmTriangleReady) {
+                s_lastArmTriangleTime = now;
+                s_armTriangleStartTime = 0;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL STANDING ARM-TRIANGLE CHOKE LOCKED & EXECUTED");
+                SendKey('W', true);
+                SendKey('C', true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, false);
+                SendKey('C', false);
+                SendKey('W', false);
+                vrState.leftHapticPulse = 0.85f;  // Vascular occlusion compression (140 Hz)
+                vrState.rightHapticPulse = 0.98f; // Cervical submission snap (280 Hz)
+            } else if (isBatonRadialSweep && (now - s_lastRadialSweepTime > 2000)) {
                 s_lastRadialSweepTime = now;
                 s_lastPunchTime = now;
                 char dirKey = (rVel.x > 0.0f) ? 'D' : 'A';
@@ -3623,6 +3677,41 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 vrState.rightHapticPulse = 0.95f; // Steam manifold purge blast (240 Hz)
                 vrState.leftHapticPulse = 0.70f;  // Foregrip steam vibration (110 Hz)
+            }
+
+            // Dark Athena EVA Solar Collector Truss Articulation Lock Wedge Mallet Strike (ADR 0183)
+            static DWORD s_lastWedgeStrikeTime = 0;
+            bool handAtTrussWedge = (rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > 0.10f && rightLocal.y < 0.42f &&
+                                     vrState.rightController.grip > 0.60f);
+            bool wedgeDownwardHammer = (rVel.y < -1.20f);
+            if (handAtTrussWedge && wedgeDownwardHammer && (now - s_lastWedgeStrikeTime > 1500)) {
+                s_lastWedgeStrikeTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA SOLAR TRUSS LOCK WEDGE STRUCK & SEATED (Ry: %.2f)", rVel.y);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKeyTap(VK_RETURN);
+                vrState.rightHapticPulse = 0.98f; // Wedge percussion impact shockwave (270 Hz)
+                vrState.leftHapticPulse = 0.65f;  // Truss resonant chime (110 Hz)
+            }
+
+            // Subterranean Hydroponics Bio-Waste Incinerator Secondary Air Preheater Bypass Flap (ADR 0184)
+            static DWORD s_lastPreheaterBypassTime = 0;
+            bool bothAtPreheaterBypass = (twoHandDist > 0.22f && twoHandDist < 0.45f &&
+                                          leftLocal.z > -0.40f && leftLocal.z < -0.16f && rightLocal.z > -0.40f && rightLocal.z < -0.16f &&
+                                          leftLocal.y > -0.20f && leftLocal.y < 0.20f && rightLocal.y > -0.20f && rightLocal.y < 0.20f &&
+                                          vrState.leftController.grip > 0.55f && vrState.rightController.grip > 0.55f);
+            bool preheaterBypassRearwardHaul = (lVel.z > 0.75f && rVel.z > 0.75f);
+            if (bothAtPreheaterBypass && preheaterBypassRearwardHaul && (now - s_lastPreheaterBypassTime > 1800)) {
+                s_lastPreheaterBypassTime = now;
+                VR_LOG_INFO("Environmental Gesture: HYDROPONICS PREHEATER BYPASS FLAP TRIPPED (Lz: %.2f, Rz: %.2f)", lVel.z, rVel.z);
+                SendKeyTap('E');
+                SendKeyTap('Q');
+                SendKeyTap(VK_TAB);
+                SendKeyTap(VK_SPACE);
+                vrState.leftHapticPulse = 0.95f;  // Bypass seat detent thud (250 Hz)
+                vrState.rightHapticPulse = 0.95f;
             }
         }
     }
