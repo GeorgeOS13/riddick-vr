@@ -1369,6 +1369,21 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             bool firemansWhipThrow = (s_firemansLoadTime > 0 && (now - s_firemansLoadTime < 500) &&
                                       (fabsf(lVel.x) > 1.25f || fabsf(rVel.x) > 1.25f));
 
+            // Inmate Pit Brawl Suloev Stretch Hamstring Submission Lock (ADR 0201)
+            static DWORD s_lastSuloevTime = 0;
+            bool suloevLowCrouch = (s_isPhysicallyCrouched || s_isDeepProne || leftLocal.y < -0.30f);
+            bool suloevHookHold = (handsDistSledge < 0.25f && leftLocal.y < -0.35f &&
+                                   vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
+            bool suloevArchPull = (lVel.y > 1.05f && rVel.y > 1.05f);
+
+            // Security Guard Stun Baton Forward High-Arc Overhead Vault Drop Strike (ADR 0202)
+            static DWORD s_lastVaultDropTime = 0;
+            bool isLookingDownward = (s_lastHmdPitch < -0.436f); // < -25 deg downward look
+            bool batonOverheadVault = (rightLocal.y > 0.20f &&
+                                       vrState.rightController.grip > 0.60f &&
+                                       vrState.rightController.trigger > 0.65f);
+            bool batonVaultPlunge = (rVel.y < -1.35f);
+
             // Security Guard Stun Baton Forward Two-Handed Cross-Chest Block & Arc Thrust Disruption (ADR 0198)
             static DWORD s_lastCrossThrustTime = 0;
             static DWORD s_crossBlockHoldStart = 0;
@@ -1392,7 +1407,35 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_crossBlockHoldStart = 0;
             }
 
-            if (isCrossThrustReady && (now - s_lastCrossThrustTime > 2000)) {
+            if (isLookingDownward && batonOverheadVault && batonVaultPlunge && (now - s_lastVaultDropTime > 2000)) {
+                s_lastVaultDropTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Tactical Melee: STUN BATON HIGH-ARC OVERHEAD VAULT DROP STRIKE EXECUTED (Ry: %.2f)", rVel.y);
+                SendKey(VK_SPACE, true);
+                SendKey('S', true);
+                SendKey('W', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('W', false);
+                SendKey('S', false);
+                SendKey(VK_SPACE, false);
+                vrState.rightHapticPulse = 0.98f; // High-voltage arc detonation blast (350 Hz)
+                vrState.leftHapticPulse = 0.95f;  // Heavy landing deck dispersion (55 Hz)
+            } else if (suloevLowCrouch && suloevHookHold && suloevArchPull && (now - s_lastSuloevTime > 2000)) {
+                s_lastSuloevTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL SULOEV STRETCH SUBMISSION EXECUTED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
+                SendKey('C', true);
+                SendKey('S', true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, false);
+                SendKey('S', false);
+                SendKey('C', false);
+                vrState.leftHapticPulse = 0.98f;  // Tendon tear & hip dislocation shockwave (330 Hz)
+                vrState.rightHapticPulse = 0.98f;
+            } else if (isCrossThrustReady && (now - s_lastCrossThrustTime > 2000)) {
                 s_lastCrossThrustTime = now;
                 s_crossBlockHoldStart = 0;
                 s_lastPunchTime = now;
@@ -4033,6 +4076,41 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_RETURN);
                 vrState.rightHapticPulse = 0.90f; // Detent notch engagement click (240 Hz)
                 vrState.leftHapticPulse = 0.65f;  // Quadrant ratchet friction (150 Hz)
+            }
+
+            // Dark Athena EVA Solar Collector Truss Articulation Lock Ring Pinch Pin Insertion (ADR 0199)
+            static DWORD s_lastPinchPinTime = 0;
+            bool handAtPinchGuide = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
+                                     vrState.leftController.grip > 0.55f);
+            bool handHoldingPinchPin = (twoHandDist < 0.22f && vrState.rightController.grip > 0.60f);
+            bool pinchPinForwardThrust = (rVel.z < -0.90f);
+            if (handAtPinchGuide && handHoldingPinchPin && pinchPinForwardThrust && (now - s_lastPinchPinTime > 1800)) {
+                s_lastPinchPinTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA TRUSS PINCH PIN DRIVEN & DETENT SEATED (Rz: %.2f)", rVel.z);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap(VK_TAB);
+                SendKeyTap(VK_RETURN);
+                vrState.rightHapticPulse = 0.98f; // Spring-loaded detent lock click (290 Hz)
+                vrState.leftHapticPulse = 0.65f;  // Guide sleeve friction (190 Hz)
+            }
+
+            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Electrostatic Precipitator Rapping Rod Impact (ADR 0200)
+            static DWORD s_lastRappingRodTime = 0;
+            bool bothAtRappingRod = (twoHandDist < 0.28f &&
+                                     leftLocal.z > -0.42f && leftLocal.z < -0.16f && rightLocal.z > -0.42f && rightLocal.z < -0.16f &&
+                                     leftLocal.y > -0.20f && leftLocal.y < 0.25f && rightLocal.y > -0.20f && rightLocal.y < 0.25f &&
+                                     vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f);
+            bool rappingRodImpact = (rVel.z < -1.15f);
+            if (bothAtRappingRod && rappingRodImpact && (now - s_lastRappingRodTime > 2000)) {
+                s_lastRappingRodTime = now;
+                VR_LOG_INFO("Environmental Gesture: HYDROPONICS PRECIPITATOR RAPPING ROD IMPACTED (Rz: %.2f)", rVel.z);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap('Q');
+                SendKeyTap(VK_TAB);
+                vrState.rightHapticPulse = 0.98f; // Rapping anvil impact shockwave (270 Hz)
+                vrState.leftHapticPulse = 0.70f;  // Precipitator plate vibration rumble (85 Hz)
             }
         }
     }
