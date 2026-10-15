@@ -1075,6 +1075,19 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             bool batonLinearSpearThrust = (rVel.z < -1.35f);
             bool isBatonChargedSpear = batonChargedSpearArmed && batonSpearBracing && batonLinearSpearThrust;
 
+            // Inmate Pit Brawl Collar Tie Clinch & Headbutt Stun (ADR 0149)
+            static DWORD s_lastHeadbuttTime = 0;
+            bool collarTieClinchGrip = (leftLocal.z > -0.35f && leftLocal.z < -0.12f && leftLocal.y > -0.15f && leftLocal.y < 0.15f && vrState.leftController.grip > 0.65f);
+            bool headbuttKineticSurge = (lVel.z > 0.55f && rVel.z < -1.05f) || (rVel.z < -1.25f);
+            bool isClinchHeadbutt = collarTieClinchGrip && headbuttKineticSurge;
+
+            // Security Guard Stun Baton Ground Pin & Taser Kneel (ADR 0150)
+            static DWORD s_lastBatonGroundPinTime = 0;
+            bool lowGroundPosture = (s_isPhysicallyCrouched || s_isDeepProne || rightLocal.y < -0.35f);
+            bool batonGroundEnergized = (vrState.rightController.grip > 0.60f && vrState.rightController.trigger > 0.65f);
+            bool verticalGroundPlunge = (rVel.y < -1.15f);
+            bool isBatonGroundPin = lowGroundPosture && batonGroundEnergized && verticalGroundPlunge;
+
             if (isInductionOverheated) {
                 VR_LOG_INFO("Tactical Melee: STUN BATON INDUCTION COIL OVERHEAT ARC DETONATED");
                 SendKey('S', true);
@@ -1094,6 +1107,32 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap('Q');
                 vrState.leftHapticPulse = 0.98f;  // High-voltage electrostatic arc ring shockwave (300 Hz)
+                vrState.rightHapticPulse = 0.98f;
+            } else if (isBatonGroundPin && (now - s_lastBatonGroundPinTime > 1500)) {
+                s_lastBatonGroundPinTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Tactical Melee: STUN BATON GROUND PIN & TASER KNEEL (Ry: %.2f)", rVel.y);
+                SendKey('C', true);
+                SendKey('S', true);
+                SendKey('Q', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('Q', false);
+                SendKey('S', false);
+                SendKey('C', false);
+                vrState.rightHapticPulse = 0.98f; // Heavy deck collision & ground circuit arc (260 Hz)
+                vrState.leftHapticPulse = 0.65f;
+            } else if (isClinchHeadbutt && (now - s_lastHeadbuttTime > 1500)) {
+                s_lastHeadbuttTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL COLLAR TIE CLINCH & HEADBUTT STUN (Lz: %.2f, Rz: %.2f)", lVel.z, rVel.z);
+                SendKey('W', true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, false);
+                SendKey('W', false);
+                vrState.leftHapticPulse = 0.98f;  // Concussive cranial skull collision shockwave (180 Hz)
                 vrState.rightHapticPulse = 0.98f;
             } else if (sternumElbowSmash && (now - s_lastLiverElbowComboTime > 1500)) {
                 s_lastLiverElbowComboTime = now;
@@ -2891,6 +2930,52 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     SendKeyTap('W');
                     vrState.leftHapticPulse = 0.95f;  // Siphon surge pop & drainage rumble (120 Hz)
                     vrState.rightHapticPulse = 0.95f;
+                }
+            }
+
+            // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Grease Gun Injection (ADR 0147)
+            static DWORD s_lastGreaseInjectTime = 0;
+            static DWORD s_greaseInjectStart = 0;
+            bool handAtTrussHingeNipple = (rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > 0.10f && rightLocal.y < 0.40f &&
+                                           vrState.rightController.grip > 0.60f && vrState.rightController.trigger > 0.70f &&
+                                           twoHandDist < 0.24f);
+            if (handAtTrussHingeNipple) {
+                if (s_greaseInjectStart == 0) s_greaseInjectStart = now;
+                DWORD injectDuration = now - s_greaseInjectStart;
+                vrState.rightHapticPulse = 0.50f; // Continuous fluid displacement buzz (160 Hz)
+                vrState.leftHapticPulse = 0.35f;
+                if (injectDuration >= 400 && (now - s_lastGreaseInjectTime > 1500)) {
+                    s_lastGreaseInjectTime = now;
+                    s_greaseInjectStart = 0;
+                    VR_LOG_INFO("Environmental Gesture: EVA TRUSS HINGE GREASE INJECTION COMPLETE & UNSEIZED");
+                    SendKeyTap('E');
+                    SendKeyTap(VK_RETURN);
+                    SendKeyTap(VK_TAB);
+                    vrState.rightHapticPulse = 0.85f; // Hydraulic unseize pop (90 Hz)
+                    vrState.leftHapticPulse = 0.60f;
+                }
+            } else {
+                s_greaseInjectStart = 0;
+            }
+
+            // Subterranean Hydroponics Algae Scraping Spatula Reciprocating Blade Stroke (ADR 0148)
+            static DWORD s_lastAlgaeScrapeTime = 0;
+            static int s_algaeScrapeCount = 0;
+            bool bladeAtAlgaeTube = (rightLocal.z > -0.40f && rightLocal.z < -0.16f && rightLocal.y > -0.25f && rightLocal.y < 0.20f &&
+                                     vrState.rightController.grip > 0.55f);
+            float algaeScrapeSpeed = sqrtf(rVel.x * rVel.x + rVel.y * rVel.y);
+            if (bladeAtAlgaeTube && algaeScrapeSpeed > 0.55f && (now - s_lastAlgaeScrapeTime > 200)) {
+                s_lastAlgaeScrapeTime = now;
+                s_algaeScrapeCount++;
+                VR_LOG_INFO("Environmental Gesture: HYDROPONICS ALGAE TUBE SCRAPING STROKE #%d (Speed: %.2f)", s_algaeScrapeCount, algaeScrapeSpeed);
+                vrState.rightHapticPulse = 0.48f; // Gritty quartz blade friction rasp (210 Hz)
+                if (s_algaeScrapeCount >= 4) {
+                    s_algaeScrapeCount = 0;
+                    VR_LOG_INFO("Environmental Gesture: ALGAE BIOMASS CLEARED FROM QUARTZ TUBE");
+                    SendKeyTap('E');
+                    SendKeyTap(VK_TAB);
+                    SendKeyTap(VK_SPACE);
+                    vrState.rightHapticPulse = 0.75f; // Quartz resonance clean chime (290 Hz)
                 }
             }
         }
