@@ -991,6 +991,14 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             bool dartCounterJabStrike = (s_dartExtractedTime > 0 && (now - s_dartExtractedTime < 800) &&
                                         rVel.z < -1.15f && rightLocal.y > -0.10f && rightLocal.y < 0.22f);
 
+            // Inmate Pit Brawl Double-Ear Concussive Clap Strike (ADR 0128)
+            static DWORD s_lastDoubleEarClapTime = 0;
+            bool bothHandsOpenForClap = (vrState.leftController.trigger < 0.25f && vrState.rightController.trigger < 0.25f &&
+                                         vrState.leftController.grip < 0.35f && vrState.rightController.grip < 0.35f);
+            bool lateralInwardClapAcc = (lVel.x > 0.95f && rVel.x < -0.95f);
+            bool clapCorridor = (handsDistSledge < 0.24f && rightLocal.y > -0.10f && rightLocal.y < 0.20f && rightLocal.z > -0.35f && rightLocal.z < -0.10f);
+            bool isDoubleEarClap = bothHandsOpenForClap && lateralInwardClapAcc && clapCorridor;
+
             if (isDischargingArcWave) {
                 VR_LOG_INFO("Tactical Melee: STUN BATON OVERLOAD RADIAL ARC WAVE DISCHARGED (Lx: %.2f, Rx: %.2f)", lVel.x, rVel.x);
                 SendKey('S', true);
@@ -1000,6 +1008,18 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap('Q');
                 vrState.leftHapticPulse = 0.98f;  // High-voltage electrostatic arc ring shockwave (300 Hz)
+                vrState.rightHapticPulse = 0.98f;
+            } else if (isDoubleEarClap && (now - s_lastDoubleEarClapTime > 1500)) {
+                s_lastDoubleEarClapTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL DOUBLE-EAR CONCUSSIVE CLAP (Lx: %.2f, Rx: %.2f)", lVel.x, rVel.x);
+                SendKey('W', true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, false);
+                SendKey('W', false);
+                vrState.leftHapticPulse = 0.98f;  // Concussive acoustic blast (160 Hz)
                 vrState.rightHapticPulse = 0.98f;
             } else if (dartCounterJabStrike && (now - s_lastDartCounterJabTime > 1500)) {
                 s_lastDartCounterJabTime = now;
@@ -2187,6 +2207,30 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 vrState.rightHapticPulse = 0.98f; // Heavy pneumatic percussion impact (55 Hz)
             }
 
+            // Subterranean Mining Core Pneumatic Breaker Chisel Point Swap (ADR 0130)
+            static DWORD s_lastChiselSwapTime = 0;
+            static DWORD s_collarReleasedTime = 0;
+            bool twoHandAtChiselChuck = (twoHandDist < 0.18f) && (vrState.leftController.grip > 0.60f);
+            bool collarYankBack = (lVel.z > 0.65f);
+            if (twoHandAtChiselChuck && collarYankBack && (now - s_lastChiselSwapTime > 2000)) {
+                if (s_collarReleasedTime == 0) {
+                    s_collarReleasedTime = now;
+                    VR_LOG_INFO("Environmental Gesture: PNEUMATIC CHISEL CHUCK COLLAR RELEASED (Lz: %.2f)", lVel.z);
+                    vrState.leftHapticPulse = 0.60f; // Spring ball-detent release click (180 Hz)
+                }
+            }
+            bool diamondChiselSeatRam = (s_collarReleasedTime > 0 && (now - s_collarReleasedTime < 600) && rVel.z < -0.80f);
+            if (diamondChiselSeatRam && (now - s_lastChiselSwapTime > 2000)) {
+                s_lastChiselSwapTime = now;
+                s_collarReleasedTime = 0;
+                VR_LOG_INFO("Environmental Gesture: HARDENED DIAMOND CHISEL POINT SEATED & LOCKED (Rz: %.2f)", rVel.z);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap('3');
+                vrState.rightHapticPulse = 0.90f; // Hardened alloy chuck lock snap (90 Hz)
+                vrState.leftHapticPulse = 0.70f;
+            }
+
             // Dark Athena EVA Airlock Manual Handwheel Decompression Dogging (ADR 0078)
             static DWORD s_lastAirlockCrankTime = 0;
             static int s_airlockCrankCount = 0;
@@ -2244,6 +2288,20 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 VR_LOG_INFO("Environmental Gesture: ATMOSPHERIC BLEED PETCOCK VALVE TWISTED (Vx: %.2f)", rVel.x);
                 SendKeyTap('E');
                 vrState.rightHapticPulse = 0.55f; // Piercing pressure hiss & needle valve rattle (220 Hz)
+            }
+
+            // Cryo-Stasis Chamber Manual Coolant Bleed Petcock Turn (ADR 0127)
+            static DWORD s_lastCryoBleedTime = 0;
+            bool handAtCryoBleedPetcock = (rightLocal.z > -0.40f && rightLocal.z < -0.15f && rightLocal.y > -0.30f && rightLocal.y < 0.10f && vrState.rightController.grip > 0.55f);
+            bool cryoBleedTurn = (fabsf(rVel.x) > 0.55f || fabsf(rVel.y) > 0.55f);
+            if (handAtCryoBleedPetcock && cryoBleedTurn && (now - s_lastCryoBleedTime > 1500)) {
+                s_lastCryoBleedTime = now;
+                VR_LOG_INFO("Environmental Gesture: CRYO-STASIS COOLANT BLEED PETCOCK OPENED (Vx: %.2f)", rVel.x);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap(VK_RETURN);
+                vrState.rightHapticPulse = 0.75f; // Cryo vapor jet expansion rumble (140 Hz)
+                vrState.leftHapticPulse = 0.35f;
             }
 
             // Security Turret Optical Sensor Spray Paint / Smear Blind (ADR 0081)
@@ -2490,6 +2548,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     SendKeyTap(VK_TAB);
                     vrState.leftHapticPulse = 0.85f;  // Magnetic phase lock detent (90 Hz)
                     vrState.rightHapticPulse = 0.85f;
+                }
+            }
+
+            // Dark Athena EVA Solar Panel Photovoltaic Cell Scrape & De-icing (ADR 0129)
+            static DWORD s_lastSolarScrapeTime = 0;
+            static int s_solarScrapeCount = 0;
+            bool handAtSolarPane = (rightLocal.z > -0.42f && rightLocal.z < -0.14f && rightLocal.y > -0.20f && rightLocal.y < 0.25f && vrState.rightController.grip > 0.55f);
+            bool scrapeStroke = (fabsf(rVel.x) > 0.60f || fabsf(rVel.y) > 0.60f);
+            if (handAtSolarPane && scrapeStroke && (now - s_lastSolarScrapeTime > 240)) {
+                s_lastSolarScrapeTime = now;
+                s_solarScrapeCount++;
+                VR_LOG_INFO("Environmental Gesture: EVA SOLAR PANEL DE-ICING SCRAPE STROKE #%d (Speed: %.2f)", s_solarScrapeCount, rSpeed);
+                vrState.rightHapticPulse = 0.50f; // Crystalline glass scraping rasp (240 Hz)
+                if (s_solarScrapeCount >= 4) {
+                    s_solarScrapeCount = 0;
+                    VR_LOG_INFO("Environmental Gesture: EVA SOLAR PANEL DE-ICED & AUXILIARY POWER BUS RESTORED");
+                    SendKeyTap('E');
+                    SendKeyTap(VK_TAB);
+                    SendKeyTap(VK_RETURN);
+                    vrState.rightHapticPulse = 0.80f; // Auxiliary power bus resonance chime (310 Hz)
+                    vrState.leftHapticPulse = 0.40f;
                 }
             }
         }
