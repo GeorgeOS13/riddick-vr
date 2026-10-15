@@ -1798,6 +1798,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                               rVel.y < -1.85f && lVel.y < -1.60f &&
                                               fabsf(rVel.x - lVel.x) > 1.20f);
 
+            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Hyperextension Mat Slam Finisher (ADR 0285)
+            static DWORD s_lastThoracicMatSlamTime = 0;
+            static char s_thoracicMatSlamDirKey = 'A';
+            bool thoracicMatSlamStance = (handsDistSledge < 0.26f &&
+                                          leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                          vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
+            bool thoracicMatSlamThrow = (thoracicMatSlamStance && rVel.y < -1.85f &&
+                                         lVel.y < -1.60f && fabsf(lVel.x) > 0.85f);
+            if (thoracicMatSlamThrow && (now - s_lastThoracicMatSlamTime > 2000)) {
+                s_thoracicMatSlamDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+            }
+
+            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Seism Overdrive (ADR 0286)
+            static DWORD s_lastPlasmaSeismOverdriveTime = 0;
+            bool plasmaSeismOverdriveStance = (handsDistSledge < 0.28f &&
+                                               vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
+                                               vrState.rightController.trigger > 0.65f);
+            bool plasmaSeismOverdrivePlunge = (plasmaSeismOverdriveStance && isJumpingStance &&
+                                               rVel.y < -1.90f && lVel.y < -1.65f &&
+                                               fabsf(rVel.x - lVel.x) > 1.25f);
+
             // Inmate Pit Brawl Outside Leg Hook Sweep & Ground Knee Drop (ADR 0209)
             static DWORD s_lastOutsideLegSweepTime = 0;
             static DWORD s_outsideLegSweepHookTime = 0;
@@ -1844,7 +1865,53 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_crossBlockHoldStart = 0;
             }
 
-            if (plasmaResonantSeismPlunge && (now - s_lastPlasmaResonantSeismTime > 2000)) {
+            if (plasmaSeismOverdrivePlunge && (now - s_lastPlasmaSeismOverdriveTime > 2000)) {
+                s_lastPlasmaSeismOverdriveTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT SEISM OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
+                SendKey(VK_SPACE, true);
+                SendKey('W', true);
+                SendKey('Q', true);
+                SendKey(VK_TAB, true);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                SendKey('C', true);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                SendKey(VK_TAB, true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_TAB, false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey('C', false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_TAB, false);
+                SendKey('Q', false);
+                SendKey('W', false);
+                SendKey(VK_SPACE, false);
+                vrState.rightHapticPulse = 0.98f; // Resonant seism overdrive shockwave (360 Hz)
+                vrState.leftHapticPulse = 0.98f;  // Structural girder recoil (150 Hz)
+            } else if (thoracicMatSlamThrow && (now - s_lastThoracicMatSlamTime > 2000)) {
+                s_lastThoracicMatSlamTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER THORACIC MAT SLAM EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_thoracicMatSlamDirKey, rVel.y, lVel.y);
+                SendKey('W', true);
+                SendKey(s_thoracicMatSlamDirKey, true);
+                SendKey('C', true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, false);
+                SendKey('C', false);
+                SendKey(s_thoracicMatSlamDirKey, false);
+                SendKey('W', false);
+                vrState.rightHapticPulse = 0.98f; // Thoracic cage fracture shockwave (360 Hz)
+                vrState.leftHapticPulse = 0.92f;  // Whizzer collar tie drag (270 Hz)
+            } else if (plasmaResonantSeismPlunge && (now - s_lastPlasmaResonantSeismTime > 2000)) {
                 s_lastPlasmaResonantSeismTime = now;
                 s_lastPunchTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT SEISM EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
@@ -5961,6 +6028,42 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 vrState.rightHapticPulse = 0.95f; // Bayonet detent snap (280 Hz)
                 vrState.leftHapticPulse = 0.55f;  // Bulkhead receptacle resistance (150 Hz)
+            }
+
+            // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode Terminal Protective Silicone Boot Slide (ADR 0283)
+            static DWORD s_lastDiodeBootSlideTime = 0;
+            bool handAtDiodeLugBracket = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
+                                          vrState.leftController.grip > 0.55f);
+            bool handOnTerminalBoot = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
+                                       vrState.rightController.trigger > 0.50f);
+            bool diodeBootSlideStroke = (rVel.z < -0.80f);
+            if (handAtDiodeLugBracket && handOnTerminalBoot && diodeBootSlideStroke && (now - s_lastDiodeBootSlideTime > 1800)) {
+                s_lastDiodeBootSlideTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA SOLAR DIODE TERMINAL BOOT SLID (Rz: %.2f)", rVel.z);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap(VK_TAB);
+                SendKeyTap('Q');
+                vrState.rightHapticPulse = 0.95f; // Elastomeric boot detent snap (280 Hz)
+                vrState.leftHapticPulse = 0.55f;  // Bracket guide tension (140 Hz)
+            }
+
+            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Signal Amplifier BNC Cable P-Clamp Screw (ADR 0284)
+            static DWORD s_lastTachPClampScrewTime = 0;
+            bool handAtPClampSaddle = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
+                                       vrState.leftController.grip > 0.55f);
+            bool handOnPClampHexDriver = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
+                                         vrState.rightController.trigger < 0.40f);
+            bool tachPClampScrewTorque = (fabsf(rVel.x) > 0.65f);
+            if (handAtPClampSaddle && handOnPClampHexDriver && tachPClampScrewTorque && (now - s_lastTachPClampScrewTime > 1800)) {
+                s_lastTachPClampScrewTime = now;
+                VR_LOG_INFO("Environmental Gesture: DRAFT FAN TACHOMETER P-CLAMP SCREW TORQUED (Rx: %.2f)", rVel.x);
+                SendKeyTap('E');
+                SendKeyTap('Q');
+                SendKeyTap(VK_TAB);
+                SendKeyTap(VK_RETURN);
+                vrState.rightHapticPulse = 0.95f; // P-clamp torque stop click (290 Hz)
+                vrState.leftHapticPulse = 0.55f;  // Cushioned saddle compression (150 Hz)
             }
         }
     }
