@@ -326,14 +326,7 @@ static RiddickVRVector3 WorldToHmdLocal(const RiddickVRVector3& worldPos, const 
 }
 
 // Adaptive physical crouching, two-handed stabilization, and decoupled aim state (ADR 0004, 0005, 0008)
-static float s_standingEyeHeight = 0.0f;
-static bool s_twoHandedStabilizationActive = false;
-static bool s_physicalBlockEngaged = false;
-static DWORD s_lastReloadGestureTime = 0;
-static bool s_isAimingOrBlocking = false;
-static bool s_isPhysicalADS = false;
-static RiddickVRTrackedPose s_stabilizedAimPose{};
-static bool s_hasStabilizedPose = false;
+// (state variables live at file top, next to includes).
 // GH #35: single eyeshine source of truth, toggled by all emitters (Button Y,
 // temple tap, EVA visor pull) and published once per frame at the end of Update.
 static bool s_eyeshineActive = false;

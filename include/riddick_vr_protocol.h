@@ -101,6 +101,6 @@ struct RiddickVRSharedState {
 // field is added/removed/reordered without a deliberate version bump.
 static_assert(sizeof(RiddickVRTrackedPose) == 56, "RiddickVRTrackedPose layout changed; bump RIDDICK_VR_PROTOCOL_VERSION");
 static_assert(sizeof(RiddickVRControllerInput) == 136, "RiddickVRControllerInput layout changed; bump RIDDICK_VR_PROTOCOL_VERSION");
-static_assert(sizeof(RiddickVRSharedState) == 640, "RiddickVRSharedState layout changed; bump RIDDICK_VR_PROTOCOL_VERSION");
+static_assert(sizeof(RiddickVRSharedState) == 644, "RiddickVRSharedState layout changed; bump RIDDICK_VR_PROTOCOL_VERSION");
 static_assert(RIDDICK_VR_PROTOCOL_MIN_SUPPORTED <= RIDDICK_VR_PROTOCOL_VERSION, "protocol negotiation range inverted");
 
