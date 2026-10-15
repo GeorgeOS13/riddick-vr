@@ -1513,6 +1513,1845 @@ static ReloadIntent UpdateReload(ReloadState& st, DWORD now,
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// GH #17 step 9: section 5 melee combat gesture state + detection.
+// All ~191 Update-local statics (punch/finisher cooldowns, combo/charge windows,
+// directional keys, guard hysteresis) hoisted here. Detection lives in
+// UpdateMeleeCounters / UpdateMeleeStrikes below; ALL side effects
+// (SendGestureTap/SendKeyTap/SendMouseClick/HapticRequest/VR_LOG_INFO) stay at
+// the call site in CameraHook::Update with identical strings. No behavior change:
+// same velocities, volumes, cooldowns, and dispatch priority order.
+// ---------------------------------------------------------------------------
+struct MeleeState {
+    DWORD lastPunchTime = 0;
+    DWORD lastFinisherTime = 0;
+    DWORD guardPoseHoldTimer = 0;
+    DWORD guardPoseReleaseTimer = 0;
+    bool currentBlockEngaged = false;
+    DWORD lastPocketAshRiposteTime = 0;
+    DWORD lastArcWaveTime = 0;
+    DWORD arcWaveChargeStart = 0;
+    DWORD lastRibUnderhookTime = 0;
+    DWORD dartExtractedTime = 0;
+    DWORD lastDartCounterJabTime = 0;
+    DWORD lastDoubleEarClapTime = 0;
+    DWORD lastBatonRibJabTime = 0;
+    DWORD lastParrySnapTime = 0;
+    DWORD eyeRubWipeTime = 0;
+    DWORD lastEyeRubRiposteTime = 0;
+    DWORD lastKneeStompTime = 0;
+    DWORD lastInductionOverheatTime = 0;
+    DWORD inductionOverheatStart = 0;
+    DWORD liverHookTime = 0;
+    DWORD lastLiverElbowComboTime = 0;
+    DWORD lastSpearThrustTime = 0;
+    DWORD lastHeadbuttTime = 0;
+    DWORD lastBatonGroundPinTime = 0;
+    DWORD lastLeadKneeTime = 0;
+    DWORD lastArcWallPulse = 0;
+    DWORD lastKidneyCounterTime = 0;
+    DWORD lastBatonArcTrapTime = 0;
+    DWORD batonArcTrapStart = 0;
+    DWORD lastPalmChinComboTime = 0;
+    DWORD palmChinStrikeTime = 0;
+    DWORD lastBatonGroundShockTime = 0;
+    DWORD lastSnapdownChokeTime = 0;
+    DWORD snapdownStartTime = 0;
+    DWORD lastSkullBreakerTime = 0;
+    DWORD lastBatonDisarmTime = 0;
+    DWORD lastShinTrapTime = 0;
+    DWORD shinTrapTime = 0;
+    DWORD lastSuplexSlamTime = 0;
+    DWORD suplexHoistTime = 0;
+    DWORD lastCrossArcBurstTime = 0;
+    DWORD crossArcStartTime = 0;
+    DWORD lastBatonJavelinTime = 0;
+    DWORD lastOutsideTripTime = 0;
+    DWORD lastKimuraTime = 0;
+    DWORD lastArmTriangleTime = 0;
+    DWORD armTriangleStartTime = 0;
+    DWORD lastDiagonalParryTime = 0;
+    DWORD lastRadialSweepTime = 0;
+    DWORD lastSingleLegTakedownTime = 0;
+    DWORD lastBatonJabTripTime = 0;
+    DWORD batonJabTime = 0;
+    DWORD lastDoubleLegSlamTime = 0;
+    DWORD doubleLegLiftTime = 0;
+    DWORD lastPistolDisarmTime = 0;
+    DWORD pistolTrapTime = 0;
+    DWORD lastFiremansCarryTime = 0;
+    DWORD firemansLoadTime = 0;
+    DWORD lastFrontHeadlockTime = 0;
+    DWORD lastCrossParryTime = 0;
+    DWORD crossParryDeflectTime = 0;
+    char crossParryDirKey = 'A';
+    DWORD lastSuloevTime = 0;
+    DWORD lastVaultDropTime = 0;
+    DWORD lastBackSuplexTime = 0;
+    DWORD backSuplexClinchTime = 0;
+    DWORD lastRadialDisarmTime = 0;
+    DWORD radialDisarmTwistTime = 0;
+    char radialDisarmDirKey = 'A';
+    DWORD lastThaiPlumTime = 0;
+    DWORD thaiPlumClinchTime = 0;
+    DWORD lastJavelinVaultTime = 0;
+    DWORD lastWhizzerTime = 0;
+    char whizzerDirKey = 'A';
+    DWORD lastHammerfistTime = 0;
+    DWORD lastHipTossTime = 0;
+    char hipTossDirKey = 'A';
+    DWORD lastBatonBashTime = 0;
+    DWORD lastThaiPlumElbowTime = 0;
+    char thaiPlumElbowDirKey = 'A';
+    DWORD lastGroundingThrustTime = 0;
+    DWORD lastLateralSuplexTime = 0;
+    char lateralSuplexDirKey = 'A';
+    DWORD lastKineticCleaveTime = 0;
+    DWORD lastWhizzerCounterTime = 0;
+    char whizzerCounterDirKey = 'A';
+    DWORD lastCleaveArcBlastTime = 0;
+    DWORD lastCervicalSpikeTime = 0;
+    char cervicalSpikeDirKey = 'A';
+    DWORD lastVaultGroundArcTime = 0;
+    DWORD lastThoracicSlamTime = 0;
+    char thoracicSlamDirKey = 'A';
+    DWORD lastVaultKineticCleaveTime = 0;
+    DWORD lastHyperextensionSpikeTime = 0;
+    char hyperextensionSpikeDirKey = 'A';
+    DWORD lastDeckImpactTime = 0;
+    DWORD lastWhizzerGroundFinisherTime = 0;
+    char whizzerGroundFinisherDirKey = 'A';
+    DWORD lastOmnidirectionalArcTime = 0;
+    DWORD lastWhizzerGroundDislocationTime = 0;
+    char whizzerGroundDislocationDirKey = 'A';
+    DWORD lastOmnidirectionalPulseTime = 0;
+    DWORD lastSternumKneeDropTime = 0;
+    char sternumKneeDropDirKey = 'A';
+    DWORD lastKineticPulseWaveTime = 0;
+    DWORD lastSternumFractureSpikeTime = 0;
+    char sternumFractureSpikeDirKey = 'A';
+    DWORD lastPlasmaCleaveWaveTime = 0;
+    DWORD lastSternumGratingSlamTime = 0;
+    char sternumGratingSlamDirKey = 'A';
+    DWORD lastPlasmaOverloadWaveTime = 0;
+    DWORD lastCervicalGratingSlamTime = 0;
+    char cervicalGratingSlamDirKey = 'A';
+    DWORD lastPlasmaResonantWaveTime = 0;
+    DWORD lastHyperextensionFinisherTime = 0;
+    char hyperextensionFinisherDirKey = 'A';
+    DWORD lastPlasmaHarmonicQuakeTime = 0;
+    DWORD lastThoracicDislocationTime = 0;
+    char thoracicDislocationDirKey = 'A';
+    DWORD lastPlasmaResonantSeismTime = 0;
+    DWORD lastThoracicMatSlamTime = 0;
+    char thoracicMatSlamDirKey = 'A';
+    DWORD lastPlasmaSeismOverdriveTime = 0;
+    DWORD lastThoracicPinLockTime = 0;
+    char thoracicPinLockDirKey = 'A';
+    DWORD lastPlasmaCataclysmTime = 0;
+    DWORD lastSternumElbowDropTime = 0;
+    char sternumElbowDropDirKey = 'A';
+    DWORD lastPlasmaCataclysmOverdriveTime = 0;
+    DWORD lastCranialDeckDriverTime = 0;
+    char cranialDeckDriverDirKey = 'A';
+    DWORD lastPlasmaSingularityTime = 0;
+    DWORD lastSternumKneeSpikeTime = 0;
+    char sternumKneeSpikeDirKey = 'A';
+    DWORD lastPlasmaSupernovaTime = 0;
+    DWORD lastCervicalDeckPinTime = 0;
+    char cervicalDeckPinDirKey = 'A';
+    DWORD lastPlasmaHypernovaTime = 0;
+    DWORD lastCranialGrindTime = 0;
+    char cranialGrindDirKey = 'A';
+    DWORD lastPlasmaSingularityOverdriveTime = 0;
+    DWORD lastCranialPostImpactTime = 0;
+    char cranialPostImpactDirKey = 'A';
+    DWORD lastPlasmaGenesisTime = 0;
+    DWORD lastCranialStompTime = 0;
+    char cranialStompDirKey = 'A';
+    DWORD lastPlasmaBigBangTime = 0;
+    DWORD lastCranialDoubleStrikeTime = 0;
+    char cranialDoubleStrikeDirKey = 'A';
+    DWORD lastPlasmaCosmicDawnTime = 0;
+    DWORD lastCranialPivotTwistTime = 0;
+    char cranialPivotTwistDirKey = 'A';
+    DWORD lastPlasmaSuperclusterTime = 0;
+    DWORD lastCranialPivotSlamTime = 0;
+    char cranialPivotSlamDirKey = 'A';
+    DWORD lastPlasmaOmniverseTime = 0;
+    DWORD lastCranialLeverPinTime = 0;
+    char cranialLeverPinDirKey = 'A';
+    DWORD lastPlasmaMetaverseTime = 0;
+    DWORD lastCranialFulcrumChokeTime = 0;
+    char cranialFulcrumChokeDirKey = 'A';
+    DWORD lastPlasmaHyperdimensionalTime = 0;
+    DWORD lastCranialFulcrumArmbarTime = 0;
+    char cranialFulcrumArmbarDirKey = 'A';
+    DWORD lastPlasmaTransdimensionalTime = 0;
+    DWORD lastCranialFulcrumKneeTime = 0;
+    char cranialFulcrumKneeDirKey = 'A';
+    DWORD lastPlasmaInterdimensionalTime = 0;
+    DWORD lastCranialFulcrumRibSlamTime = 0;
+    char cranialFulcrumRibSlamDirKey = 'A';
+    DWORD lastPlasmaContinuumSingularityTime = 0;
+    DWORD lastCranialFulcrumClaviclePinTime = 0;
+    char cranialFulcrumClaviclePinDirKey = 'A';
+    DWORD lastPlasmaMultiverseSingularityTime = 0;
+    DWORD lastCranialFulcrumScapulaPinTime = 0;
+    char cranialFulcrumScapulaPinDirKey = 'A';
+    DWORD lastPlasmaOmniverseSingularityTime = 0;
+    DWORD lastCranialFulcrumSternumPinTime = 0;
+    char cranialFulcrumSternumPinDirKey = 'A';
+    DWORD lastPlasmaTransCosmicSingularityTime = 0;
+    DWORD lastCranialFulcrumMandiblePinTime = 0;
+    char cranialFulcrumMandiblePinDirKey = 'A';
+    DWORD lastPlasmaMacrocosmSingularityTime = 0;
+    DWORD lastCranialFulcrumZygomaticPinTime = 0;
+    char cranialFulcrumZygomaticPinDirKey = 'A';
+    DWORD lastPlasmaUniversalSingularityTime = 0;
+    DWORD lastOutsideLegSweepTime = 0;
+    DWORD outsideLegSweepHookTime = 0;
+    char outsideLegSweepDirKey = 'A';
+    DWORD lastCrossThrustTime = 0;
+    DWORD crossBlockHoldStart = 0;
+};
+static MeleeState s_melee;
+
+struct MeleeCounterIntent {
+    bool dualCrossSlash = false;
+    bool isForwardPunch = false;
+    bool isHookPunch = false;
+    bool isUppercutPunch = false;
+    bool isMeleeStrike = false;
+    bool dualRifleStrip = false;
+    bool isForwardParry = false;
+    bool isEyeGougeRiposte = false;
+    bool isShieldPryDisarm = false;
+    bool isPocketAshRiposte = false;
+};
+
+// GH #17 step 9: section 5 counter/disarm detection (rifle-strip, ash-riposte,
+// shield-pry, eye-gouge, parry) plus the strike-gate classifiers. Pure detection
+// over frame inputs + MeleeState; side effects stay at the call site.
+static MeleeCounterIntent UpdateMeleeCounters(MeleeState& st, DWORD now,
+                                               const RiddickVRVector3& lVel, const RiddickVRVector3& rVel,
+                                               const RiddickVRVector3& leftLocal, const RiddickVRVector3& rightLocal,
+                                               float leftGrip, float rightGrip,
+                                               float leftTrigger, float rightTrigger) {
+    MeleeCounterIntent out;
+    (void)now;
+            bool dualCrossSlash = (rVel.x < -1.1f && lVel.x > 1.1f) || (rVel.x > 1.1f && lVel.x < -1.1f);
+
+            // ADR 0403: Discriminate deliberate directional punch strikes from raising arms into Boxer Guard.
+            // Raising arms upward (Vy > 0) into guard position must NEVER trigger an attack or cancel guard.
+            bool chinLevelRough = (leftLocal.y >= -0.42f && leftLocal.y <= 0.32f) &&
+                                  (rightLocal.y >= -0.42f && rightLocal.y <= 0.32f);
+            bool inFrontRough = (leftLocal.z >= -0.68f && leftLocal.z <= -0.05f) &&
+                                (rightLocal.z >= -0.68f && rightLocal.z <= -0.05f);
+            bool inGuardVolume = chinLevelRough && inFrontRough && (fabsf(leftLocal.x - rightLocal.x) < 0.56f);
+
+            bool isForwardPunch = (rVel.z < -1.20f && rightLocal.z < -0.10f) || (lVel.z < -1.20f && leftLocal.z < -0.10f);
+            bool isHookPunch = (fabsf(rVel.x) > 1.35f && rVel.z < -0.15f) || (fabsf(lVel.x) > 1.35f && lVel.z < -0.15f);
+            bool isUppercutPunch = ((rVel.y > 1.35f && rightLocal.y < -0.10f) || (lVel.y > 1.35f && leftLocal.y < -0.10f)) &&
+                                   (rVel.z < -0.20f || lVel.z < -0.20f);
+            bool isMeleeStrike = (dualCrossSlash || isForwardPunch || isHookPunch || isUppercutPunch) && !inGuardVolume;
+
+            // 5a. Physical Parry / Counter-Disarm Thrust (ADR 0018)
+            // In Starbreeze engine: Left Click while Right Click (Block) is held executes Counter-Disarm!
+            // When in active Boxer Guard (s_currentBlockEngaged), driving fists forward into an attack (Vz < -1.15 m/s)
+            // executes the reactive counter-strike / disarm without canceling block mode.
+            // Guard Rifle Firearm Stripping & Mag Ejection Disarm (ADR 0063)
+            bool dualRifleStrip = st.currentBlockEngaged &&
+                                  (rVel.z < -1.15f && lVel.z < -1.15f) &&
+                                  (rightTrigger > 0.60f && leftTrigger > 0.60f);
+
+            bool isForwardParry = st.currentBlockEngaged &&
+                ((rVel.z < -1.15f && rightLocal.z < -0.15f) || (lVel.z < -1.15f && leftLocal.z < -0.15f));
+
+            // Inmate Shiv Parrying Riposte & Eye-Gouge Counter (ADR 0092)
+            bool isEyeGougeRiposte = st.currentBlockEngaged &&
+                (rVel.z < -1.10f && rVel.y > 1.05f && rightLocal.y > 0.04f);
+
+            // Security Guard Riot Shield Baton Wedge Pry & Disarm (ADR 0111)
+            bool bothAtShieldZone = (rightLocal.z > -0.42f && rightLocal.z < -0.16f && leftLocal.z > -0.42f && leftLocal.z < -0.16f) &&
+                                    (rightLocal.y > -0.20f && rightLocal.y < 0.20f && leftLocal.y > -0.20f && leftLocal.y < 0.20f);
+            bool shieldGrippedAndWedged = (leftGrip > 0.60f) &&
+                                          (rightTrigger > 0.50f || rightGrip > 0.60f);
+            bool opposingShieldWrench = (lVel.x < -0.90f || lVel.y < -0.80f) && (rVel.x > 0.90f || rVel.y > 0.80f);
+            bool isShieldPryDisarm = bothAtShieldZone && shieldGrippedAndWedged && opposingShieldWrench;
+
+            // Inmate Pit Brawl Pocket Ash Throw Riposte (ADR 0115)
+            bool rightAtPocket = (rightLocal.y > -0.45f && rightLocal.y < -0.15f) &&
+                                 (fabsf(rightLocal.x) > 0.10f && fabsf(rightLocal.x) < 0.26f) &&
+                                 (rightGrip > 0.50f);
+            bool pocketAshFling = (rVel.y > 1.10f && rVel.z < -0.90f);
+            bool isPocketAshRiposte = st.currentBlockEngaged && rightAtPocket && pocketAshFling;
+    out.dualCrossSlash = dualCrossSlash;
+    out.isForwardPunch = isForwardPunch;
+    out.isHookPunch = isHookPunch;
+    out.isUppercutPunch = isUppercutPunch;
+    out.isMeleeStrike = isMeleeStrike;
+    out.dualRifleStrip = dualRifleStrip;
+    out.isForwardParry = isForwardParry;
+    out.isEyeGougeRiposte = isEyeGougeRiposte;
+    out.isShieldPryDisarm = isShieldPryDisarm;
+    out.isPocketAshRiposte = isPocketAshRiposte;
+    return out;
+}
+
+struct MeleeStrikeIntent {
+    bool mechPowerPunch = false;
+    bool droneEmpSnap = false;
+    bool dualShieldBash = false;
+    bool dualShieldPlant = false;
+    bool dualStoolHeavySmash = false;
+    bool dualPalmShove = false;
+    bool isLookingDown = false;
+    bool isDownwardPlunge = false;
+    bool dualOverheadSlam = false;
+    bool leftTrayBatter = false;
+    bool twoHandedBatonSlam = false;
+    bool dualSledgeOverhead = false;
+    bool isDischargingArcWave = false;
+    bool stealthCarotidSlash = false;
+    bool isRibUnderhook = false;
+    bool dartCounterJabStrike = false;
+    bool isDoubleEarClap = false;
+    bool isBatonRibJab = false;
+    bool isParrySnap = false;
+    bool blindRiposteStrike = false;
+    bool isKneeStomp = false;
+    bool isInductionOverheated = false;
+    bool sternumElbowSmash = false;
+    bool isBatonChargedSpear = false;
+    bool isClinchHeadbutt = false;
+    bool isBatonGroundPin = false;
+    bool isLeadKneeThrust = false;
+    bool isCrossChestArcWall = false;
+    bool isDuckUnderKidneyCounter = false;
+    bool isBatonArcTrapArmed = false;
+    bool cervicalSnapWhip = false;
+    bool isBatonGroundDischarge = false;
+    bool guillotineWrapStrike = false;
+    bool isBatonSkullBreaker = false;
+    bool isBatonLateralDisarm = false;
+    bool hammerfistStrike = false;
+    bool suplexSpineSlam = false;
+    bool isCrossArcBurstReady = false;
+    bool isBatonJavelinThrust = false;
+    bool isOutsideTripMount = false;
+    bool isKimuraFracture = false;
+    bool isArmTriangleReady = false;
+    bool isBatonDiagonalParry = false;
+    bool isBatonRadialSweep = false;
+    bool isSingleLegTakedown = false;
+    bool batonTripSweep = false;
+    bool doubleLegSpikeSlam = false;
+    bool batonThroatThrustStrike = false;
+    bool firemansWhipThrow = false;
+    bool frontHeadlockWrap = false;
+    bool frontHeadlockArchTorque = false;
+    bool crossParryRiposte = false;
+    bool suloevLowCrouch = false;
+    bool suloevHookHold = false;
+    bool suloevArchPull = false;
+    bool isLookingDownward = false;
+    bool batonOverheadVault = false;
+    bool batonVaultPlunge = false;
+    bool backSuplexHoistSlam = false;
+    bool radialDisarmThrust = false;
+    bool thaiPlumKneeDrive = false;
+    bool javelinVaultStrike = false;
+    bool whizzerDownWhip = false;
+    bool batonHammerfistPlunge = false;
+    bool hipTossRotation = false;
+    bool batonShieldBashThrust = false;
+    bool thaiPlumElbowPlunge = false;
+    bool groundingThrustLunge = false;
+    bool lateralSuplexThrow = false;
+    bool kineticCleaveSwing = false;
+    bool whizzerCounterThrow = false;
+    bool cleaveArcBlastStrike = false;
+    bool cervicalSpikeThrow = false;
+    bool vaultGroundArcPlunge = false;
+    bool thoracicSlamThrow = false;
+    bool vaultKineticCleavePlunge = false;
+    bool hyperextensionSpikeThrow = false;
+    bool deckImpactPlunge = false;
+    bool whizzerGroundFinisherThrow = false;
+    bool omnidirectionalArcPlunge = false;
+    bool whizzerGroundDislocationThrow = false;
+    bool omnidirectionalPulsePlunge = false;
+    bool sternumKneeDropThrow = false;
+    bool kineticPulseWavePlunge = false;
+    bool sternumFractureSpikeThrow = false;
+    bool plasmaCleaveWavePlunge = false;
+    bool sternumGratingSlamThrow = false;
+    bool plasmaOverloadWavePlunge = false;
+    bool cervicalGratingSlamThrow = false;
+    bool plasmaResonantWavePlunge = false;
+    bool hyperextensionFinisherThrow = false;
+    bool plasmaHarmonicQuakePlunge = false;
+    bool thoracicDislocationThrow = false;
+    bool plasmaResonantSeismPlunge = false;
+    bool thoracicMatSlamThrow = false;
+    bool plasmaSeismOverdrivePlunge = false;
+    bool thoracicPinLockThrow = false;
+    bool plasmaCataclysmPlunge = false;
+    bool sternumElbowDropPlunge = false;
+    bool plasmaCataclysmOverdrivePlunge = false;
+    bool cranialDeckDriverPlunge = false;
+    bool plasmaSingularityPlunge = false;
+    bool sternumKneeSpikePlunge = false;
+    bool plasmaSupernovaPlunge = false;
+    bool cervicalDeckPinPlunge = false;
+    bool plasmaHypernovaPlunge = false;
+    bool cranialGrindPlunge = false;
+    bool plasmaSingularityOverdrivePlunge = false;
+    bool cranialPostImpactPlunge = false;
+    bool plasmaGenesisPlunge = false;
+    bool cranialStompPlunge = false;
+    bool plasmaBigBangPlunge = false;
+    bool cranialDoubleStrikePlunge = false;
+    bool plasmaCosmicDawnPlunge = false;
+    bool cranialPivotTwistPlunge = false;
+    bool plasmaSuperclusterPlunge = false;
+    bool cranialPivotSlamPlunge = false;
+    bool plasmaOmniversePlunge = false;
+    bool cranialLeverPinPlunge = false;
+    bool plasmaMetaversePlunge = false;
+    bool cranialFulcrumChokePlunge = false;
+    bool plasmaHyperdimensionalPlunge = false;
+    bool cranialFulcrumArmbarPlunge = false;
+    bool plasmaTransdimensionalPlunge = false;
+    bool cranialFulcrumKneePlunge = false;
+    bool plasmaInterdimensionalPlunge = false;
+    bool cranialFulcrumRibSlamPlunge = false;
+    bool plasmaContinuumSingularityPlunge = false;
+    bool cranialFulcrumClaviclePinPlunge = false;
+    bool plasmaMultiverseSingularityPlunge = false;
+    bool cranialFulcrumScapulaPinPlunge = false;
+    bool plasmaOmniverseSingularityPlunge = false;
+    bool cranialFulcrumSternumPinPlunge = false;
+    bool plasmaTransCosmicSingularityPlunge = false;
+    bool cranialFulcrumMandiblePinPlunge = false;
+    bool plasmaMacrocosmSingularityPlunge = false;
+    bool cranialFulcrumZygomaticPinPlunge = false;
+    bool plasmaUniversalSingularityPlunge = false;
+    bool outsideLegKneeDrop = false;
+    bool isCrossThrustReady = false;
+    bool isCrossThrustOvercharged = false;
+    bool arcWaveCharging = false;
+    bool dartRipped = false;
+    bool eyeWipeCleared = false;
+    bool inductionBuzz = false;
+    bool liverHookConnected = false;
+    bool arcWallPulse = false;
+    bool arcTrapBuzz = false;
+    bool palmChinConnected = false;
+    bool snapdownInitiated = false;
+    bool shinTrapDeflected = false;
+    bool suplexHoistInitiated = false;
+    bool crossArcCharging = false;
+    bool batonDischargeJabConnected = false;
+    bool doubleLegLiftInitiated = false;
+    bool pistolTrapWedged = false;
+    bool firemansLoaded = false;
+    bool crossParryDeflected = false;
+    bool rearWaistClinchLocked = false;
+    bool radialDisarmTwisted = false;
+    bool thaiPlumLocked = false;
+    bool outsideLegHooked = false;
+    bool crossThrustSupercharged = false;
+    bool crossThrustBarrierHum = false;
+    float arcWaveChargeRatio = 0.0f;
+    float inductionRampRatio = 0.0f;
+    float arcTrapDwellRatio = 0.0f;
+};
+
+// GH #17 step 9: section 5 strike/finisher detection (punch/jab/hook/uppercut
+// classifiers, per-weapon finisher tables, charge/combo staging). Detection + staging
+// state updates only; edge side effects surface as intent flags for the call site.
+// Call inside the isMeleeStrike branch AFTER the guard disengage (st.currentBlockEngaged
+// is already cleared there, matching the original evaluation order).
+static MeleeStrikeIntent UpdateMeleeStrikes(MeleeState& st, DWORD now,
+                                             const RiddickVRVector3& lVel, const RiddickVRVector3& rVel,
+                                             const RiddickVRVector3& leftLocal, const RiddickVRVector3& rightLocal,
+                                             float lSpeed, float rSpeed,
+                                             float leftGrip, float rightGrip,
+                                             float leftTrigger, float rightTrigger,
+                                             uint32_t rightButtons,
+                                             bool crouched, bool deepProne,
+                                             float hmdPitch, bool twoHandedActive) {
+    MeleeStrikeIntent out;
+    const auto& activeVel = (rSpeed > lSpeed) ? rVel : lVel;
+                // Heavy Exoskeleton Power Fist Kinetic Shockwave Punch (ADR 0066)
+                bool mechPowerPunch = (rVel.z < -1.60f) && (rightGrip > 0.60f);
+
+                // Security Drone EMP Overload & Chassis Snap (ADR 0058)
+                bool dualGrappleDrone = (rightLocal.z < -0.20f && leftLocal.z < -0.20f) &&
+                                        (rightLocal.z > -0.45f && leftLocal.z > -0.45f) &&
+                                        (rightGrip > 0.65f && leftGrip > 0.65f);
+                bool dualTorqueSnap = (fabsf(lVel.y - rVel.y) > 1.20f) || (fabsf(lVel.x - rVel.x) > 1.20f);
+                bool droneEmpSnap = dualGrappleDrone && dualTorqueSnap;
+
+                // Dual-Hand Riot Shield Concussive Bash (ADR 0052)
+                bool dualShieldBash = twoHandedActive &&
+                                      (rVel.z < -1.15f && lVel.z < -1.15f) &&
+                                      (rightLocal.z < -0.18f && leftLocal.z < -0.18f);
+
+                // Dual-Hand Riot Shield Ballistic Plant (ADR 0052)
+                bool dualShieldPlant = twoHandedActive &&
+                                       (lVel.y < -0.75f && rVel.y < -0.75f) &&
+                                       (lVel.z < -0.35f && rVel.z < -0.35f);
+
+                // Inmate Pit Brawl Stool / Chair Blunt Weapon Heavy Smash (ADR 0054)
+                bool dualStoolHeavySmash = (leftGrip > 0.60f && rightGrip > 0.60f) &&
+                                           (fabsf(leftLocal.x - rightLocal.x) < 0.38f) &&
+                                           (lSpeed > 1.35f && rSpeed > 1.35f);
+
+                // Pit Fighting Arena Dual-Palm Concussive Shove (ADR 0041)
+                bool dualPalmShove = (rVel.z < -1.10f && lVel.z < -1.10f) &&
+                                     (rightLocal.z < -0.15f && leftLocal.z < -0.15f) &&
+                                     (rightGrip > 0.40f && leftGrip > 0.40f);
+
+                // Vent Duct Pipe Hang & Death-From-Above Aerial Drop Ambush (ADR 0033)
+                bool isLookingDown = (hmdPitch < -0.70f); // Looking steeply downward (< -40 deg) from ledge/duct
+                bool isDownwardPlunge = (activeVel.y < -1.10f);
+
+                // Two-Handed Overhead Pipe Slam / Heavy Club Crushing Strike (ADR 0026)
+                bool dualOverheadSlam = (leftLocal.y > 0.10f && rightLocal.y > 0.10f) &&
+                                        (leftGrip > 0.45f && rightGrip > 0.45f) &&
+                                        (lVel.y < -1.30f && rVel.y < -1.30f);
+
+                // Inmate Mess Hall Tray Facial Batter (ADR 0060)
+                bool leftTrayBatter = (leftLocal.z < -0.18f) && (lVel.z < -1.0f) && (leftGrip > 0.50f);
+
+                // Guard Stun Baton Heavy Two-Handed Defibrillator Slam (ADR 0077)
+                bool twoHandedBatonSlam = twoHandedActive &&
+                                          (lVel.y < -1.30f && rVel.y < -1.30f) &&
+                                          (rightTrigger > 0.60f && leftTrigger > 0.60f);
+
+                // Mining Core Heavy Ore Sledgehammer Two-Handed Overhead Crush (ADR 0102)
+                float handsDistSledge = sqrtf(
+                    powf(leftLocal.x - rightLocal.x, 2) +
+                    powf(leftLocal.y - rightLocal.y, 2) +
+                    powf(leftLocal.z - rightLocal.z, 2)
+                );
+                bool dualSledgeOverhead = (handsDistSledge < 0.40f) &&
+                                          (leftLocal.y > 0.28f && rightLocal.y > 0.28f) &&
+                                          (leftGrip > 0.55f && rightGrip > 0.55f) &&
+                                          (lVel.y < -1.40f && rVel.y < -1.40f);
+
+                // Tactical Stun Baton Overload Arc Wave Discharge (ADR 0118)
+                bool crossedBatonCharge = (handsDistSledge < 0.18f) &&
+                                          (leftLocal.y > -0.25f && leftLocal.y < 0.10f && rightLocal.y > -0.25f && rightLocal.y < 0.10f) &&
+                                          (leftGrip > 0.70f && rightGrip > 0.70f) &&
+                                          (leftTrigger > 0.65f && rightTrigger > 0.65f);
+                bool isDischargingArcWave = false;
+                if (crossedBatonCharge) {
+                    if (st.arcWaveChargeStart == 0) st.arcWaveChargeStart = now;
+                    DWORD chargeTime = now - st.arcWaveChargeStart;
+                    float chargeRatio = (chargeTime < 400) ? (chargeTime / 400.0f) : 1.0f;
+                    out.arcWaveCharging = true; out.arcWaveChargeRatio = chargeRatio;
+                } else {
+                    if (st.arcWaveChargeStart != 0 && (now - st.arcWaveChargeStart >= 250)) {
+                        bool explosiveRadialThrust = (lVel.x < -1.05f && rVel.x > 1.05f) || (lVel.z < -1.10f && rVel.z < -1.10f);
+                        if (explosiveRadialThrust && (now - st.lastArcWaveTime > 2500)) {
+                            st.lastArcWaveTime = now;
+                            isDischargingArcWave = true;
+                        }
+                    }
+                    st.arcWaveChargeStart = 0;
+                }
+
+                bool crouchedForStealth = (crouched || deepProne);
+                bool atThroatCorridor = (rightLocal.y > -0.12f && rightLocal.y < 0.16f) &&
+                                        (rightLocal.z > -0.34f && rightLocal.z < -0.10f) &&
+                                        (rightGrip > 0.50f);
+                bool carotidSlice = (fabsf(rVel.x) > 1.25f);
+                bool stealthCarotidSlash = crouchedForStealth && atThroatCorridor && carotidSlice;
+
+                // Inmate Shiv Rib-Cage Underhook Puncture & Lift (ADR 0122)
+                bool lowStanceForUnderhook = (crouched || deepProne) || (rightLocal.y < -0.15f);
+                bool reverseBladeGrip = (rightGrip > 0.55f && rightTrigger < 0.40f);
+                bool underhookRisingThrust = (rVel.y > 1.15f && rVel.z < -0.90f);
+                bool isRibUnderhook = lowStanceForUnderhook && reverseBladeGrip && underhookRisingThrust;
+
+                // Security Guard Stun Dart Extraction & Counter-Jab (ADR 0126)
+                bool handAtChestDart = (fabsf(rightLocal.x) < 0.16f && rightLocal.y > -0.25f && rightLocal.y < 0.05f && rightLocal.z > -0.25f && rightLocal.z < -0.06f);
+                bool dartRipYank = (rVel.z > 0.70f || fabsf(rVel.x) > 0.75f);
+                if (handAtChestDart && rightGrip > 0.65f && dartRipYank && (now - st.lastDartCounterJabTime > 1500)) {
+                    if (st.dartExtractedTime == 0) {
+                        st.dartExtractedTime = now;
+                        out.dartRipped = true;
+                    }
+                }
+                bool dartCounterJabStrike = (st.dartExtractedTime > 0 && (now - st.dartExtractedTime < 800) &&
+                                            rVel.z < -1.15f && rightLocal.y > -0.10f && rightLocal.y < 0.22f);
+                if (st.dartExtractedTime != 0 && (now - st.dartExtractedTime >= 800)) st.dartExtractedTime = 0; // GH #25: timeout reset
+
+                // Inmate Pit Brawl Double-Ear Concussive Clap Strike (ADR 0128)
+                bool bothHandsOpenForClap = (leftTrigger < 0.25f && rightTrigger < 0.25f &&
+                                             leftGrip < 0.35f && rightGrip < 0.35f);
+                bool lateralInwardClapAcc = (lVel.x > 0.95f && rVel.x < -0.95f);
+                bool clapCorridor = (handsDistSledge < 0.24f && rightLocal.y > -0.10f && rightLocal.y < 0.20f && rightLocal.z > -0.35f && rightLocal.z < -0.10f);
+                bool isDoubleEarClap = bothHandsOpenForClap && lateralInwardClapAcc && clapCorridor;
+
+                // Security Guard Stun Baton Rib-Jab & Ground Takedown (ADR 0133)
+                bool batonRibJabArmed = (rightGrip > 0.60f && rightTrigger > 0.60f);
+                bool batonRibJabThrust = (rVel.z < -1.10f && rVel.y < -0.85f);
+                bool batonRibJabCorridor = (rightLocal.y > -0.30f && rightLocal.y < 0.05f && rightLocal.z > -0.35f && rightLocal.z < -0.10f);
+                bool isBatonRibJab = batonRibJabArmed && batonRibJabThrust && batonRibJabCorridor;
+
+                // Inmate Shiv Forearm Defensive Parry-and-Snap (ADR 0134)
+                bool parrySnapOffHandDeflect = (fabsf(lVel.x) > 0.85f);
+                bool parrySnapDominantStrike = (rVel.y < -1.15f);
+                bool parrySnapProximity = (handsDistSledge < 0.28f);
+                bool isParrySnap = parrySnapOffHandDeflect && parrySnapDominantStrike && parrySnapProximity;
+
+                // Inmate Pit Brawl Dirt / Ash Eye-Rub Recovery Riposte (ADR 0136)
+                bool offHandAtEyes = (fabsf(leftLocal.x) < 0.14f && leftLocal.y > -0.08f && leftLocal.y < 0.15f && leftLocal.z > -0.22f && leftLocal.z < -0.06f);
+                bool eyeWipeStroke = (fabsf(lVel.x) > 0.50f);
+                if (offHandAtEyes && eyeWipeStroke && (now - st.lastEyeRubRiposteTime > 1500)) {
+                    if (st.eyeRubWipeTime == 0) {
+                        st.eyeRubWipeTime = now;
+                        out.eyeWipeCleared = true;
+                    }
+                }
+                bool blindRiposteStrike = (st.eyeRubWipeTime > 0 && (now - st.eyeRubWipeTime < 600) && rVel.z < -1.15f);
+                if (st.eyeRubWipeTime != 0 && (now - st.eyeRubWipeTime >= 600)) st.eyeRubWipeTime = 0; // GH #25: timeout reset
+
+                // Inmate Pit Brawl Shin Kick & Knee Stomp Hyper-Extension (ADR 0141)
+                bool kneeStompPosture = (st.currentBlockEngaged || crouched || deepProne);
+                bool kneeStompStrike = (rVel.y < -1.10f && lVel.z < -0.70f);
+                bool isKneeStomp = kneeStompPosture && kneeStompStrike;
+
+                // Security Guard Stun Baton Weapon Shock Induction Arc Overheat (ADR 0142)
+                bool inductionGroundedStance = (handsDistSledge < 0.16f) &&
+                                               (leftGrip > 0.60f && rightGrip > 0.60f) &&
+                                               (leftTrigger > 0.65f && rightTrigger > 0.65f);
+                bool isInductionOverheated = false;
+                if (inductionGroundedStance) {
+                    if (st.inductionOverheatStart == 0) st.inductionOverheatStart = now;
+                    DWORD overchargeTime = now - st.inductionOverheatStart;
+                    float rampRatio = (overchargeTime < 350) ? (overchargeTime / 350.0f) : 1.0f;
+                    out.inductionBuzz = true; out.inductionRampRatio = rampRatio;
+                    if (overchargeTime >= 350 && (now - st.lastInductionOverheatTime > 2500)) {
+                        st.lastInductionOverheatTime = now;
+                        st.inductionOverheatStart = 0;
+                        isInductionOverheated = true;
+                    }
+                } else {
+                    st.inductionOverheatStart = 0;
+                }
+
+                // Inmate Pit Brawl Liver Hook & Sternum Elbow Smash Combination (ADR 0145)
+                bool liverHookStrike = (st.currentBlockEngaged && rVel.y > 1.10f && fabsf(rVel.x) > 0.90f);
+                if (liverHookStrike && (now - st.lastLiverElbowComboTime > 1500)) {
+                    if (st.liverHookTime == 0) {
+                        st.liverHookTime = now;
+                        out.liverHookConnected = true;
+                    }
+                }
+                bool sternumElbowSmash = (st.liverHookTime > 0 && (now - st.liverHookTime < 500) && rVel.y < -1.20f);
+                if (st.liverHookTime != 0 && (now - st.liverHookTime >= 500)) st.liverHookTime = 0; // GH #25: timeout reset
+
+                // Security Guard Stun Baton Charged Underarm Spear Thrust (ADR 0146)
+                bool batonChargedSpearArmed = (rightGrip > 0.60f && rightTrigger > 0.65f);
+                bool batonSpearBracing = (handsDistSledge < 0.22f);
+                bool batonLinearSpearThrust = (rVel.z < -1.35f);
+                bool isBatonChargedSpear = batonChargedSpearArmed && batonSpearBracing && batonLinearSpearThrust;
+
+                // Inmate Pit Brawl Collar Tie Clinch & Headbutt Stun (ADR 0149)
+                bool collarTieClinchGrip = (leftLocal.z > -0.35f && leftLocal.z < -0.12f && leftLocal.y > -0.15f && leftLocal.y < 0.15f && leftGrip > 0.65f);
+                bool headbuttKineticSurge = (lVel.z > 0.55f && rVel.z < -1.05f) || (rVel.z < -1.25f);
+                bool isClinchHeadbutt = collarTieClinchGrip && headbuttKineticSurge;
+
+                // Security Guard Stun Baton Ground Pin & Taser Kneel (ADR 0150)
+                bool lowGroundPosture = (crouched || deepProne || rightLocal.y < -0.35f);
+                bool batonGroundEnergized = (rightGrip > 0.60f && rightTrigger > 0.65f);
+                bool verticalGroundPlunge = (rVel.y < -1.15f);
+                bool isBatonGroundPin = lowGroundPosture && batonGroundEnergized && verticalGroundPlunge;
+
+                // Inmate Pit Brawl Muay Thai Lead Knee Thrust to Abdomen (ADR 0153)
+                bool leadKneePosture = st.currentBlockEngaged;
+                bool leadKneeStrikes = (rVel.y > 1.20f && lVel.y < -0.85f);
+                bool isLeadKneeThrust = leadKneePosture && leadKneeStrikes;
+
+                // Security Guard Stun Baton Two-Handed Cross-Chest Defensive Arc Wall (ADR 0154)
+                bool batonArcWallGeometry = (handsDistSledge > 0.20f && handsDistSledge < 0.38f && fabsf(rightLocal.x - leftLocal.x) > 0.22f &&
+                                             rightLocal.y > -0.20f && rightLocal.y < 0.10f && leftLocal.y > -0.20f && leftLocal.y < 0.10f &&
+                                             rightLocal.z > -0.30f && rightLocal.z < -0.10f && leftLocal.z > -0.30f && leftLocal.z < -0.10f);
+                bool batonArcWallGrips = (leftGrip > 0.65f && rightGrip > 0.65f &&
+                                          leftTrigger > 0.60f && rightTrigger > 0.60f);
+                bool isCrossChestArcWall = batonArcWallGeometry && batonArcWallGrips;
+                if (isCrossChestArcWall) {
+                    if (now - st.lastArcWallPulse > 180) {
+                        st.lastArcWallPulse = now;
+                        out.arcWallPulse = true;
+                    }
+                }
+
+                // Inmate Pit Brawl Duck-Under Kidney Liver Counter-Jab (ADR 0157)
+                bool duckUnderCrouch = (crouched || deepProne);
+                bool kidneyStrikeCorridor = (rightLocal.y > -0.35f && rightLocal.y < -0.05f);
+                bool kidneyCounterPunch = (fabsf(rVel.x) > 0.85f && rVel.z < -1.05f);
+                bool isDuckUnderKidneyCounter = duckUnderCrouch && kidneyStrikeCorridor && kidneyCounterPunch;
+
+                // Security Guard Stun Baton High-Voltage Capacitance Bleed Arc Trap (ADR 0158)
+                bool batonAtConduitSurface = (handsDistSledge < 0.22f &&
+                                              rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > -0.30f && rightLocal.y < 0.10f &&
+                                              rSpeed < 0.12f &&
+                                              leftTrigger > 0.70f && rightTrigger > 0.70f);
+                bool isBatonArcTrapArmed = false;
+                if (batonAtConduitSurface) {
+                    if (st.batonArcTrapStart == 0) st.batonArcTrapStart = now;
+                    DWORD chargeDwell = now - st.batonArcTrapStart;
+                    float dwellRatio = (chargeDwell < 400) ? (chargeDwell / 400.0f) : 1.0f;
+                    out.arcTrapBuzz = true; out.arcTrapDwellRatio = dwellRatio;
+                    if (chargeDwell >= 400 && (now - st.lastBatonArcTrapTime > 2000)) {
+                        st.lastBatonArcTrapTime = now;
+                        st.batonArcTrapStart = 0;
+                        isBatonArcTrapArmed = true;
+                    }
+                } else {
+                    st.batonArcTrapStart = 0;
+                }
+
+                // Inmate Pit Brawl Upward Palm Chin-Strike & Cervical Snap (ADR 0161)
+                bool upwardPalmStrike = (rVel.y > 1.25f && rVel.z < -0.80f && rightLocal.y > -0.10f && rightLocal.y < 0.25f);
+                if (upwardPalmStrike && (now - st.lastPalmChinComboTime > 1500)) {
+                    if (st.palmChinStrikeTime == 0) {
+                        st.palmChinStrikeTime = now;
+                        out.palmChinConnected = true;
+                    }
+                }
+                bool cervicalSnapWhip = (st.palmChinStrikeTime > 0 && (now - st.palmChinStrikeTime < 500) && fabsf(lVel.x) > 1.10f);
+                if (st.palmChinStrikeTime != 0 && (now - st.palmChinStrikeTime >= 500)) st.palmChinStrikeTime = 0; // GH #25: timeout reset
+
+                // Security Guard Stun Baton Dual-Hand Ground Discharge Kinetic Shockwave (ADR 0162)
+                bool batonDualGroundEnergized = (handsDistSledge < 0.22f &&
+                                                 rightGrip > 0.65f && rightTrigger > 0.65f &&
+                                                 leftGrip > 0.60f && leftTrigger > 0.60f);
+                bool dualGroundPlunge = (rVel.y < -1.25f && lVel.y < -1.25f && rightLocal.y < -0.40f);
+                bool isBatonGroundDischarge = batonDualGroundEnergized && dualGroundPlunge;
+
+                // Inmate Pit Brawl Collar Tie Snap-Down & Guillotine Choke (ADR 0165)
+                bool collarSnapdownGrip = (leftLocal.z > -0.35f && leftLocal.z < -0.12f && leftGrip > 0.65f);
+                bool collarSnapdownPull = (lVel.y < -0.90f);
+                if (collarSnapdownGrip && collarSnapdownPull && (now - st.lastSnapdownChokeTime > 1500)) {
+                    if (st.snapdownStartTime == 0) {
+                        st.snapdownStartTime = now;
+                        out.snapdownInitiated = true;
+                    }
+                }
+                bool guillotineWrapStrike = (st.snapdownStartTime > 0 && (now - st.snapdownStartTime < 500) && rVel.y > 1.05f && rVel.z < -0.75f);
+                if (st.snapdownStartTime != 0 && (now - st.snapdownStartTime >= 500)) st.snapdownStartTime = 0; // GH #25: timeout reset
+
+                // Security Guard Stun Baton Charged High-Arc Downward Skull Breaker (ADR 0166)
+                bool batonOverheadEnergized = (rightLocal.y > 0.25f && rightGrip > 0.60f && rightTrigger > 0.65f);
+                bool batonExtremeCleave = (rVel.y < -1.45f);
+                bool isBatonSkullBreaker = batonOverheadEnergized && batonExtremeCleave;
+
+                // Security Guard Stun Baton Lateral Cross-Sweep Deflection & Disarm (ADR 0170)
+                bool batonLateralSweepArmed = (rightGrip > 0.60f && rightTrigger > 0.65f &&
+                                               rightLocal.y > -0.20f && rightLocal.y < 0.20f);
+                bool batonCrossSweepFast = (fabsf(rVel.x) > 1.25f);
+                bool isBatonLateralDisarm = batonLateralSweepArmed && batonCrossSweepFast;
+
+                // Inmate Pit Brawl Shin Trap & Overhand Hammerfist Ground Finisher (ADR 0169)
+                bool shinTrapDeflect = (leftLocal.y < -0.20f && leftGrip > 0.55f && lVel.y < -0.85f);
+                if (shinTrapDeflect && (now - st.lastShinTrapTime > 1500)) {
+                    if (st.shinTrapTime == 0) {
+                        st.shinTrapTime = now;
+                        out.shinTrapDeflected = true;
+                    }
+                }
+                bool hammerfistStrike = (st.shinTrapTime > 0 && (now - st.shinTrapTime < 500) && rVel.y < -1.30f);
+                if (st.shinTrapTime != 0 && (now - st.shinTrapTime >= 500)) st.shinTrapTime = 0; // GH #25: timeout reset
+
+                // Inmate Pit Brawl Underhook Suplex & Spine Slam (ADR 0173)
+                bool underhookGripHold = (handsDistSledge < 0.25f && leftGrip > 0.65f && rightGrip > 0.65f);
+                bool underhookVerticalHoist = (lVel.y > 1.10f && rVel.y > 1.10f);
+                if (underhookGripHold && underhookVerticalHoist && (now - st.lastSuplexSlamTime > 1800)) {
+                    if (st.suplexHoistTime == 0) {
+                        st.suplexHoistTime = now;
+                        out.suplexHoistInitiated = true;
+                    }
+                }
+                bool suplexSpineSlam = (st.suplexHoistTime > 0 && (now - st.suplexHoistTime < 500) && lVel.y < -1.20f && rVel.y < -1.20f);
+                if (st.suplexHoistTime != 0 && (now - st.suplexHoistTime >= 500)) st.suplexHoistTime = 0; // GH #25: timeout reset
+
+                // Security Guard Stun Baton Dual-Hand Cross-Block Reactive Arc Burst (ADR 0174)
+                bool crossWristFrame = (handsDistSledge < 0.16f &&
+                                        rightLocal.y > -0.15f && rightLocal.y < 0.15f && rightLocal.z > -0.30f && rightLocal.z < -0.10f &&
+                                        leftGrip > 0.65f && rightGrip > 0.65f &&
+                                        leftTrigger > 0.65f && rightTrigger > 0.65f);
+                bool isCrossArcBurstReady = false;
+                if (crossWristFrame) {
+                    if (st.crossArcStartTime == 0) st.crossArcStartTime = now;
+                    if (now - st.crossArcStartTime >= 300) {
+                        out.crossArcCharging = true;
+                        if (rVel.z < -1.15f || lVel.z < -1.15f) {
+                            isCrossArcBurstReady = true;
+                        }
+                    }
+                } else {
+                    st.crossArcStartTime = 0;
+                }
+
+                // Security Guard Stun Baton Forward Two-Handed Javelin Thrust (ADR 0178)
+                bool batonJavelinGrip = (handsDistSledge > 0.18f && handsDistSledge < 0.40f &&
+                                         rightGrip > 0.60f && leftGrip > 0.50f &&
+                                         rightTrigger > 0.65f);
+                bool batonJavelinThrust = (rVel.z < -1.35f && lVel.z < -1.05f);
+                bool isBatonJavelinThrust = batonJavelinGrip && batonJavelinThrust;
+
+                // Inmate Pit Brawl Outside Trip & Mount Ground-and-Pound (ADR 0177)
+                bool outsideTripHook = (leftLocal.y < -0.30f && leftGrip > 0.50f && lVel.x < -0.80f);
+                bool outsideTripDrive = (rVel.z < -1.10f && rVel.y < -0.75f);
+                bool isOutsideTripMount = outsideTripHook && outsideTripDrive;
+
+                // Inmate Pit Brawl Kimura Shoulder Lock & Arm Fracture (ADR 0181)
+                bool kimuraGrip = (handsDistSledge < 0.25f &&
+                                   leftGrip > 0.65f && rightGrip > 0.65f &&
+                                   leftLocal.y > -0.20f && leftLocal.y < 0.20f && rightLocal.y > -0.20f && rightLocal.y < 0.20f);
+                bool kimuraCrank = (rVel.y > 1.05f && fabsf(rVel.x) > 0.85f);
+                bool isKimuraFracture = kimuraGrip && kimuraCrank;
+
+                // Inmate Pit Brawl Standing Arm-Triangle Choke & Tracheal Clamp (ADR 0185)
+                bool armTriangleGrapple = (leftLocal.z > -0.35f && leftLocal.z < -0.10f && leftGrip > 0.65f &&
+                                           handsDistSledge < 0.20f && rightGrip > 0.65f &&
+                                           leftTrigger > 0.60f && rightTrigger > 0.60f);
+                bool isArmTriangleReady = false;
+                if (armTriangleGrapple) {
+                    if (st.armTriangleStartTime == 0) st.armTriangleStartTime = now;
+                    if (now - st.armTriangleStartTime >= 300 && (now - st.lastArmTriangleTime > 2000)) {
+                        isArmTriangleReady = true;
+                    }
+                } else {
+                    st.armTriangleStartTime = 0;
+                }
+
+                // Security Guard Stun Baton Upward Diagonal Cross-Parry & Counter-Discharge (ADR 0186)
+                bool batonDiagonalParryGrip = (handsDistSledge < 0.24f &&
+                                               rightGrip > 0.60f && rightTrigger > 0.65f &&
+                                               leftGrip > 0.50f &&
+                                               rightLocal.y > 0.05f && rightLocal.y < 0.35f);
+                bool batonDiagonalParryThrust = (rVel.y > 1.15f && fabsf(rVel.x) > 0.85f);
+                bool isBatonDiagonalParry = batonDiagonalParryGrip && batonDiagonalParryThrust;
+
+                // Security Guard Stun Baton Radial Kinetic Sweep & Electrical Stun Ring (ADR 0182)
+                bool batonRadialGrip = (handsDistSledge < 0.25f &&
+                                        rightGrip > 0.60f && rightTrigger > 0.65f &&
+                                        leftGrip > 0.50f);
+                bool batonRadialSweep = (fabsf(rVel.x) > 1.35f && fabsf(lVel.x) > 1.10f &&
+                                         ((rVel.x > 0.0f && lVel.x > 0.0f) || (rVel.x < 0.0f && lVel.x < 0.0f)));
+                bool isBatonRadialSweep = batonRadialGrip && batonRadialSweep;
+
+                // Inmate Pit Brawl Single-Leg Takedown & Ankle Pick Slam (ADR 0189)
+                bool singleLegLowStance = (crouched || deepProne || leftLocal.y < -0.30f);
+                bool anklePickGrip = (leftLocal.y < -0.40f && leftGrip > 0.60f && lVel.y > 0.85f);
+                bool shoulderDriveThrough = (rVel.z < -1.10f);
+                bool isSingleLegTakedown = singleLegLowStance && anklePickGrip && shoulderDriveThrough;
+
+                // Security Guard Stun Baton Forward High-Voltage Discharge Jab & Taser Trip (ADR 0190)
+                bool batonJabArmed = (rightGrip > 0.60f && rightTrigger > 0.65f);
+                bool batonLinearJab = (rVel.z < -1.25f);
+                if (batonJabArmed && batonLinearJab && (now - st.lastBatonJabTripTime > 1800)) {
+                    if (st.batonJabTime == 0) {
+                        st.batonJabTime = now;
+                        out.batonDischargeJabConnected = true;
+                    }
+                }
+                bool batonTripSweep = (st.batonJabTime > 0 && (now - st.batonJabTime < 500) &&
+                                       rVel.y < -1.10f && fabsf(rVel.x) > 0.80f);
+                if (st.batonJabTime != 0 && (now - st.batonJabTime >= 500)) st.batonJabTime = 0; // GH #25: timeout reset
+
+                // Inmate Pit Brawl Double-Leg Takedown & High-Amplitude Mat Slam (ADR 0193)
+                bool doubleLegLowStance = (crouched || deepProne || leftLocal.y < -0.30f);
+                bool doubleLegThighWrap = (handsDistSledge < 0.25f &&
+                                           leftGrip > 0.65f && rightGrip > 0.65f &&
+                                           lVel.y > 1.15f && rVel.y > 1.15f);
+                if (doubleLegLowStance && doubleLegThighWrap && (now - st.lastDoubleLegSlamTime > 2000)) {
+                    if (st.doubleLegLiftTime == 0) {
+                        st.doubleLegLiftTime = now;
+                        out.doubleLegLiftInitiated = true;
+                    }
+                }
+                bool doubleLegSpikeSlam = (st.doubleLegLiftTime > 0 && (now - st.doubleLegLiftTime < 500) &&
+                                           lVel.y < -1.30f && rVel.y < -1.30f);
+                if (st.doubleLegLiftTime != 0 && (now - st.doubleLegLiftTime >= 500)) st.doubleLegLiftTime = 0; // GH #25: timeout reset
+
+                // Security Guard Stun Baton Forward Two-Handed Cross-Pistol Disarm & Neck Strike (ADR 0194)
+                bool batonPistolDisarmGrip = (handsDistSledge < 0.24f &&
+                                              rightGrip > 0.60f && rightTrigger > 0.65f &&
+                                              leftGrip > 0.50f &&
+                                              rightLocal.y > -0.20f && rightLocal.y < 0.10f);
+                bool batonDownwardPistolTrap = (rVel.y < -0.90f && lVel.y < -0.90f && rVel.z < -0.80f);
+                if (batonPistolDisarmGrip && batonDownwardPistolTrap && (now - st.lastPistolDisarmTime > 1800)) {
+                    if (st.pistolTrapTime == 0) {
+                        st.pistolTrapTime = now;
+                        out.pistolTrapWedged = true;
+                    }
+                }
+                bool batonThroatThrustStrike = (st.pistolTrapTime > 0 && (now - st.pistolTrapTime < 500) && rVel.z < -1.20f);
+                if (st.pistolTrapTime != 0 && (now - st.pistolTrapTime >= 500)) st.pistolTrapTime = 0; // GH #25: timeout reset
+
+                // Inmate Pit Brawl Fireman's Carry & Deck Body-Spike Slam (ADR 0197)
+                bool firemansLowDuck = (crouched || deepProne || leftLocal.y < -0.25f);
+                bool firemansUnderhookLoad = (handsDistSledge < 0.25f &&
+                                              leftGrip > 0.65f && rightGrip > 0.65f &&
+                                              rVel.y > 1.10f && lVel.z > 0.70f);
+                if (firemansLowDuck && firemansUnderhookLoad && (now - st.lastFiremansCarryTime > 2000)) {
+                    if (st.firemansLoadTime == 0) {
+                        st.firemansLoadTime = now;
+                        out.firemansLoaded = true;
+                    }
+                }
+                bool firemansWhipThrow = (st.firemansLoadTime > 0 && (now - st.firemansLoadTime < 500) &&
+                                          (fabsf(lVel.x) > 1.25f || fabsf(rVel.x) > 1.25f));
+                if (st.firemansLoadTime != 0 && (now - st.firemansLoadTime >= 500)) st.firemansLoadTime = 0; // GH #25: timeout reset
+
+                // Inmate Pit Brawl Standing Front Headlock & Guillotine Neck Crack (ADR 0205)
+                bool frontHeadlockWrap = (handsDistSledge < 0.25f && leftLocal.y > -0.15f &&
+                                          leftGrip > 0.65f && rightGrip > 0.65f);
+                bool frontHeadlockArchTorque = (lVel.y > 1.15f && rVel.y > 1.15f);
+
+                // Security Guard Stun Baton Lateral Two-Handed Cross-Chest Kinetic Parrying Riposte (ADR 0206)
+                bool crossParryStance = (handsDistSledge > 0.18f && handsDistSledge < 0.35f &&
+                                         fabsf(rightLocal.x - leftLocal.x) > 0.20f &&
+                                         leftGrip > 0.65f && rightGrip > 0.65f &&
+                                         rightTrigger > 0.65f);
+                bool crossParryDeflect = (crossParryStance && (fabsf(rVel.x) > 0.85f || fabsf(lVel.x) > 0.85f));
+                if (crossParryDeflect && (now - st.lastCrossParryTime > 2000)) {
+                    if (st.crossParryDeflectTime == 0) {
+                        st.crossParryDeflectTime = now;
+                        st.crossParryDirKey = (rVel.x > 0.0f || lVel.x > 0.0f) ? 'D' : 'A';
+                        out.crossParryDeflected = true;
+                    }
+                }
+                bool crossParryRiposte = (st.crossParryDeflectTime > 0 && (now - st.crossParryDeflectTime < 500) && rVel.z < -1.25f);
+                if (st.crossParryDeflectTime != 0 && (now - st.crossParryDeflectTime >= 500)) st.crossParryDeflectTime = 0; // GH #25: timeout reset
+
+                // Inmate Pit Brawl Suloev Stretch Hamstring Submission Lock (ADR 0201)
+                bool suloevLowCrouch = (crouched || deepProne || leftLocal.y < -0.30f);
+                bool suloevHookHold = (handsDistSledge < 0.25f && leftLocal.y < -0.35f &&
+                                       leftGrip > 0.65f && rightGrip > 0.65f);
+                bool suloevArchPull = (lVel.y > 1.05f && rVel.y > 1.05f);
+
+                // Security Guard Stun Baton Forward High-Arc Overhead Vault Drop Strike (ADR 0202)
+                bool isLookingDownward = (hmdPitch < -0.436f); // < -25 deg downward look
+                bool batonOverheadVault = (rightLocal.y > 0.20f &&
+                                           rightGrip > 0.60f &&
+                                           rightTrigger > 0.65f);
+                bool batonVaultPlunge = (rVel.y < -1.35f);
+
+                // Inmate Pit Brawl Duck-Under Back-Clinch Belly-to-Back Suplex Slam (ADR 0213)
+                bool duckUnderLow = (crouched || deepProne || leftLocal.y < -0.25f);
+                bool duckUnderRearSlip = (duckUnderLow && handsDistSledge < 0.24f &&
+                                          fabsf(rVel.x) > 0.85f &&
+                                          leftGrip > 0.65f && rightGrip > 0.65f);
+                if (duckUnderRearSlip && (now - st.lastBackSuplexTime > 2000)) {
+                    if (st.backSuplexClinchTime == 0) {
+                        st.backSuplexClinchTime = now;
+                        out.rearWaistClinchLocked = true;
+                    }
+                }
+                bool backSuplexHoistSlam = (st.backSuplexClinchTime > 0 && (now - st.backSuplexClinchTime < 500) &&
+                                            lVel.y > 1.20f && rVel.y > 1.20f);
+
+                // Security Guard Stun Baton Charged High-Velocity Forward Radial Thrust Disarm (ADR 0214)
+                bool radialDisarmStance = (handsDistSledge < 0.24f &&
+                                           leftGrip > 0.65f && rightGrip > 0.65f &&
+                                           rightTrigger > 0.65f);
+                bool radialDisarmTwist = (radialDisarmStance && fabsf(rVel.x - lVel.x) > 1.15f);
+                if (radialDisarmTwist && (now - st.lastRadialDisarmTime > 2000)) {
+                    if (st.radialDisarmTwistTime == 0) {
+                        st.radialDisarmTwistTime = now;
+                        st.radialDisarmDirKey = (rVel.x > 0.0f) ? 'D' : 'A';
+                        out.radialDisarmTwisted = true;
+                    }
+                }
+                bool radialDisarmThrust = (st.radialDisarmTwistTime > 0 && (now - st.radialDisarmTwistTime < 500) && rVel.z < -1.35f);
+
+                // Inmate Pit Brawl Clinch Thai Plum Collar Tie & Liver Knee Strike (ADR 0217)
+                bool thaiPlumGrip = (handsDistSledge < 0.25f &&
+                                     leftLocal.y > -0.10f && rightLocal.y > -0.10f &&
+                                     leftGrip > 0.65f && rightGrip > 0.65f);
+                if (thaiPlumGrip && (now - st.lastThaiPlumTime > 2000)) {
+                    if (st.thaiPlumClinchTime == 0) {
+                        st.thaiPlumClinchTime = now;
+                        out.thaiPlumLocked = true;
+                    }
+                }
+                bool thaiPlumKneeDrive = (st.thaiPlumClinchTime > 0 && (now - st.thaiPlumClinchTime < 600) &&
+                                          lVel.y < -1.10f && rVel.y < -1.10f);
+
+                // Security Guard Stun Baton Forward Two-Handed Javelin Vault Leap Thrust (ADR 0218)
+                bool javelinVaultStance = (handsDistSledge < 0.22f &&
+                                           leftGrip > 0.65f && rightGrip > 0.65f &&
+                                           rightTrigger > 0.65f);
+                bool isJumpingMotion = ((rightButtons & RIDDICK_VR_BTN_B) != 0 || rVel.y > 0.85f || lVel.y > 0.85f);
+                bool javelinVaultStrike = (javelinVaultStance && isJumpingMotion && rVel.z < -1.40f && lVel.z < -1.20f);
+
+                // Inmate Pit Brawl Double Collar Tie Whizzer Takedown & Arm Trap (ADR 0221)
+                bool whizzerClinchGrip = (handsDistSledge < 0.25f &&
+                                          rightLocal.y > -0.15f && rightLocal.y < 0.15f &&
+                                          rightGrip > 0.65f && leftGrip > 0.65f);
+                bool whizzerDownWhip = (whizzerClinchGrip && rVel.y < -1.15f && fabsf(lVel.x) > 0.90f);
+                if (whizzerDownWhip && (now - st.lastWhizzerTime > 2000)) {
+                    st.whizzerDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Arc Kinetic Hammerfist Deck Strike (ADR 0222)
+                bool batonHammerfistElevated = (rightLocal.y > 0.15f &&
+                                                rightGrip > 0.65f &&
+                                                rightTrigger > 0.65f);
+                bool batonHammerfistPlunge = (batonHammerfistElevated && rVel.y < -1.35f && rVel.z < -0.80f);
+
+                // Inmate Pit Brawl Double Underhook Body Lock Foot Sweep & Hip Toss (ADR 0225)
+                bool underhookBodyLockGrip = (handsDistSledge < 0.22f &&
+                                              leftLocal.y > -0.20f && leftLocal.y < 0.15f &&
+                                              rightLocal.y > -0.20f && rightLocal.y < 0.15f &&
+                                              leftGrip > 0.65f && rightGrip > 0.65f);
+                bool hipTossRotation = (underhookBodyLockGrip && fabsf(rVel.x - lVel.x) > 1.20f &&
+                                        (rVel.y > 1.05f || lVel.y > 1.05f));
+                if (hipTossRotation && (now - st.lastHipTossTime > 2000)) {
+                    st.hipTossDirKey = (rVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Lateral Two-Handed Kinetic Shield Bash & Arc Burst (ADR 0226)
+                bool batonShieldBashStance = (handsDistSledge > 0.18f && handsDistSledge < 0.35f &&
+                                              fabsf(rightLocal.x - leftLocal.x) > 0.20f &&
+                                              leftGrip > 0.65f && rightGrip > 0.65f &&
+                                              rightTrigger > 0.65f);
+                bool batonShieldBashThrust = (batonShieldBashStance && rVel.z < -1.35f && lVel.z < -1.15f);
+
+                // Inmate Pit Brawl Clinch Thai Plum Elbow Spike & Cranial Fracture (ADR 0229)
+                bool thaiPlumElbowStance = (handsDistSledge < 0.25f &&
+                                            leftLocal.y > -0.10f && rightLocal.y > 0.15f &&
+                                            leftGrip > 0.65f && rightGrip > 0.65f);
+                bool thaiPlumElbowPlunge = (thaiPlumElbowStance && rVel.y < -1.30f && lVel.z > 0.60f);
+                if (thaiPlumElbowPlunge && (now - st.lastThaiPlumElbowTime > 2000)) {
+                    st.thaiPlumElbowDirKey = (rVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Voltage Grounding Thrust & Arc Discharge Ring (ADR 0230)
+                bool groundingThrustStance = ((leftLocal.y < -0.25f || crouched) &&
+                                              handsDistSledge < 0.24f &&
+                                              leftGrip > 0.65f && rightGrip > 0.65f &&
+                                              rightTrigger > 0.65f);
+                bool groundingThrustLunge = (groundingThrustStance && rVel.z < -1.35f && lVel.z < -1.10f);
+
+                // Inmate Pit Brawl Double Underhook Lateral Suplex Arch & Mat Spike (ADR 0233)
+                bool lateralSuplexStance = (handsDistSledge < 0.28f &&
+                                            leftLocal.y > -0.20f && rightLocal.y > -0.20f &&
+                                            leftGrip > 0.65f && rightGrip > 0.65f);
+                bool lateralSuplexThrow = (lateralSuplexStance && rVel.y > 0.70f && lVel.y > 0.70f &&
+                                           (fabsf(rVel.x) > 0.85f || fabsf(lVel.x) > 0.85f));
+                if (lateralSuplexThrow && (now - st.lastLateralSuplexTime > 2000)) {
+                    st.lateralSuplexDirKey = (rVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Arc Kinetic Cleave & Shockwave Stun (ADR 0234)
+                bool kineticCleaveStance = (handsDistSledge < 0.28f &&
+                                            rightLocal.y > 0.18f && leftLocal.y > 0.10f &&
+                                            leftGrip > 0.65f && rightGrip > 0.65f &&
+                                            rightTrigger > 0.65f);
+                bool kineticCleaveSwing = (kineticCleaveStance && rVel.y < -1.40f && lVel.y < -1.10f);
+
+                // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Shoulder Dislocation (ADR 0237)
+                bool whizzerCounterStance = (handsDistSledge < 0.26f &&
+                                             leftLocal.y > -0.15f && leftLocal.y < 0.15f &&
+                                             leftGrip > 0.65f && rightGrip > 0.65f);
+                bool whizzerCounterThrow = (whizzerCounterStance && rVel.y < -1.25f && fabsf(lVel.x) > 0.95f);
+                if (whizzerCounterThrow && (now - st.lastWhizzerCounterTime > 2000)) {
+                    st.whizzerCounterDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward Two-Handed Kinetic Cleave & Arc Discharge Blast (ADR 0238)
+                bool cleaveArcBlastStance = (handsDistSledge < 0.28f &&
+                                             rightLocal.y > 0.16f && leftLocal.y > 0.08f &&
+                                             leftGrip > 0.65f && rightGrip > 0.65f &&
+                                             rightTrigger > 0.65f);
+                bool cleaveArcBlastStrike = (cleaveArcBlastStance && rVel.y < -1.30f && lVel.y < -1.05f && rVel.z < -1.00f);
+
+                // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Cervical Compression Mat Spike (ADR 0241)
+                bool cervicalSpikeStance = (handsDistSledge < 0.26f &&
+                                            leftLocal.y > -0.10f && leftLocal.y < 0.20f &&
+                                            leftGrip > 0.65f && rightGrip > 0.65f);
+                bool cervicalSpikeThrow = (cervicalSpikeStance && rVel.y < -1.35f &&
+                                           lVel.y < -1.05f && fabsf(lVel.x) > 0.85f);
+                if (cervicalSpikeThrow && (now - st.lastCervicalSpikeTime > 2000)) {
+                    st.cervicalSpikeDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Ground Arc Disruption (ADR 0242)
+                bool isJumpingStance = ((rightButtons & RIDDICK_VR_BTN_B) != 0 || rVel.y > 0.85f || lVel.y > 0.85f);
+                bool vaultGroundArcStance = (handsDistSledge < 0.24f &&
+                                             leftGrip > 0.65f && rightGrip > 0.65f &&
+                                             rightTrigger > 0.65f);
+                bool vaultGroundArcPlunge = (vaultGroundArcStance && isJumpingStance && rVel.y < -1.40f && lVel.y < -1.15f);
+
+                // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Grating Slam (ADR 0245)
+                bool thoracicSlamStance = (handsDistSledge < 0.26f &&
+                                           leftLocal.y > -0.20f && leftLocal.y < 0.15f &&
+                                           leftGrip > 0.65f && rightGrip > 0.65f);
+                bool thoracicSlamThrow = (thoracicSlamStance && rVel.y < -1.30f &&
+                                          fabsf(lVel.x) > 0.90f && lVel.y > 0.60f);
+                if (thoracicSlamThrow && (now - st.lastThoracicSlamTime > 2000)) {
+                    st.thoracicSlamDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Kinetic Cleave Shockwave (ADR 0246)
+                bool vaultKineticCleaveStance = (handsDistSledge < 0.28f &&
+                                                 rightLocal.y > 0.15f &&
+                                                 leftGrip > 0.65f && rightGrip > 0.65f &&
+                                                 rightTrigger > 0.65f);
+                bool vaultKineticCleavePlunge = (vaultKineticCleaveStance && isJumpingStance &&
+                                                 rVel.y < -1.45f && lVel.y < -1.15f);
+
+                // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Cervical Hyperextension Mat Spike (ADR 0249)
+                bool hyperextensionSpikeStance = (handsDistSledge < 0.26f &&
+                                                  leftLocal.y > -0.05f &&
+                                                  leftGrip > 0.65f && rightGrip > 0.65f);
+                bool hyperextensionSpikeThrow = (hyperextensionSpikeStance && rVel.y < -1.40f &&
+                                                 lVel.y > 0.85f && fabsf(lVel.x) > 0.90f);
+                if (hyperextensionSpikeThrow && (now - st.lastHyperextensionSpikeTime > 2000)) {
+                    st.hyperextensionSpikeDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Concussive Deck Impact Shockwave (ADR 0250)
+                bool deckImpactStance = (handsDistSledge < 0.28f &&
+                                         leftGrip > 0.65f && rightGrip > 0.65f &&
+                                         rightTrigger > 0.65f);
+                bool deckImpactPlunge = (deckImpactStance && isJumpingStance &&
+                                         rVel.y < -1.50f && lVel.y < -1.25f);
+
+                // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Cervical Compression Ground Finisher (ADR 0253)
+                bool whizzerGroundFinisherStance = (handsDistSledge < 0.26f &&
+                                                    leftLocal.y > -0.25f && leftLocal.y < 0.10f &&
+                                                    leftGrip > 0.65f && rightGrip > 0.65f);
+                bool whizzerGroundFinisherThrow = (whizzerGroundFinisherStance && rVel.y < -1.45f &&
+                                                   lVel.y < -1.15f && fabsf(lVel.x) > 0.80f);
+                if (whizzerGroundFinisherThrow && (now - st.lastWhizzerGroundFinisherTime > 2000)) {
+                    st.whizzerGroundFinisherDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Deck Arc Dispersion (ADR 0254)
+                bool omnidirectionalArcStance = (handsDistSledge < 0.28f &&
+                                                 leftGrip > 0.65f && rightGrip > 0.65f &&
+                                                 rightTrigger > 0.65f);
+                bool omnidirectionalArcPlunge = (omnidirectionalArcStance && isJumpingStance &&
+                                                 rVel.y < -1.45f && lVel.y < -1.20f &&
+                                                 fabsf(rVel.x - lVel.x) > 0.80f);
+
+                // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Cervical Compression Ground Dislocation (ADR 0257)
+                bool whizzerGroundDislocationStance = (handsDistSledge < 0.26f &&
+                                                       leftLocal.y > -0.30f && leftLocal.y < 0.05f &&
+                                                       leftGrip > 0.65f && rightGrip > 0.65f);
+                bool whizzerGroundDislocationThrow = (whizzerGroundDislocationStance && rVel.y < -1.50f &&
+                                                      lVel.y < -1.20f && fabsf(lVel.x) > 0.85f);
+                if (whizzerGroundDislocationThrow && (now - st.lastWhizzerGroundDislocationTime > 2000)) {
+                    st.whizzerGroundDislocationDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Deck Arc Pulse (ADR 0258)
+                bool omnidirectionalPulseStance = (handsDistSledge < 0.28f &&
+                                                   leftGrip > 0.65f && rightGrip > 0.65f &&
+                                                   rightTrigger > 0.65f);
+                bool omnidirectionalPulsePlunge = (omnidirectionalPulseStance && isJumpingStance &&
+                                                   rVel.y < -1.55f && lVel.y < -1.30f &&
+                                                   fabsf(rVel.x - lVel.x) > 0.90f);
+
+                // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Cervical Compression Ground Finish & Sternum Knee Drop (ADR 0261)
+                bool sternumKneeDropStance = (handsDistSledge < 0.26f &&
+                                              leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                              leftGrip > 0.65f && rightGrip > 0.65f);
+                bool sternumKneeDropThrow = (sternumKneeDropStance && rVel.y < -1.55f &&
+                                             lVel.y < -1.30f && fabsf(lVel.x) > 0.85f);
+                if (sternumKneeDropThrow && (now - st.lastSternumKneeDropTime > 2000)) {
+                    st.sternumKneeDropDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Pulse Discharge Wave (ADR 0262)
+                bool kineticPulseWaveStance = (handsDistSledge < 0.28f &&
+                                               leftGrip > 0.65f && rightGrip > 0.65f &&
+                                               rightTrigger > 0.65f);
+                bool kineticPulseWavePlunge = (kineticPulseWaveStance && isJumpingStance &&
+                                               rVel.y < -1.60f && lVel.y < -1.35f &&
+                                               fabsf(rVel.x - lVel.x) > 0.95f);
+
+                // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Sternum Bone Fracture Mat Spike (ADR 0265)
+                bool sternumFractureSpikeStance = (handsDistSledge < 0.26f &&
+                                                   leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                                   leftGrip > 0.65f && rightGrip > 0.65f);
+                bool sternumFractureSpikeThrow = (sternumFractureSpikeStance && rVel.y < -1.60f &&
+                                                  lVel.y < -1.35f && fabsf(lVel.x) > 0.85f);
+                if (sternumFractureSpikeThrow && (now - st.lastSternumFractureSpikeTime > 2000)) {
+                    st.sternumFractureSpikeDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Cleave Wave (ADR 0266)
+                bool plasmaCleaveWaveStance = (handsDistSledge < 0.28f &&
+                                               leftGrip > 0.65f && rightGrip > 0.65f &&
+                                               rightTrigger > 0.65f);
+                bool plasmaCleaveWavePlunge = (plasmaCleaveWaveStance && isJumpingStance &&
+                                               rVel.y < -1.65f && lVel.y < -1.40f &&
+                                               fabsf(rVel.x - lVel.x) > 1.00f);
+
+                // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Sternum Bone Fracture Thoracic Grating Slam (ADR 0269)
+                bool sternumGratingSlamStance = (handsDistSledge < 0.26f &&
+                                                 leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                                 leftGrip > 0.65f && rightGrip > 0.65f);
+                bool sternumGratingSlamThrow = (sternumGratingSlamStance && rVel.y < -1.65f &&
+                                                lVel.y < -1.40f && fabsf(lVel.x) > 0.85f);
+                if (sternumGratingSlamThrow && (now - st.lastSternumGratingSlamTime > 2000)) {
+                    st.sternumGratingSlamDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Shockwave Overload (ADR 0270)
+                bool plasmaOverloadWaveStance = (handsDistSledge < 0.28f &&
+                                                 leftGrip > 0.65f && rightGrip > 0.65f &&
+                                                 rightTrigger > 0.65f);
+                bool plasmaOverloadWavePlunge = (plasmaOverloadWaveStance && isJumpingStance &&
+                                                 rVel.y < -1.70f && lVel.y < -1.45f &&
+                                                 fabsf(rVel.x - lVel.x) > 1.05f);
+
+                // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Cervical Compression Grating Fracture Slam (ADR 0273)
+                bool cervicalGratingSlamStance = (handsDistSledge < 0.26f &&
+                                                  leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                                  leftGrip > 0.65f && rightGrip > 0.65f);
+                bool cervicalGratingSlamThrow = (cervicalGratingSlamStance && rVel.y < -1.70f &&
+                                                 lVel.y < -1.45f && fabsf(lVel.x) > 0.85f);
+                if (cervicalGratingSlamThrow && (now - st.lastCervicalGratingSlamTime > 2000)) {
+                    st.cervicalGratingSlamDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Detonation (ADR 0274)
+                bool plasmaResonantWaveStance = (handsDistSledge < 0.28f &&
+                                                 leftGrip > 0.65f && rightGrip > 0.65f &&
+                                                 rightTrigger > 0.65f);
+                bool plasmaResonantWavePlunge = (plasmaResonantWaveStance && isJumpingStance &&
+                                                 rVel.y < -1.75f && lVel.y < -1.50f &&
+                                                 fabsf(rVel.x - lVel.x) > 1.10f);
+
+                // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Cervical Compression Grating Hyperextension Finisher (ADR 0277)
+                bool hyperextensionFinisherStance = (handsDistSledge < 0.26f &&
+                                                     leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                                     leftGrip > 0.65f && rightGrip > 0.65f);
+                bool hyperextensionFinisherThrow = (hyperextensionFinisherStance && rVel.y < -1.75f &&
+                                                    lVel.y < -1.50f && fabsf(lVel.x) > 0.85f);
+                if (hyperextensionFinisherThrow && (now - st.lastHyperextensionFinisherTime > 2000)) {
+                    st.hyperextensionFinisherDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Harmonic Deck Quake (ADR 0278)
+                bool plasmaHarmonicQuakeStance = (handsDistSledge < 0.28f &&
+                                                  leftGrip > 0.65f && rightGrip > 0.65f &&
+                                                  rightTrigger > 0.65f);
+                bool plasmaHarmonicQuakePlunge = (plasmaHarmonicQuakeStance && isJumpingStance &&
+                                                  rVel.y < -1.80f && lVel.y < -1.55f &&
+                                                  fabsf(rVel.x - lVel.x) > 1.15f);
+
+                // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Hyperextension Mat Dislocation (ADR 0281)
+                bool thoracicDislocationStance = (handsDistSledge < 0.26f &&
+                                                  leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                                  leftGrip > 0.65f && rightGrip > 0.65f);
+                bool thoracicDislocationThrow = (thoracicDislocationStance && rVel.y < -1.80f &&
+                                                 lVel.y < -1.55f && fabsf(lVel.x) > 0.85f);
+                if (thoracicDislocationThrow && (now - st.lastThoracicDislocationTime > 2000)) {
+                    st.thoracicDislocationDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Seism Shockwave (ADR 0282)
+                bool plasmaResonantSeismStance = (handsDistSledge < 0.28f &&
+                                                  leftGrip > 0.65f && rightGrip > 0.65f &&
+                                                  rightTrigger > 0.65f);
+                bool plasmaResonantSeismPlunge = (plasmaResonantSeismStance && isJumpingStance &&
+                                                  rVel.y < -1.85f && lVel.y < -1.60f &&
+                                                  fabsf(rVel.x - lVel.x) > 1.20f);
+
+                // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Hyperextension Mat Slam Finisher (ADR 0285)
+                bool thoracicMatSlamStance = (handsDistSledge < 0.26f &&
+                                              leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                              leftGrip > 0.65f && rightGrip > 0.65f);
+                bool thoracicMatSlamThrow = (thoracicMatSlamStance && rVel.y < -1.85f &&
+                                             lVel.y < -1.60f && fabsf(lVel.x) > 0.85f);
+                if (thoracicMatSlamThrow && (now - st.lastThoracicMatSlamTime > 2000)) {
+                    st.thoracicMatSlamDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Seism Overdrive (ADR 0286)
+                bool plasmaSeismOverdriveStance = (handsDistSledge < 0.28f &&
+                                                   leftGrip > 0.65f && rightGrip > 0.65f &&
+                                                   rightTrigger > 0.65f);
+                bool plasmaSeismOverdrivePlunge = (plasmaSeismOverdriveStance && isJumpingStance &&
+                                                   rVel.y < -1.90f && lVel.y < -1.65f &&
+                                                   fabsf(rVel.x - lVel.x) > 1.25f);
+
+                // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Hyperextension Ground Pin Lock (ADR 0289)
+                bool thoracicPinLockStance = (handsDistSledge < 0.26f &&
+                                              leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                              leftGrip > 0.65f && rightGrip > 0.65f);
+                bool thoracicPinLockThrow = (thoracicPinLockStance && rVel.y < -1.90f &&
+                                             lVel.y < -1.65f && fabsf(lVel.x) > 0.85f);
+                if (thoracicPinLockThrow && (now - st.lastThoracicPinLockTime > 2000)) {
+                    st.thoracicPinLockDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Shockwave (ADR 0290)
+                bool plasmaCataclysmStance = (handsDistSledge < 0.28f &&
+                                              leftGrip > 0.65f && rightGrip > 0.65f &&
+                                              rightTrigger > 0.65f);
+                bool plasmaCataclysmPlunge = (plasmaCataclysmStance && isJumpingStance &&
+                                              rVel.y < -1.95f && lVel.y < -1.70f &&
+                                              fabsf(rVel.x - lVel.x) > 1.30f);
+
+                // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Hyperextension Sternum Elbow Drop (ADR 0293)
+                bool sternumElbowDropStance = (handsDistSledge < 0.26f &&
+                                               leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                               leftGrip > 0.65f && rightGrip > 0.65f);
+                bool sternumElbowDropPlunge = (sternumElbowDropStance && rVel.y < -1.95f &&
+                                               lVel.y < -1.70f && fabsf(lVel.x) > 0.90f);
+                if (sternumElbowDropPlunge && (now - st.lastSternumElbowDropTime > 2000)) {
+                    st.sternumElbowDropDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Overdrive (ADR 0294)
+                bool plasmaCataclysmOverdriveStance = (handsDistSledge < 0.28f &&
+                                                      leftGrip > 0.65f && rightGrip > 0.65f &&
+                                                      rightTrigger > 0.65f);
+                bool plasmaCataclysmOverdrivePlunge = (plasmaCataclysmOverdriveStance && isJumpingStance &&
+                                                      rVel.y < -2.00f && lVel.y < -1.75f &&
+                                                      fabsf(rVel.x - lVel.x) > 1.35f);
+
+                // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Hyperextension Cranial Deck Driver (ADR 0297)
+                bool cranialDeckDriverStance = (handsDistSledge < 0.26f &&
+                                                leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                                leftGrip > 0.65f && rightGrip > 0.65f);
+                bool cranialDeckDriverPlunge = (cranialDeckDriverStance && rVel.y < -2.00f &&
+                                                lVel.y < -1.75f && fabsf(lVel.x) > 0.90f);
+                if (cranialDeckDriverPlunge && (now - st.lastCranialDeckDriverTime > 2000)) {
+                    st.cranialDeckDriverDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Singularity (ADR 0298)
+                bool plasmaSingularityStance = (handsDistSledge < 0.28f &&
+                                                leftGrip > 0.65f && rightGrip > 0.65f &&
+                                                rightTrigger > 0.65f);
+                bool plasmaSingularityPlunge = (plasmaSingularityStance && isJumpingStance &&
+                                                rVel.y < -2.05f && lVel.y < -1.80f &&
+                                                fabsf(rVel.x - lVel.x) > 1.40f);
+
+                // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Hyperextension Sternum Knee Spike Finisher (ADR 0301)
+                bool sternumKneeSpikeStance = (handsDistSledge < 0.26f &&
+                                               leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                               leftGrip > 0.65f && rightGrip > 0.65f);
+                bool sternumKneeSpikePlunge = (sternumKneeSpikeStance && rVel.y < -2.05f &&
+                                               lVel.y < -1.80f && fabsf(lVel.x) > 0.90f);
+                if (sternumKneeSpikePlunge && (now - st.lastSternumKneeSpikeTime > 2000)) {
+                    st.sternumKneeSpikeDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Supernova (ADR 0302)
+                bool plasmaSupernovaStance = (handsDistSledge < 0.28f &&
+                                              leftGrip > 0.65f && rightGrip > 0.65f &&
+                                              rightTrigger > 0.65f);
+                bool plasmaSupernovaPlunge = (plasmaSupernovaStance && isJumpingStance &&
+                                              rVel.y < -2.10f && lVel.y < -1.85f &&
+                                              fabsf(rVel.x - lVel.x) > 1.45f);
+
+                // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Hyperextension Cervical Deck Pin Spike (ADR 0305)
+                bool cervicalDeckPinStance = (handsDistSledge < 0.26f &&
+                                              leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                              leftGrip > 0.65f && rightGrip > 0.65f);
+                bool cervicalDeckPinPlunge = (cervicalDeckPinStance && rVel.y < -2.10f &&
+                                              lVel.y < -1.85f && fabsf(lVel.x) > 0.90f);
+                if (cervicalDeckPinPlunge && (now - st.lastCervicalDeckPinTime > 2000)) {
+                    st.cervicalDeckPinDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Hypernova (ADR 0306)
+                bool plasmaHypernovaStance = (handsDistSledge < 0.28f &&
+                                              leftGrip > 0.65f && rightGrip > 0.65f &&
+                                              rightTrigger > 0.65f);
+                bool plasmaHypernovaPlunge = (plasmaHypernovaStance && isJumpingStance &&
+                                              rVel.y < -2.15f && lVel.y < -1.90f &&
+                                              fabsf(rVel.x - lVel.x) > 1.50f);
+
+                // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Hyperextension Cranial Grating Grind (ADR 0309)
+                bool cranialGrindStance = (handsDistSledge < 0.26f &&
+                                           leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                           leftGrip > 0.65f && rightGrip > 0.65f);
+                bool cranialGrindPlunge = (cranialGrindStance && rVel.y < -2.15f &&
+                                           lVel.y < -1.90f && fabsf(lVel.x) > 0.90f);
+                if (cranialGrindPlunge && (now - st.lastCranialGrindTime > 2000)) {
+                    st.cranialGrindDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Singularity Overdrive (ADR 0310)
+                bool plasmaSingularityOverdriveStance = (handsDistSledge < 0.28f &&
+                                                        leftGrip > 0.65f && rightGrip > 0.65f &&
+                                                        rightTrigger > 0.65f);
+                bool plasmaSingularityOverdrivePlunge = (plasmaSingularityOverdriveStance && isJumpingStance &&
+                                                        rVel.y < -2.20f && lVel.y < -1.95f &&
+                                                        fabsf(rVel.x - lVel.x) > 1.55f);
+
+                // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Hyperextension Cranial Post-Impactor Slam (ADR 0313)
+                bool cranialPostImpactStance = (handsDistSledge < 0.26f &&
+                                                leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                                leftGrip > 0.65f && rightGrip > 0.65f);
+                bool cranialPostImpactPlunge = (cranialPostImpactStance && rVel.y < -2.20f &&
+                                                lVel.y < -1.95f && fabsf(lVel.x) > 0.95f);
+                if (cranialPostImpactPlunge && (now - st.lastCranialPostImpactTime > 2000)) {
+                    st.cranialPostImpactDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Genesis Overdrive (ADR 0314)
+                bool plasmaGenesisStance = (handsDistSledge < 0.28f &&
+                                            leftGrip > 0.65f && rightGrip > 0.65f &&
+                                            rightTrigger > 0.65f);
+                bool plasmaGenesisPlunge = (plasmaGenesisStance && isJumpingStance &&
+                                            rVel.y < -2.25f && lVel.y < -2.00f &&
+                                            fabsf(rVel.x - lVel.x) > 1.60f);
+
+                // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Hyperextension Cranial Deck Grating Stomp Finisher (ADR 0317)
+                bool cranialStompStance = (handsDistSledge < 0.26f &&
+                                           leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                           leftGrip > 0.65f && rightGrip > 0.65f);
+                bool cranialStompPlunge = (cranialStompStance && rVel.y < -2.25f &&
+                                           lVel.y < -2.00f && fabsf(lVel.x) > 0.95f);
+                if (cranialStompPlunge && (now - st.lastCranialStompTime > 2000)) {
+                    st.cranialStompDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Big Bang Overdrive (ADR 0318)
+                bool plasmaBigBangStance = (handsDistSledge < 0.28f &&
+                                            leftGrip > 0.65f && rightGrip > 0.65f &&
+                                            rightTrigger > 0.65f);
+                bool plasmaBigBangPlunge = (plasmaBigBangStance && isJumpingStance &&
+                                            rVel.y < -2.30f && lVel.y < -2.05f &&
+                                            fabsf(rVel.x - lVel.x) > 1.65f);
+
+                // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Hyperextension Cranial Post Double-Strike Execution (ADR 0321)
+                bool cranialDoubleStrikeStance = (handsDistSledge < 0.26f &&
+                                                  leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                                  leftGrip > 0.65f && rightGrip > 0.65f);
+                bool cranialDoubleStrikePlunge = (cranialDoubleStrikeStance && rVel.y < -2.30f &&
+                                                  lVel.y < -2.05f && fabsf(lVel.x) > 0.95f);
+                if (cranialDoubleStrikePlunge && (now - st.lastCranialDoubleStrikeTime > 2000)) {
+                    st.cranialDoubleStrikeDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Cosmic Dawn Overdrive (ADR 0322)
+                bool plasmaCosmicDawnStance = (handsDistSledge < 0.28f &&
+                                               leftGrip > 0.65f && rightGrip > 0.65f &&
+                                               rightTrigger > 0.65f);
+                bool plasmaCosmicDawnPlunge = (plasmaCosmicDawnStance && isJumpingStance &&
+                                               rVel.y < -2.35f && lVel.y < -2.10f &&
+                                               fabsf(rVel.x - lVel.x) > 1.70f);
+
+                // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Hyperextension Cranial Post Pivot-Twist Fracture (ADR 0325)
+                bool cranialPivotTwistStance = (handsDistSledge < 0.26f &&
+                                                leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                                leftGrip > 0.65f && rightGrip > 0.65f);
+                bool cranialPivotTwistPlunge = (cranialPivotTwistStance && rVel.y < -2.35f &&
+                                                lVel.y < -2.10f && fabsf(lVel.x) > 1.00f);
+                if (cranialPivotTwistPlunge && (now - st.lastCranialPivotTwistTime > 2000)) {
+                    st.cranialPivotTwistDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Supercluster Overdrive (ADR 0326)
+                bool plasmaSuperclusterStance = (handsDistSledge < 0.28f &&
+                                                 leftGrip > 0.65f && rightGrip > 0.65f &&
+                                                 rightTrigger > 0.65f);
+                bool plasmaSuperclusterPlunge = (plasmaSuperclusterStance && isJumpingStance &&
+                                                 rVel.y < -2.40f && lVel.y < -2.15f &&
+                                                 fabsf(rVel.x - lVel.x) > 1.75f);
+
+                // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Hyperextension Cranial Post Pivot-Twist Deck Slam (ADR 0329)
+                bool cranialPivotSlamStance = (handsDistSledge < 0.26f &&
+                                               leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                               leftGrip > 0.65f && rightGrip > 0.65f);
+                bool cranialPivotSlamPlunge = (cranialPivotSlamStance && rVel.y < -2.40f &&
+                                               lVel.y < -2.15f && fabsf(lVel.x) > 1.00f);
+                if (cranialPivotSlamPlunge && (now - st.lastCranialPivotSlamTime > 2000)) {
+                    st.cranialPivotSlamDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Omniverse Overdrive (ADR 0330)
+                bool plasmaOmniverseStance = (handsDistSledge < 0.28f &&
+                                              leftGrip > 0.65f && rightGrip > 0.65f &&
+                                              rightTrigger > 0.65f);
+                bool plasmaOmniversePlunge = (plasmaOmniverseStance && isJumpingStance &&
+                                              rVel.y < -2.45f && lVel.y < -2.20f &&
+                                              fabsf(rVel.x - lVel.x) > 1.80f);
+
+                // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Cranial Post Lever-Pin Lock Takedown (ADR 0333)
+                bool cranialLeverPinStance = (handsDistSledge < 0.26f &&
+                                              leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                              leftGrip > 0.65f && rightGrip > 0.65f);
+                bool cranialLeverPinPlunge = (cranialLeverPinStance && rVel.y < -2.45f &&
+                                              lVel.y < -2.20f && fabsf(lVel.x) > 1.05f);
+                if (cranialLeverPinPlunge && (now - st.lastCranialLeverPinTime > 2000)) {
+                    st.cranialLeverPinDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Metaverse Overdrive (ADR 0334)
+                bool plasmaMetaverseStance = (handsDistSledge < 0.28f &&
+                                              leftGrip > 0.65f && rightGrip > 0.65f &&
+                                              rightTrigger > 0.65f);
+                bool plasmaMetaversePlunge = (plasmaMetaverseStance && isJumpingStance &&
+                                              rVel.y < -2.50f && lVel.y < -2.25f &&
+                                              fabsf(rVel.x - lVel.x) > 1.85f);
+
+                // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Cranial Post Fulcrum Leverage Chokehold Finisher (ADR 0337)
+                bool cranialFulcrumChokeStance = (handsDistSledge < 0.26f &&
+                                                  leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                                  leftGrip > 0.65f && rightGrip > 0.65f);
+                bool cranialFulcrumChokePlunge = (cranialFulcrumChokeStance && rVel.y < -2.50f &&
+                                                  lVel.y < -2.25f && fabsf(lVel.x) > 1.10f);
+                if (cranialFulcrumChokePlunge && (now - st.lastCranialFulcrumChokeTime > 2000)) {
+                    st.cranialFulcrumChokeDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Hyperdimensional Overdrive (ADR 0338)
+                bool plasmaHyperdimensionalStance = (handsDistSledge < 0.28f &&
+                                                     leftGrip > 0.65f && rightGrip > 0.65f &&
+                                                     rightTrigger > 0.65f);
+                bool plasmaHyperdimensionalPlunge = (plasmaHyperdimensionalStance && isJumpingStance &&
+                                                     rVel.y < -2.55f && lVel.y < -2.30f &&
+                                                     fabsf(rVel.x - lVel.x) > 1.90f);
+
+                // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Cranial Post Fulcrum Leverage Armbar Fracture (ADR 0341)
+                bool cranialFulcrumArmbarStance = (handsDistSledge < 0.26f &&
+                                                   leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                                   leftGrip > 0.65f && rightGrip > 0.65f);
+                bool cranialFulcrumArmbarPlunge = (cranialFulcrumArmbarStance && rVel.y < -2.55f &&
+                                                   lVel.y < -2.30f && fabsf(lVel.x) > 1.15f);
+                if (cranialFulcrumArmbarPlunge && (now - st.lastCranialFulcrumArmbarTime > 2000)) {
+                    st.cranialFulcrumArmbarDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Transdimensional Overdrive (ADR 0342)
+                bool plasmaTransdimensionalStance = (handsDistSledge < 0.28f &&
+                                                     leftGrip > 0.65f && rightGrip > 0.65f &&
+                                                     rightTrigger > 0.65f);
+                bool plasmaTransdimensionalPlunge = (plasmaTransdimensionalStance && isJumpingStance &&
+                                                     rVel.y < -2.60f && lVel.y < -2.35f &&
+                                                     fabsf(rVel.x - lVel.x) > 1.95f);
+
+                // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Cranial Post Fulcrum Leverage Sternum Knee Drive (ADR 0345)
+                bool cranialFulcrumKneeStance = (handsDistSledge < 0.26f &&
+                                                 leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                                 leftGrip > 0.65f && rightGrip > 0.65f);
+                bool cranialFulcrumKneePlunge = (cranialFulcrumKneeStance && rVel.y < -2.60f &&
+                                                 lVel.y < -2.35f && fabsf(lVel.x) > 1.20f);
+                if (cranialFulcrumKneePlunge && (now - st.lastCranialFulcrumKneeTime > 2000)) {
+                    st.cranialFulcrumKneeDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Interdimensional Overdrive (ADR 0346)
+                bool plasmaInterdimensionalStance = (handsDistSledge < 0.28f &&
+                                                     leftGrip > 0.65f && rightGrip > 0.65f &&
+                                                     rightTrigger > 0.65f);
+                bool plasmaInterdimensionalPlunge = (plasmaInterdimensionalStance && isJumpingStance &&
+                                                     rVel.y < -2.65f && lVel.y < -2.40f &&
+                                                     fabsf(rVel.x - lVel.x) > 2.00f);
+
+                // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Cranial Post Fulcrum Leverage Ribcage Fracture Deck Slam (ADR 0349)
+                bool cranialFulcrumRibSlamStance = (handsDistSledge < 0.26f &&
+                                                    leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                                    leftGrip > 0.65f && rightGrip > 0.65f);
+                bool cranialFulcrumRibSlamPlunge = (cranialFulcrumRibSlamStance && rVel.y < -2.65f &&
+                                                    lVel.y < -2.40f && fabsf(lVel.x) > 1.25f);
+                if (cranialFulcrumRibSlamPlunge && (now - st.lastCranialFulcrumRibSlamTime > 2000)) {
+                    st.cranialFulcrumRibSlamDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Continuum Singularity Overdrive (ADR 0350)
+                bool plasmaContinuumSingularityStance = (handsDistSledge < 0.28f &&
+                                                         leftGrip > 0.65f && rightGrip > 0.65f &&
+                                                         rightTrigger > 0.65f);
+                bool plasmaContinuumSingularityPlunge = (plasmaContinuumSingularityStance && isJumpingStance &&
+                                                         rVel.y < -2.70f && lVel.y < -2.45f &&
+                                                         fabsf(rVel.x - lVel.x) > 2.05f);
+
+                // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Cranial Post Fulcrum Leverage Clavicle Fracture Ground Pin (ADR 0353)
+                bool cranialFulcrumClaviclePinStance = (handsDistSledge < 0.26f &&
+                                                        leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                                        leftGrip > 0.65f && rightGrip > 0.65f);
+                bool cranialFulcrumClaviclePinPlunge = (cranialFulcrumClaviclePinStance && rVel.y < -2.70f &&
+                                                        lVel.y < -2.45f && fabsf(lVel.x) > 1.30f);
+                if (cranialFulcrumClaviclePinPlunge && (now - st.lastCranialFulcrumClaviclePinTime > 2000)) {
+                    st.cranialFulcrumClaviclePinDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Multiverse Singularity Overdrive (ADR 0354)
+                bool plasmaMultiverseSingularityStance = (handsDistSledge < 0.28f &&
+                                                          leftGrip > 0.65f && rightGrip > 0.65f &&
+                                                          rightTrigger > 0.65f);
+                bool plasmaMultiverseSingularityPlunge = (plasmaMultiverseSingularityStance && isJumpingStance &&
+                                                          rVel.y < -2.75f && lVel.y < -2.50f &&
+                                                          fabsf(rVel.x - lVel.x) > 2.10f);
+
+                // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Cranial Post Fulcrum Leverage Scapula Fracture Deck Pin (ADR 0357)
+                bool cranialFulcrumScapulaPinStance = (handsDistSledge < 0.26f &&
+                                                        leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                                        leftGrip > 0.65f && rightGrip > 0.65f);
+                bool cranialFulcrumScapulaPinPlunge = (cranialFulcrumScapulaPinStance && rVel.y < -2.75f &&
+                                                        lVel.y < -2.50f && fabsf(lVel.x) > 1.35f);
+                if (cranialFulcrumScapulaPinPlunge && (now - st.lastCranialFulcrumScapulaPinTime > 2000)) {
+                    st.cranialFulcrumScapulaPinDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Omniverse Singularity Overdrive (ADR 0358)
+                bool plasmaOmniverseSingularityStance = (handsDistSledge < 0.28f &&
+                                                         leftGrip > 0.65f && rightGrip > 0.65f &&
+                                                         rightTrigger > 0.65f);
+                bool plasmaOmniverseSingularityPlunge = (plasmaOmniverseSingularityStance && isJumpingStance &&
+                                                         rVel.y < -2.80f && lVel.y < -2.55f &&
+                                                         fabsf(rVel.x - lVel.x) > 2.15f);
+
+                // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Cranial Post Fulcrum Leverage Sternum Crushing Ground Pin (ADR 0361)
+                bool cranialFulcrumSternumPinStance = (handsDistSledge < 0.26f &&
+                                                        leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                                        leftGrip > 0.65f && rightGrip > 0.65f);
+                bool cranialFulcrumSternumPinPlunge = (cranialFulcrumSternumPinStance && rVel.y < -2.80f &&
+                                                        lVel.y < -2.55f && fabsf(lVel.x) > 1.40f);
+                if (cranialFulcrumSternumPinPlunge && (now - st.lastCranialFulcrumSternumPinTime > 2000)) {
+                    st.cranialFulcrumSternumPinDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Trans-Cosmic Singularity Overdrive (ADR 0362)
+                bool plasmaTransCosmicSingularityStance = (handsDistSledge < 0.28f &&
+                                                           leftGrip > 0.65f && rightGrip > 0.65f &&
+                                                           rightTrigger > 0.65f);
+                bool plasmaTransCosmicSingularityPlunge = (plasmaTransCosmicSingularityStance && isJumpingStance &&
+                                                           rVel.y < -2.85f && lVel.y < -2.60f &&
+                                                           fabsf(rVel.x - lVel.x) > 2.20f);
+
+                // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Cranial Post Fulcrum Leverage Mandible Dislocation Ground Pin (ADR 0365)
+                bool cranialFulcrumMandiblePinStance = (handsDistSledge < 0.26f &&
+                                                         leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                                         leftGrip > 0.65f && rightGrip > 0.65f);
+                bool cranialFulcrumMandiblePinPlunge = (cranialFulcrumMandiblePinStance && rVel.y < -2.85f &&
+                                                         lVel.y < -2.60f && fabsf(lVel.x) > 1.45f);
+                if (cranialFulcrumMandiblePinPlunge && (now - st.lastCranialFulcrumMandiblePinTime > 2000)) {
+                    st.cranialFulcrumMandiblePinDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Macrocosm Singularity Overdrive (ADR 0366)
+                bool plasmaMacrocosmSingularityStance = (handsDistSledge < 0.28f &&
+                                                           leftGrip > 0.65f && rightGrip > 0.65f &&
+                                                           rightTrigger > 0.65f);
+                bool plasmaMacrocosmSingularityPlunge = (plasmaMacrocosmSingularityStance && isJumpingStance &&
+                                                           rVel.y < -2.90f && lVel.y < -2.65f &&
+                                                           fabsf(rVel.x - lVel.x) > 2.25f);
+
+                // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Cranial Post Fulcrum Leverage Zygomatic Arch Fracture Ground Pin (ADR 0369)
+                bool cranialFulcrumZygomaticPinStance = (handsDistSledge < 0.26f &&
+                                                         leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                                         leftGrip > 0.65f && rightGrip > 0.65f);
+                bool cranialFulcrumZygomaticPinPlunge = (cranialFulcrumZygomaticPinStance && rVel.y < -2.90f &&
+                                                         lVel.y < -2.65f && fabsf(lVel.x) > 1.50f);
+                if (cranialFulcrumZygomaticPinPlunge && (now - st.lastCranialFulcrumZygomaticPinTime > 2000)) {
+                    st.cranialFulcrumZygomaticPinDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                }
+
+                // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Universal Singularity Overdrive (ADR 0370)
+                bool plasmaUniversalSingularityStance = (handsDistSledge < 0.28f &&
+                                                           leftGrip > 0.65f && rightGrip > 0.65f &&
+                                                           rightTrigger > 0.65f);
+                bool plasmaUniversalSingularityPlunge = (plasmaUniversalSingularityStance && isJumpingStance &&
+                                                           rVel.y < -2.95f && lVel.y < -2.70f &&
+                                                           fabsf(rVel.x - lVel.x) > 2.30f);
+
+                // Inmate Pit Brawl Outside Leg Hook Sweep & Ground Knee Drop (ADR 0209)
+                bool outsideLegSweepHook = (leftLocal.y < -0.30f && fabsf(lVel.x) > 0.90f);
+                if (outsideLegSweepHook && (now - st.lastOutsideLegSweepTime > 2000)) {
+                    if (st.outsideLegSweepHookTime == 0) {
+                        st.outsideLegSweepHookTime = now;
+                        st.outsideLegSweepDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+                        out.outsideLegHooked = true;
+                    }
+                }
+                bool outsideLegKneeDrop = (st.outsideLegSweepHookTime > 0 && (now - st.outsideLegSweepHookTime < 500) && rVel.y < -1.25f);
+                if (st.outsideLegSweepHookTime != 0 && (now - st.outsideLegSweepHookTime >= 500)) st.outsideLegSweepHookTime = 0; // GH #25: timeout reset
+
+                // Security Guard Stun Baton Forward Two-Handed Cross-Chest Block & Arc Thrust Disruption (ADR 0198 & 0210)
+                bool crossChestGuardStance = (handsDistSledge > 0.20f && handsDistSledge < 0.38f &&
+                                              fabsf(rightLocal.x - leftLocal.x) > 0.22f &&
+                                              rightLocal.y > -0.15f && rightLocal.y < 0.15f &&
+                                              rightLocal.z > -0.30f && rightLocal.z < -0.10f &&
+                                              leftGrip > 0.65f && rightGrip > 0.65f &&
+                                              leftTrigger > 0.65f && rightTrigger > 0.65f);
+                bool isCrossThrustReady = false;
+                bool isCrossThrustOvercharged = false;
+                if (crossChestGuardStance) {
+                    if (st.crossBlockHoldStart == 0) st.crossBlockHoldStart = now;
+                    DWORD crossHoldDuration = now - st.crossBlockHoldStart;
+                    if (crossHoldDuration >= 500) {
+                        out.crossThrustSupercharged = true;
+                        if (rVel.z < -1.30f && lVel.z < -1.10f) {
+                            isCrossThrustOvercharged = true;
+                        }
+                    } else if (crossHoldDuration >= 300) {
+                        out.crossThrustBarrierHum = true;
+                        if (rVel.z < -1.25f && lVel.z < -1.05f) {
+                            isCrossThrustReady = true;
+                        }
+                    }
+                } else {
+                    st.crossBlockHoldStart = 0;
+                }
+    out.mechPowerPunch = mechPowerPunch;
+    out.droneEmpSnap = droneEmpSnap;
+    out.dualShieldBash = dualShieldBash;
+    out.dualShieldPlant = dualShieldPlant;
+    out.dualStoolHeavySmash = dualStoolHeavySmash;
+    out.dualPalmShove = dualPalmShove;
+    out.isLookingDown = isLookingDown;
+    out.isDownwardPlunge = isDownwardPlunge;
+    out.dualOverheadSlam = dualOverheadSlam;
+    out.leftTrayBatter = leftTrayBatter;
+    out.twoHandedBatonSlam = twoHandedBatonSlam;
+    out.dualSledgeOverhead = dualSledgeOverhead;
+    out.isDischargingArcWave = isDischargingArcWave;
+    out.stealthCarotidSlash = stealthCarotidSlash;
+    out.isRibUnderhook = isRibUnderhook;
+    out.dartCounterJabStrike = dartCounterJabStrike;
+    out.isDoubleEarClap = isDoubleEarClap;
+    out.isBatonRibJab = isBatonRibJab;
+    out.isParrySnap = isParrySnap;
+    out.blindRiposteStrike = blindRiposteStrike;
+    out.isKneeStomp = isKneeStomp;
+    out.isInductionOverheated = isInductionOverheated;
+    out.sternumElbowSmash = sternumElbowSmash;
+    out.isBatonChargedSpear = isBatonChargedSpear;
+    out.isClinchHeadbutt = isClinchHeadbutt;
+    out.isBatonGroundPin = isBatonGroundPin;
+    out.isLeadKneeThrust = isLeadKneeThrust;
+    out.isCrossChestArcWall = isCrossChestArcWall;
+    out.isDuckUnderKidneyCounter = isDuckUnderKidneyCounter;
+    out.isBatonArcTrapArmed = isBatonArcTrapArmed;
+    out.cervicalSnapWhip = cervicalSnapWhip;
+    out.isBatonGroundDischarge = isBatonGroundDischarge;
+    out.guillotineWrapStrike = guillotineWrapStrike;
+    out.isBatonSkullBreaker = isBatonSkullBreaker;
+    out.isBatonLateralDisarm = isBatonLateralDisarm;
+    out.hammerfistStrike = hammerfistStrike;
+    out.suplexSpineSlam = suplexSpineSlam;
+    out.isCrossArcBurstReady = isCrossArcBurstReady;
+    out.isBatonJavelinThrust = isBatonJavelinThrust;
+    out.isOutsideTripMount = isOutsideTripMount;
+    out.isKimuraFracture = isKimuraFracture;
+    out.isArmTriangleReady = isArmTriangleReady;
+    out.isBatonDiagonalParry = isBatonDiagonalParry;
+    out.isBatonRadialSweep = isBatonRadialSweep;
+    out.isSingleLegTakedown = isSingleLegTakedown;
+    out.batonTripSweep = batonTripSweep;
+    out.doubleLegSpikeSlam = doubleLegSpikeSlam;
+    out.batonThroatThrustStrike = batonThroatThrustStrike;
+    out.firemansWhipThrow = firemansWhipThrow;
+    out.frontHeadlockWrap = frontHeadlockWrap;
+    out.frontHeadlockArchTorque = frontHeadlockArchTorque;
+    out.crossParryRiposte = crossParryRiposte;
+    out.suloevLowCrouch = suloevLowCrouch;
+    out.suloevHookHold = suloevHookHold;
+    out.suloevArchPull = suloevArchPull;
+    out.isLookingDownward = isLookingDownward;
+    out.batonOverheadVault = batonOverheadVault;
+    out.batonVaultPlunge = batonVaultPlunge;
+    out.backSuplexHoistSlam = backSuplexHoistSlam;
+    out.radialDisarmThrust = radialDisarmThrust;
+    out.thaiPlumKneeDrive = thaiPlumKneeDrive;
+    out.javelinVaultStrike = javelinVaultStrike;
+    out.whizzerDownWhip = whizzerDownWhip;
+    out.batonHammerfistPlunge = batonHammerfistPlunge;
+    out.hipTossRotation = hipTossRotation;
+    out.batonShieldBashThrust = batonShieldBashThrust;
+    out.thaiPlumElbowPlunge = thaiPlumElbowPlunge;
+    out.groundingThrustLunge = groundingThrustLunge;
+    out.lateralSuplexThrow = lateralSuplexThrow;
+    out.kineticCleaveSwing = kineticCleaveSwing;
+    out.whizzerCounterThrow = whizzerCounterThrow;
+    out.cleaveArcBlastStrike = cleaveArcBlastStrike;
+    out.cervicalSpikeThrow = cervicalSpikeThrow;
+    out.vaultGroundArcPlunge = vaultGroundArcPlunge;
+    out.thoracicSlamThrow = thoracicSlamThrow;
+    out.vaultKineticCleavePlunge = vaultKineticCleavePlunge;
+    out.hyperextensionSpikeThrow = hyperextensionSpikeThrow;
+    out.deckImpactPlunge = deckImpactPlunge;
+    out.whizzerGroundFinisherThrow = whizzerGroundFinisherThrow;
+    out.omnidirectionalArcPlunge = omnidirectionalArcPlunge;
+    out.whizzerGroundDislocationThrow = whizzerGroundDislocationThrow;
+    out.omnidirectionalPulsePlunge = omnidirectionalPulsePlunge;
+    out.sternumKneeDropThrow = sternumKneeDropThrow;
+    out.kineticPulseWavePlunge = kineticPulseWavePlunge;
+    out.sternumFractureSpikeThrow = sternumFractureSpikeThrow;
+    out.plasmaCleaveWavePlunge = plasmaCleaveWavePlunge;
+    out.sternumGratingSlamThrow = sternumGratingSlamThrow;
+    out.plasmaOverloadWavePlunge = plasmaOverloadWavePlunge;
+    out.cervicalGratingSlamThrow = cervicalGratingSlamThrow;
+    out.plasmaResonantWavePlunge = plasmaResonantWavePlunge;
+    out.hyperextensionFinisherThrow = hyperextensionFinisherThrow;
+    out.plasmaHarmonicQuakePlunge = plasmaHarmonicQuakePlunge;
+    out.thoracicDislocationThrow = thoracicDislocationThrow;
+    out.plasmaResonantSeismPlunge = plasmaResonantSeismPlunge;
+    out.thoracicMatSlamThrow = thoracicMatSlamThrow;
+    out.plasmaSeismOverdrivePlunge = plasmaSeismOverdrivePlunge;
+    out.thoracicPinLockThrow = thoracicPinLockThrow;
+    out.plasmaCataclysmPlunge = plasmaCataclysmPlunge;
+    out.sternumElbowDropPlunge = sternumElbowDropPlunge;
+    out.plasmaCataclysmOverdrivePlunge = plasmaCataclysmOverdrivePlunge;
+    out.cranialDeckDriverPlunge = cranialDeckDriverPlunge;
+    out.plasmaSingularityPlunge = plasmaSingularityPlunge;
+    out.sternumKneeSpikePlunge = sternumKneeSpikePlunge;
+    out.plasmaSupernovaPlunge = plasmaSupernovaPlunge;
+    out.cervicalDeckPinPlunge = cervicalDeckPinPlunge;
+    out.plasmaHypernovaPlunge = plasmaHypernovaPlunge;
+    out.cranialGrindPlunge = cranialGrindPlunge;
+    out.plasmaSingularityOverdrivePlunge = plasmaSingularityOverdrivePlunge;
+    out.cranialPostImpactPlunge = cranialPostImpactPlunge;
+    out.plasmaGenesisPlunge = plasmaGenesisPlunge;
+    out.cranialStompPlunge = cranialStompPlunge;
+    out.plasmaBigBangPlunge = plasmaBigBangPlunge;
+    out.cranialDoubleStrikePlunge = cranialDoubleStrikePlunge;
+    out.plasmaCosmicDawnPlunge = plasmaCosmicDawnPlunge;
+    out.cranialPivotTwistPlunge = cranialPivotTwistPlunge;
+    out.plasmaSuperclusterPlunge = plasmaSuperclusterPlunge;
+    out.cranialPivotSlamPlunge = cranialPivotSlamPlunge;
+    out.plasmaOmniversePlunge = plasmaOmniversePlunge;
+    out.cranialLeverPinPlunge = cranialLeverPinPlunge;
+    out.plasmaMetaversePlunge = plasmaMetaversePlunge;
+    out.cranialFulcrumChokePlunge = cranialFulcrumChokePlunge;
+    out.plasmaHyperdimensionalPlunge = plasmaHyperdimensionalPlunge;
+    out.cranialFulcrumArmbarPlunge = cranialFulcrumArmbarPlunge;
+    out.plasmaTransdimensionalPlunge = plasmaTransdimensionalPlunge;
+    out.cranialFulcrumKneePlunge = cranialFulcrumKneePlunge;
+    out.plasmaInterdimensionalPlunge = plasmaInterdimensionalPlunge;
+    out.cranialFulcrumRibSlamPlunge = cranialFulcrumRibSlamPlunge;
+    out.plasmaContinuumSingularityPlunge = plasmaContinuumSingularityPlunge;
+    out.cranialFulcrumClaviclePinPlunge = cranialFulcrumClaviclePinPlunge;
+    out.plasmaMultiverseSingularityPlunge = plasmaMultiverseSingularityPlunge;
+    out.cranialFulcrumScapulaPinPlunge = cranialFulcrumScapulaPinPlunge;
+    out.plasmaOmniverseSingularityPlunge = plasmaOmniverseSingularityPlunge;
+    out.cranialFulcrumSternumPinPlunge = cranialFulcrumSternumPinPlunge;
+    out.plasmaTransCosmicSingularityPlunge = plasmaTransCosmicSingularityPlunge;
+    out.cranialFulcrumMandiblePinPlunge = cranialFulcrumMandiblePinPlunge;
+    out.plasmaMacrocosmSingularityPlunge = plasmaMacrocosmSingularityPlunge;
+    out.cranialFulcrumZygomaticPinPlunge = cranialFulcrumZygomaticPinPlunge;
+    out.plasmaUniversalSingularityPlunge = plasmaUniversalSingularityPlunge;
+    out.outsideLegKneeDrop = outsideLegKneeDrop;
+    out.isCrossThrustReady = isCrossThrustReady;
+    out.isCrossThrustOvercharged = isCrossThrustOvercharged;
+    return out;
+}
+
 void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (!m_initialized || !vrState.vrActive) return;
 
@@ -1938,70 +3777,24 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         vrState.comfortVignette += (comfortTarget - vrState.comfortVignette) * 0.2f;
     }
 
-    static DWORD s_lastPunchTime = 0;
     // GH #31: namespaced finisher cooldown. Choreographed finisher dispatches
-    // stamp this instead of s_lastPunchTime so they no longer extend the
+    // stamp this instead of s_melee.lastPunchTime so they no longer extend the
     // reactive melee gate / guard recovery window (cross-talk).
-    static DWORD s_lastFinisherTime = 0;
     // GH #31: per-frame arbitration snapshots (set before melee, read after).
-    DWORD punchAtEntry = s_lastPunchTime;
-    DWORD finisherAtEntry = s_lastFinisherTime;
-    static DWORD s_guardPoseHoldTimer = 0;
-    static DWORD s_guardPoseReleaseTimer = 0;
-    static bool s_currentBlockEngaged = false;
+    DWORD punchAtEntry = s_melee.lastPunchTime;
+    DWORD finisherAtEntry = s_melee.lastFinisherTime;
 
     // 5. Physical Melee Combat Gestures (Jabs, Hooks, Uppercuts, Ulak Cross-Slashes, Shiv Executions, Counter-Parries)
-    if (!isClimbingActive && (now - s_lastPunchTime > 260)) {
-        bool dualCrossSlash = (rVel.x < -1.1f && lVel.x > 1.1f) || (rVel.x > 1.1f && lVel.x < -1.1f);
+    if (!isClimbingActive && (now - s_melee.lastPunchTime > 260)) {
+        // GH #17 step 9: counter/disarm + strike-gate detection delegated to
+        // UpdateMeleeCounters (explicit MeleeState, no behavior change).
+        MeleeCounterIntent meleeCounters = UpdateMeleeCounters(s_melee, now,
+            lVel, rVel, leftLocal, rightLocal,
+            vrState.leftController.grip, vrState.rightController.grip,
+            vrState.leftController.trigger, vrState.rightController.trigger);
 
-        // ADR 0403: Discriminate deliberate directional punch strikes from raising arms into Boxer Guard.
-        // Raising arms upward (Vy > 0) into guard position must NEVER trigger an attack or cancel guard.
-        bool chinLevelRough = (leftLocal.y >= -0.42f && leftLocal.y <= 0.32f) &&
-                              (rightLocal.y >= -0.42f && rightLocal.y <= 0.32f);
-        bool inFrontRough = (leftLocal.z >= -0.68f && leftLocal.z <= -0.05f) &&
-                            (rightLocal.z >= -0.68f && rightLocal.z <= -0.05f);
-        bool inGuardVolume = chinLevelRough && inFrontRough && (fabsf(leftLocal.x - rightLocal.x) < 0.56f);
-
-        bool isForwardPunch = (rVel.z < -1.20f && rightLocal.z < -0.10f) || (lVel.z < -1.20f && leftLocal.z < -0.10f);
-        bool isHookPunch = (fabsf(rVel.x) > 1.35f && rVel.z < -0.15f) || (fabsf(lVel.x) > 1.35f && lVel.z < -0.15f);
-        bool isUppercutPunch = ((rVel.y > 1.35f && rightLocal.y < -0.10f) || (lVel.y > 1.35f && leftLocal.y < -0.10f)) &&
-                               (rVel.z < -0.20f || lVel.z < -0.20f);
-        bool isMeleeStrike = (dualCrossSlash || isForwardPunch || isHookPunch || isUppercutPunch) && !inGuardVolume;
-
-        // 5a. Physical Parry / Counter-Disarm Thrust (ADR 0018)
-        // In Starbreeze engine: Left Click while Right Click (Block) is held executes Counter-Disarm!
-        // When in active Boxer Guard (s_currentBlockEngaged), driving fists forward into an attack (Vz < -1.15 m/s)
-        // executes the reactive counter-strike / disarm without canceling block mode.
-        // Guard Rifle Firearm Stripping & Mag Ejection Disarm (ADR 0063)
-        bool dualRifleStrip = s_currentBlockEngaged &&
-                              (rVel.z < -1.15f && lVel.z < -1.15f) &&
-                              (vrState.rightController.trigger > 0.60f && vrState.leftController.trigger > 0.60f);
-
-        bool isForwardParry = s_currentBlockEngaged &&
-            ((rVel.z < -1.15f && rightLocal.z < -0.15f) || (lVel.z < -1.15f && leftLocal.z < -0.15f));
-
-        // Inmate Shiv Parrying Riposte & Eye-Gouge Counter (ADR 0092)
-        bool isEyeGougeRiposte = s_currentBlockEngaged &&
-            (rVel.z < -1.10f && rVel.y > 1.05f && rightLocal.y > 0.04f);
-
-        // Security Guard Riot Shield Baton Wedge Pry & Disarm (ADR 0111)
-        bool bothAtShieldZone = (rightLocal.z > -0.42f && rightLocal.z < -0.16f && leftLocal.z > -0.42f && leftLocal.z < -0.16f) &&
-                                (rightLocal.y > -0.20f && rightLocal.y < 0.20f && leftLocal.y > -0.20f && leftLocal.y < 0.20f);
-        bool shieldGrippedAndWedged = (vrState.leftController.grip > 0.60f) &&
-                                      (vrState.rightController.trigger > 0.50f || vrState.rightController.grip > 0.60f);
-        bool opposingShieldWrench = (lVel.x < -0.90f || lVel.y < -0.80f) && (rVel.x > 0.90f || rVel.y > 0.80f);
-        bool isShieldPryDisarm = bothAtShieldZone && shieldGrippedAndWedged && opposingShieldWrench;
-
-        // Inmate Pit Brawl Pocket Ash Throw Riposte (ADR 0115)
-        static DWORD s_lastPocketAshRiposteTime = 0;
-        bool rightAtPocket = (rightLocal.y > -0.45f && rightLocal.y < -0.15f) &&
-                             (fabsf(rightLocal.x) > 0.10f && fabsf(rightLocal.x) < 0.26f) &&
-                             (vrState.rightController.grip > 0.50f);
-        bool pocketAshFling = (rVel.y > 1.10f && rVel.z < -0.90f);
-        bool isPocketAshRiposte = s_currentBlockEngaged && rightAtPocket && pocketAshFling;
-
-        if (dualRifleStrip) {
-            s_lastPunchTime = now;
+        if (meleeCounters.dualRifleStrip) {
+            s_melee.lastPunchTime = now;
             VR_LOG_INFO("Physical Counter: GUARD RIFLE STRIP & MAG EJECTION DISARM (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
             SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
             SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
@@ -2009,9 +3802,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             SendGestureTap('1', "melee/rifle-strip-equip");
             HapticRequest(1, (0.95f), kHapticFinisher); // Receiver wrenching shockwave (280 Hz)
             HapticRequest(0, (0.95f), kHapticFinisher);
-        } else if (isPocketAshRiposte && (now - s_lastPocketAshRiposteTime > 1600)) {
-            s_lastPocketAshRiposteTime = now;
-            s_lastPunchTime = now;
+        } else if (meleeCounters.isPocketAshRiposte && (now - s_melee.lastPocketAshRiposteTime > 1600)) {
+            s_melee.lastPocketAshRiposteTime = now;
+            s_melee.lastPunchTime = now;
             VR_LOG_INFO("Physical Counter: POCKET ASH THROW BLIND & RIPOSTE (Ry: %.2f, Rz: %.2f)", rVel.y, rVel.z);
             SendGestureTap('E', "melee/ash-riposte"); // Track C #15
             SendGestureTap(VK_TAB, "melee/ash-riposte-tab");
@@ -2020,8 +3813,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
             SendKey('W', false);
             HapticRequest(1, (0.85f), kHapticReload); // Particulate scatter & strike snap (220 Hz)
-        } else if (isShieldPryDisarm) {
-            s_lastPunchTime = now;
+        } else if (meleeCounters.isShieldPryDisarm) {
+            s_melee.lastPunchTime = now;
             VR_LOG_INFO("Physical Counter: RIOT SHIELD WEDGE PRY & DISARM (Lx: %.2f, Rx: %.2f)", lVel.x, rVel.x);
             SendGestureTap('E', "melee/shield-pry"); // Track C #15
             SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
@@ -2029,1477 +3822,149 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             SendGestureTap('1', "melee/shield-seize");
             HapticRequest(0, (0.95f), kHapticFinisher); // Metallic shear crack (280 Hz)
             HapticRequest(1, (0.95f), kHapticFinisher);
-        } else if (isEyeGougeRiposte) {
-            s_lastPunchTime = now;
+        } else if (meleeCounters.isEyeGougeRiposte) {
+            s_melee.lastPunchTime = now;
             VR_LOG_INFO("Physical Counter: INMATE SHIV EYE-GOUGE RIPOSTE (Rz: %.2f, Ry: %.2f, Ey: %.2f)", rVel.z, rVel.y, rightLocal.y);
             SendKey('W', true);
             SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
             SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
             SendKey('W', false);
             HapticRequest(1, (0.95f), kHapticFinisher); // Perforation & orbital bone crunch (280 Hz)
-        } else if (isForwardParry) {
-            s_lastPunchTime = now;
+        } else if (meleeCounters.isForwardParry) {
+            s_melee.lastPunchTime = now;
             VR_LOG_INFO("Physical Gesture: PARRY / COUNTER-STRIKE THRUST (Rz: %.2f, Lz: %.2f while Blocking)", rVel.z, lVel.z);
             SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
             SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
             HapticRequest(1, (0.95f), kHapticFinisher); // High-frequency bone-cracking parry shockwave (280 Hz)
-        } else if (isMeleeStrike) {
+        } else if (meleeCounters.isMeleeStrike) {
             // Immediately disengage block if currently blocking so attacks are not canceled or stuck
-            if (s_currentBlockEngaged) {
+            if (s_melee.currentBlockEngaged) {
                 SendMouseClick(false, false); // GH #33: foreground-guarded (was mouse_event RIGHTUP)
-                s_currentBlockEngaged = false;
+                s_melee.currentBlockEngaged = false;
                 s_physicalBlockEngaged = false;
-                s_guardPoseHoldTimer = 0;
-                s_guardPoseReleaseTimer = 0;
+                s_melee.guardPoseHoldTimer = 0;
+                s_melee.guardPoseReleaseTimer = 0;
             }
 
-            s_lastPunchTime = now;
+            s_melee.lastPunchTime = now;
             const auto& activeVel = (rSpeed > lSpeed) ? rVel : lVel;
             const auto& activeLocal = (rSpeed > lSpeed) ? rightLocal : leftLocal;
 
-            // Heavy Exoskeleton Power Fist Kinetic Shockwave Punch (ADR 0066)
-            bool mechPowerPunch = (rVel.z < -1.60f) && (vrState.rightController.grip > 0.60f);
-
-            // Security Drone EMP Overload & Chassis Snap (ADR 0058)
-            bool dualGrappleDrone = (rightLocal.z < -0.20f && leftLocal.z < -0.20f) &&
-                                    (rightLocal.z > -0.45f && leftLocal.z > -0.45f) &&
-                                    (vrState.rightController.grip > 0.65f && vrState.leftController.grip > 0.65f);
-            bool dualTorqueSnap = (fabsf(lVel.y - rVel.y) > 1.20f) || (fabsf(lVel.x - rVel.x) > 1.20f);
-            bool droneEmpSnap = dualGrappleDrone && dualTorqueSnap;
-
-            // Dual-Hand Riot Shield Concussive Bash (ADR 0052)
-            bool dualShieldBash = s_twoHandedStabilizationActive &&
-                                  (rVel.z < -1.15f && lVel.z < -1.15f) &&
-                                  (rightLocal.z < -0.18f && leftLocal.z < -0.18f);
-
-            // Dual-Hand Riot Shield Ballistic Plant (ADR 0052)
-            bool dualShieldPlant = s_twoHandedStabilizationActive &&
-                                   (lVel.y < -0.75f && rVel.y < -0.75f) &&
-                                   (lVel.z < -0.35f && rVel.z < -0.35f);
-
-            // Inmate Pit Brawl Stool / Chair Blunt Weapon Heavy Smash (ADR 0054)
-            bool dualStoolHeavySmash = (vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f) &&
-                                       (fabsf(leftLocal.x - rightLocal.x) < 0.38f) &&
-                                       (lSpeed > 1.35f && rSpeed > 1.35f);
-
-            // Pit Fighting Arena Dual-Palm Concussive Shove (ADR 0041)
-            bool dualPalmShove = (rVel.z < -1.10f && lVel.z < -1.10f) &&
-                                 (rightLocal.z < -0.15f && leftLocal.z < -0.15f) &&
-                                 (vrState.rightController.grip > 0.40f && vrState.leftController.grip > 0.40f);
-
-            // Vent Duct Pipe Hang & Death-From-Above Aerial Drop Ambush (ADR 0033)
-            bool isLookingDown = (s_headlook.lastHmdPitch < -0.70f); // Looking steeply downward (< -40 deg) from ledge/duct
-            bool isDownwardPlunge = (activeVel.y < -1.10f);
-
-            // Two-Handed Overhead Pipe Slam / Heavy Club Crushing Strike (ADR 0026)
-            bool dualOverheadSlam = (leftLocal.y > 0.10f && rightLocal.y > 0.10f) &&
-                                    (vrState.leftController.grip > 0.45f && vrState.rightController.grip > 0.45f) &&
-                                    (lVel.y < -1.30f && rVel.y < -1.30f);
-
-            // Inmate Mess Hall Tray Facial Batter (ADR 0060)
-            bool leftTrayBatter = (leftLocal.z < -0.18f) && (lVel.z < -1.0f) && (vrState.leftController.grip > 0.50f);
-
-            // Guard Stun Baton Heavy Two-Handed Defibrillator Slam (ADR 0077)
-            bool twoHandedBatonSlam = s_twoHandedStabilizationActive &&
-                                      (lVel.y < -1.30f && rVel.y < -1.30f) &&
-                                      (vrState.rightController.trigger > 0.60f && vrState.leftController.trigger > 0.60f);
-
-            // Mining Core Heavy Ore Sledgehammer Two-Handed Overhead Crush (ADR 0102)
-            float handsDistSledge = sqrtf(
-                powf(leftLocal.x - rightLocal.x, 2) +
-                powf(leftLocal.y - rightLocal.y, 2) +
-                powf(leftLocal.z - rightLocal.z, 2)
-            );
-            bool dualSledgeOverhead = (handsDistSledge < 0.40f) &&
-                                      (leftLocal.y > 0.28f && rightLocal.y > 0.28f) &&
-                                      (vrState.leftController.grip > 0.55f && vrState.rightController.grip > 0.55f) &&
-                                      (lVel.y < -1.40f && rVel.y < -1.40f);
-
-            // Tactical Stun Baton Overload Arc Wave Discharge (ADR 0118)
-            static DWORD s_lastArcWaveTime = 0;
-            static DWORD s_arcWaveChargeStart = 0;
-            bool crossedBatonCharge = (handsDistSledge < 0.18f) &&
-                                      (leftLocal.y > -0.25f && leftLocal.y < 0.10f && rightLocal.y > -0.25f && rightLocal.y < 0.10f) &&
-                                      (vrState.leftController.grip > 0.70f && vrState.rightController.grip > 0.70f) &&
-                                      (vrState.leftController.trigger > 0.65f && vrState.rightController.trigger > 0.65f);
-            bool isDischargingArcWave = false;
-            if (crossedBatonCharge) {
-                if (s_arcWaveChargeStart == 0) s_arcWaveChargeStart = now;
-                DWORD chargeTime = now - s_arcWaveChargeStart;
-                float chargeRatio = (chargeTime < 400) ? (chargeTime / 400.0f) : 1.0f;
-                HapticRequest(0, (0.30f + 0.45f * chargeRatio), kHapticUi);
-                HapticRequest(1, (0.30f + 0.45f * chargeRatio), kHapticUi);
-            } else {
-                if (s_arcWaveChargeStart != 0 && (now - s_arcWaveChargeStart >= 250)) {
-                    bool explosiveRadialThrust = (lVel.x < -1.05f && rVel.x > 1.05f) || (lVel.z < -1.10f && rVel.z < -1.10f);
-                    if (explosiveRadialThrust && (now - s_lastArcWaveTime > 2500)) {
-                        s_lastArcWaveTime = now;
-                        isDischargingArcWave = true;
-                    }
-                }
-                s_arcWaveChargeStart = 0;
+            // GH #17 step 9: strike/finisher detection delegated to UpdateMeleeStrikes
+            // (explicit MeleeState, no behavior change).
+            MeleeStrikeIntent meleeStrikes = UpdateMeleeStrikes(s_melee, now,
+                lVel, rVel, leftLocal, rightLocal, lSpeed, rSpeed,
+                vrState.leftController.grip, vrState.rightController.grip,
+                vrState.leftController.trigger, vrState.rightController.trigger,
+                vrState.rightController.buttons,
+                s_posture.isPhysicallyCrouched, s_posture.isDeepProne,
+                s_headlook.lastHmdPitch, s_twoHandedStabilizationActive);
+            // Detection-edge side effects from UpdateMeleeStrikes (identical strings,
+            // original order); prioritized dispatch chain follows below.
+            if (meleeStrikes.arcWaveCharging) {
+                HapticRequest(0, (0.30f + 0.45f * meleeStrikes.arcWaveChargeRatio), kHapticUi);
+                HapticRequest(1, (0.30f + 0.45f * meleeStrikes.arcWaveChargeRatio), kHapticUi);
+            }
+            if (meleeStrikes.dartRipped) {
+                VR_LOG_INFO("Physical Combat: STUN DART RIPPED FROM CHEST (Rz: %.2f)", rVel.z);
+                HapticRequest(1, (0.75f), kHapticReload); // Barbed extraction snap (280 Hz)
+            }
+            if (meleeStrikes.eyeWipeCleared) {
+                VR_LOG_INFO("Physical Combat: EYES CLEARED OF DIRT/ASH WITH OFF-ARM (Lx: %.2f)", lVel.x);
+                HapticRequest(0, (0.40f), kHapticUi); // Corneal wipe friction rasp (190 Hz)
+            }
+            if (meleeStrikes.inductionBuzz) {
+                HapticRequest(0, (0.35f + 0.55f * meleeStrikes.inductionRampRatio), kHapticLadder); // Ascending electrostatic buzz (90 -> 280 Hz)
+                HapticRequest(1, (0.35f + 0.55f * meleeStrikes.inductionRampRatio), kHapticLadder);
+            }
+            if (meleeStrikes.liverHookConnected) {
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL LIVER HOOK CONNECTED (Ry: %.2f, Rx: %.2f)", rVel.y, rVel.x);
+                HapticRequest(1, (0.95f), kHapticFinisher); // Soft-tissue concussive shockwave (220 Hz)
+            }
+            if (meleeStrikes.arcWallPulse) {
+                HapticRequest(0, (0.65f), kHapticLadder);  // Electrostatic repulsion barrier hum (240 Hz)
+                HapticRequest(1, (0.65f), kHapticLadder);
+            }
+            if (meleeStrikes.arcTrapBuzz) {
+                HapticRequest(0, (0.40f + 0.50f * meleeStrikes.arcTrapDwellRatio), kHapticUi); // Capacitive transfer buzz (280 Hz)
+                HapticRequest(1, (0.40f + 0.50f * meleeStrikes.arcTrapDwellRatio), kHapticUi);
+            }
+            if (meleeStrikes.palmChinConnected) {
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL UPWARD PALM CHIN-STRIKE CONNECTED (Ry: %.2f, Rz: %.2f)", rVel.y, rVel.z);
+                HapticRequest(1, (0.98f), kHapticFinisher); // Mandibular percussion shockwave (240 Hz)
+            }
+            if (meleeStrikes.snapdownInitiated) {
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL COLLAR TIE SNAP-DOWN INITIATED (Ly: %.2f)", lVel.y);
+                HapticRequest(0, (0.90f), kHapticFinisher); // Cervical snap-down jerk (210 Hz)
+            }
+            if (meleeStrikes.shinTrapDeflected) {
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL SHIN TRAP DEFLECTED (Ly: %.2f)", lVel.y);
+                HapticRequest(0, (0.75f), kHapticReload); // Shin trap deflection impact (180 Hz)
+            }
+            if (meleeStrikes.suplexHoistInitiated) {
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL DOUBLE UNDERHOOK HOIST INITIATED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
+                HapticRequest(0, (0.90f), kHapticFinisher);  // Torso lift resistance (220 Hz)
+                HapticRequest(1, (0.90f), kHapticFinisher);
+            }
+            if (meleeStrikes.crossArcCharging) {
+                HapticRequest(0, (0.60f), kHapticLadder);  // Pre-charge hum (240 Hz)
+                HapticRequest(1, (0.60f), kHapticLadder);
+            }
+            if (meleeStrikes.batonDischargeJabConnected) {
+                VR_LOG_INFO("Tactical Melee: STUN BATON HIGH-VOLTAGE DISCHARGE JAB CONNECTED (Rz: %.2f)", rVel.z);
+                HapticRequest(1, (0.98f), kHapticFinisher); // Direct contact discharge (310 Hz)
+            }
+            if (meleeStrikes.doubleLegLiftInitiated) {
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL DOUBLE-LEG LIFT INITIATED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
+                HapticRequest(0, (0.90f), kHapticFinisher);  // Heavy body lift strain (210 Hz)
+                HapticRequest(1, (0.90f), kHapticFinisher);
+            }
+            if (meleeStrikes.pistolTrapWedged) {
+                VR_LOG_INFO("Tactical Melee: ENEMY FIREARM TRAPPED & WEDGED WITH STUN BATON (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
+                HapticRequest(1, (0.95f), kHapticFinisher); // Electrostatic disarm arc snap (280 Hz)
+                HapticRequest(0, (0.70f), kHapticReload);
+            }
+            if (meleeStrikes.firemansLoaded) {
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL FIREMAN'S CARRY LOADED (Ry: %.2f, Lz: %.2f)", rVel.y, lVel.z);
+                HapticRequest(0, (0.90f), kHapticFinisher);  // Heavy shoulder load strain (220 Hz)
+                HapticRequest(1, (0.90f), kHapticFinisher);
+            }
+            if (meleeStrikes.crossParryDeflected) {
+                VR_LOG_INFO("Tactical Melee: STUN BATON CROSS-CHEST PARRY DEFLECTED (Dir: %c, Vx: %.2f)", s_melee.crossParryDirKey, rVel.x);
+                HapticRequest(0, (0.85f), kHapticFinisher);  // Parry deflection shockwave (300 Hz)
+                HapticRequest(1, (0.85f), kHapticReload);
+            }
+            if (meleeStrikes.rearWaistClinchLocked) {
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL REAR WAIST CLINCH LOCKED (Rx: %.2f)", rVel.x);
+                HapticRequest(0, (0.90f), kHapticFinisher);  // Abdominal lift strain (220 Hz)
+                HapticRequest(1, (0.90f), kHapticFinisher);
+            }
+            if (meleeStrikes.radialDisarmTwisted) {
+                VR_LOG_INFO("Tactical Melee: STUN BATON RADIAL DISARM TWIST EXECUTED (Dir: %c, DeltaVx: %.2f)", s_melee.radialDisarmDirKey, rVel.x - lVel.x);
+                HapticRequest(0, (0.95f), kHapticFinisher);  // Torque disarm snap (310 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher);
+            }
+            if (meleeStrikes.thaiPlumLocked) {
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL THAI PLUM COLLAR TIE LOCKED (Ly: %.2f, Ry: %.2f)", leftLocal.y, rightLocal.y);
+                HapticRequest(0, (0.90f), kHapticFinisher);  // Cervical collar drag tension (220 Hz)
+                HapticRequest(1, (0.90f), kHapticFinisher);
+            }
+            if (meleeStrikes.outsideLegHooked) {
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL OUTSIDE LEG HOOKED (Dir: %c, Lx: %.2f)", s_melee.outsideLegSweepDirKey, lVel.x);
+                HapticRequest(0, (0.85f), kHapticReload); // Sweep trip torque (200 Hz)
+            }
+            if (meleeStrikes.crossThrustSupercharged) {
+                HapticRequest(0, (0.90f), kHapticFinisher);  // Escalating supercharge hum (340 Hz)
+                HapticRequest(1, (0.90f), kHapticFinisher);
+            }
+            if (meleeStrikes.crossThrustBarrierHum) {
+                HapticRequest(0, (0.65f), kHapticLadder);  // Electrostatic barrier hum (240 Hz)
+                HapticRequest(1, (0.65f), kHapticLadder);
             }
 
-            bool crouchedForStealth = (s_posture.isPhysicallyCrouched || s_posture.isDeepProne);
-            bool atThroatCorridor = (rightLocal.y > -0.12f && rightLocal.y < 0.16f) &&
-                                    (rightLocal.z > -0.34f && rightLocal.z < -0.10f) &&
-                                    (vrState.rightController.grip > 0.50f);
-            bool carotidSlice = (fabsf(rVel.x) > 1.25f);
-            bool stealthCarotidSlash = crouchedForStealth && atThroatCorridor && carotidSlice;
-
-            // Inmate Shiv Rib-Cage Underhook Puncture & Lift (ADR 0122)
-            static DWORD s_lastRibUnderhookTime = 0;
-            bool lowStanceForUnderhook = (s_posture.isPhysicallyCrouched || s_posture.isDeepProne) || (rightLocal.y < -0.15f);
-            bool reverseBladeGrip = (vrState.rightController.grip > 0.55f && vrState.rightController.trigger < 0.40f);
-            bool underhookRisingThrust = (rVel.y > 1.15f && rVel.z < -0.90f);
-            bool isRibUnderhook = lowStanceForUnderhook && reverseBladeGrip && underhookRisingThrust;
-
-            // Security Guard Stun Dart Extraction & Counter-Jab (ADR 0126)
-            static DWORD s_dartExtractedTime = 0;
-            static DWORD s_lastDartCounterJabTime = 0;
-            bool handAtChestDart = (fabsf(rightLocal.x) < 0.16f && rightLocal.y > -0.25f && rightLocal.y < 0.05f && rightLocal.z > -0.25f && rightLocal.z < -0.06f);
-            bool dartRipYank = (rVel.z > 0.70f || fabsf(rVel.x) > 0.75f);
-            if (handAtChestDart && vrState.rightController.grip > 0.65f && dartRipYank && (now - s_lastDartCounterJabTime > 1500)) {
-                if (s_dartExtractedTime == 0) {
-                    s_dartExtractedTime = now;
-                    VR_LOG_INFO("Physical Combat: STUN DART RIPPED FROM CHEST (Rz: %.2f)", rVel.z);
-                    HapticRequest(1, (0.75f), kHapticReload); // Barbed extraction snap (280 Hz)
-                }
-            }
-            bool dartCounterJabStrike = (s_dartExtractedTime > 0 && (now - s_dartExtractedTime < 800) &&
-                                        rVel.z < -1.15f && rightLocal.y > -0.10f && rightLocal.y < 0.22f);
-            if (s_dartExtractedTime != 0 && (now - s_dartExtractedTime >= 800)) s_dartExtractedTime = 0; // GH #25: timeout reset
-
-            // Inmate Pit Brawl Double-Ear Concussive Clap Strike (ADR 0128)
-            static DWORD s_lastDoubleEarClapTime = 0;
-            bool bothHandsOpenForClap = (vrState.leftController.trigger < 0.25f && vrState.rightController.trigger < 0.25f &&
-                                         vrState.leftController.grip < 0.35f && vrState.rightController.grip < 0.35f);
-            bool lateralInwardClapAcc = (lVel.x > 0.95f && rVel.x < -0.95f);
-            bool clapCorridor = (handsDistSledge < 0.24f && rightLocal.y > -0.10f && rightLocal.y < 0.20f && rightLocal.z > -0.35f && rightLocal.z < -0.10f);
-            bool isDoubleEarClap = bothHandsOpenForClap && lateralInwardClapAcc && clapCorridor;
-
-            // Security Guard Stun Baton Rib-Jab & Ground Takedown (ADR 0133)
-            static DWORD s_lastBatonRibJabTime = 0;
-            bool batonRibJabArmed = (vrState.rightController.grip > 0.60f && vrState.rightController.trigger > 0.60f);
-            bool batonRibJabThrust = (rVel.z < -1.10f && rVel.y < -0.85f);
-            bool batonRibJabCorridor = (rightLocal.y > -0.30f && rightLocal.y < 0.05f && rightLocal.z > -0.35f && rightLocal.z < -0.10f);
-            bool isBatonRibJab = batonRibJabArmed && batonRibJabThrust && batonRibJabCorridor;
-
-            // Inmate Shiv Forearm Defensive Parry-and-Snap (ADR 0134)
-            static DWORD s_lastParrySnapTime = 0;
-            bool parrySnapOffHandDeflect = (fabsf(lVel.x) > 0.85f);
-            bool parrySnapDominantStrike = (rVel.y < -1.15f);
-            bool parrySnapProximity = (handsDistSledge < 0.28f);
-            bool isParrySnap = parrySnapOffHandDeflect && parrySnapDominantStrike && parrySnapProximity;
-
-            // Inmate Pit Brawl Dirt / Ash Eye-Rub Recovery Riposte (ADR 0136)
-            static DWORD s_eyeRubWipeTime = 0;
-            static DWORD s_lastEyeRubRiposteTime = 0;
-            bool offHandAtEyes = (fabsf(leftLocal.x) < 0.14f && leftLocal.y > -0.08f && leftLocal.y < 0.15f && leftLocal.z > -0.22f && leftLocal.z < -0.06f);
-            bool eyeWipeStroke = (fabsf(lVel.x) > 0.50f);
-            if (offHandAtEyes && eyeWipeStroke && (now - s_lastEyeRubRiposteTime > 1500)) {
-                if (s_eyeRubWipeTime == 0) {
-                    s_eyeRubWipeTime = now;
-                    VR_LOG_INFO("Physical Combat: EYES CLEARED OF DIRT/ASH WITH OFF-ARM (Lx: %.2f)", lVel.x);
-                    HapticRequest(0, (0.40f), kHapticUi); // Corneal wipe friction rasp (190 Hz)
-                }
-            }
-            bool blindRiposteStrike = (s_eyeRubWipeTime > 0 && (now - s_eyeRubWipeTime < 600) && rVel.z < -1.15f);
-            if (s_eyeRubWipeTime != 0 && (now - s_eyeRubWipeTime >= 600)) s_eyeRubWipeTime = 0; // GH #25: timeout reset
-
-            // Inmate Pit Brawl Shin Kick & Knee Stomp Hyper-Extension (ADR 0141)
-            static DWORD s_lastKneeStompTime = 0;
-            bool kneeStompPosture = (s_currentBlockEngaged || s_posture.isPhysicallyCrouched || s_posture.isDeepProne);
-            bool kneeStompStrike = (rVel.y < -1.10f && lVel.z < -0.70f);
-            bool isKneeStomp = kneeStompPosture && kneeStompStrike;
-
-            // Security Guard Stun Baton Weapon Shock Induction Arc Overheat (ADR 0142)
-            static DWORD s_lastInductionOverheatTime = 0;
-            static DWORD s_inductionOverheatStart = 0;
-            bool inductionGroundedStance = (handsDistSledge < 0.16f) &&
-                                           (vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f) &&
-                                           (vrState.leftController.trigger > 0.65f && vrState.rightController.trigger > 0.65f);
-            bool isInductionOverheated = false;
-            if (inductionGroundedStance) {
-                if (s_inductionOverheatStart == 0) s_inductionOverheatStart = now;
-                DWORD overchargeTime = now - s_inductionOverheatStart;
-                float rampRatio = (overchargeTime < 350) ? (overchargeTime / 350.0f) : 1.0f;
-                HapticRequest(0, (0.35f + 0.55f * rampRatio), kHapticLadder); // Ascending electrostatic buzz (90 -> 280 Hz)
-                HapticRequest(1, (0.35f + 0.55f * rampRatio), kHapticLadder);
-                if (overchargeTime >= 350 && (now - s_lastInductionOverheatTime > 2500)) {
-                    s_lastInductionOverheatTime = now;
-                    s_inductionOverheatStart = 0;
-                    isInductionOverheated = true;
-                }
-            } else {
-                s_inductionOverheatStart = 0;
-            }
-
-            // Inmate Pit Brawl Liver Hook & Sternum Elbow Smash Combination (ADR 0145)
-            static DWORD s_liverHookTime = 0;
-            static DWORD s_lastLiverElbowComboTime = 0;
-            bool liverHookStrike = (s_currentBlockEngaged && rVel.y > 1.10f && fabsf(rVel.x) > 0.90f);
-            if (liverHookStrike && (now - s_lastLiverElbowComboTime > 1500)) {
-                if (s_liverHookTime == 0) {
-                    s_liverHookTime = now;
-                    VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL LIVER HOOK CONNECTED (Ry: %.2f, Rx: %.2f)", rVel.y, rVel.x);
-                    HapticRequest(1, (0.95f), kHapticFinisher); // Soft-tissue concussive shockwave (220 Hz)
-                }
-            }
-            bool sternumElbowSmash = (s_liverHookTime > 0 && (now - s_liverHookTime < 500) && rVel.y < -1.20f);
-            if (s_liverHookTime != 0 && (now - s_liverHookTime >= 500)) s_liverHookTime = 0; // GH #25: timeout reset
-
-            // Security Guard Stun Baton Charged Underarm Spear Thrust (ADR 0146)
-            static DWORD s_lastSpearThrustTime = 0;
-            bool batonChargedSpearArmed = (vrState.rightController.grip > 0.60f && vrState.rightController.trigger > 0.65f);
-            bool batonSpearBracing = (handsDistSledge < 0.22f);
-            bool batonLinearSpearThrust = (rVel.z < -1.35f);
-            bool isBatonChargedSpear = batonChargedSpearArmed && batonSpearBracing && batonLinearSpearThrust;
-
-            // Inmate Pit Brawl Collar Tie Clinch & Headbutt Stun (ADR 0149)
-            static DWORD s_lastHeadbuttTime = 0;
-            bool collarTieClinchGrip = (leftLocal.z > -0.35f && leftLocal.z < -0.12f && leftLocal.y > -0.15f && leftLocal.y < 0.15f && vrState.leftController.grip > 0.65f);
-            bool headbuttKineticSurge = (lVel.z > 0.55f && rVel.z < -1.05f) || (rVel.z < -1.25f);
-            bool isClinchHeadbutt = collarTieClinchGrip && headbuttKineticSurge;
-
-            // Security Guard Stun Baton Ground Pin & Taser Kneel (ADR 0150)
-            static DWORD s_lastBatonGroundPinTime = 0;
-            bool lowGroundPosture = (s_posture.isPhysicallyCrouched || s_posture.isDeepProne || rightLocal.y < -0.35f);
-            bool batonGroundEnergized = (vrState.rightController.grip > 0.60f && vrState.rightController.trigger > 0.65f);
-            bool verticalGroundPlunge = (rVel.y < -1.15f);
-            bool isBatonGroundPin = lowGroundPosture && batonGroundEnergized && verticalGroundPlunge;
-
-            // Inmate Pit Brawl Muay Thai Lead Knee Thrust to Abdomen (ADR 0153)
-            static DWORD s_lastLeadKneeTime = 0;
-            bool leadKneePosture = s_currentBlockEngaged;
-            bool leadKneeStrikes = (rVel.y > 1.20f && lVel.y < -0.85f);
-            bool isLeadKneeThrust = leadKneePosture && leadKneeStrikes;
-
-            // Security Guard Stun Baton Two-Handed Cross-Chest Defensive Arc Wall (ADR 0154)
-            static DWORD s_lastArcWallPulse = 0;
-            bool batonArcWallGeometry = (handsDistSledge > 0.20f && handsDistSledge < 0.38f && fabsf(rightLocal.x - leftLocal.x) > 0.22f &&
-                                         rightLocal.y > -0.20f && rightLocal.y < 0.10f && leftLocal.y > -0.20f && leftLocal.y < 0.10f &&
-                                         rightLocal.z > -0.30f && rightLocal.z < -0.10f && leftLocal.z > -0.30f && leftLocal.z < -0.10f);
-            bool batonArcWallGrips = (vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                      vrState.leftController.trigger > 0.60f && vrState.rightController.trigger > 0.60f);
-            bool isCrossChestArcWall = batonArcWallGeometry && batonArcWallGrips;
-            if (isCrossChestArcWall) {
-                if (now - s_lastArcWallPulse > 180) {
-                    s_lastArcWallPulse = now;
-                    HapticRequest(0, (0.65f), kHapticLadder);  // Electrostatic repulsion barrier hum (240 Hz)
-                    HapticRequest(1, (0.65f), kHapticLadder);
-                }
-            }
-
-            // Inmate Pit Brawl Duck-Under Kidney Liver Counter-Jab (ADR 0157)
-            static DWORD s_lastKidneyCounterTime = 0;
-            bool duckUnderCrouch = (s_posture.isPhysicallyCrouched || s_posture.isDeepProne);
-            bool kidneyStrikeCorridor = (rightLocal.y > -0.35f && rightLocal.y < -0.05f);
-            bool kidneyCounterPunch = (fabsf(rVel.x) > 0.85f && rVel.z < -1.05f);
-            bool isDuckUnderKidneyCounter = duckUnderCrouch && kidneyStrikeCorridor && kidneyCounterPunch;
-
-            // Security Guard Stun Baton High-Voltage Capacitance Bleed Arc Trap (ADR 0158)
-            static DWORD s_lastBatonArcTrapTime = 0;
-            static DWORD s_batonArcTrapStart = 0;
-            bool batonAtConduitSurface = (handsDistSledge < 0.22f &&
-                                          rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > -0.30f && rightLocal.y < 0.10f &&
-                                          rSpeed < 0.12f &&
-                                          vrState.leftController.trigger > 0.70f && vrState.rightController.trigger > 0.70f);
-            bool isBatonArcTrapArmed = false;
-            if (batonAtConduitSurface) {
-                if (s_batonArcTrapStart == 0) s_batonArcTrapStart = now;
-                DWORD chargeDwell = now - s_batonArcTrapStart;
-                float dwellRatio = (chargeDwell < 400) ? (chargeDwell / 400.0f) : 1.0f;
-                HapticRequest(0, (0.40f + 0.50f * dwellRatio), kHapticUi); // Capacitive transfer buzz (280 Hz)
-                HapticRequest(1, (0.40f + 0.50f * dwellRatio), kHapticUi);
-                if (chargeDwell >= 400 && (now - s_lastBatonArcTrapTime > 2000)) {
-                    s_lastBatonArcTrapTime = now;
-                    s_batonArcTrapStart = 0;
-                    isBatonArcTrapArmed = true;
-                }
-            } else {
-                s_batonArcTrapStart = 0;
-            }
-
-            // Inmate Pit Brawl Upward Palm Chin-Strike & Cervical Snap (ADR 0161)
-            static DWORD s_lastPalmChinComboTime = 0;
-            static DWORD s_palmChinStrikeTime = 0;
-            bool upwardPalmStrike = (rVel.y > 1.25f && rVel.z < -0.80f && rightLocal.y > -0.10f && rightLocal.y < 0.25f);
-            if (upwardPalmStrike && (now - s_lastPalmChinComboTime > 1500)) {
-                if (s_palmChinStrikeTime == 0) {
-                    s_palmChinStrikeTime = now;
-                    VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL UPWARD PALM CHIN-STRIKE CONNECTED (Ry: %.2f, Rz: %.2f)", rVel.y, rVel.z);
-                    HapticRequest(1, (0.98f), kHapticFinisher); // Mandibular percussion shockwave (240 Hz)
-                }
-            }
-            bool cervicalSnapWhip = (s_palmChinStrikeTime > 0 && (now - s_palmChinStrikeTime < 500) && fabsf(lVel.x) > 1.10f);
-            if (s_palmChinStrikeTime != 0 && (now - s_palmChinStrikeTime >= 500)) s_palmChinStrikeTime = 0; // GH #25: timeout reset
-
-            // Security Guard Stun Baton Dual-Hand Ground Discharge Kinetic Shockwave (ADR 0162)
-            static DWORD s_lastBatonGroundShockTime = 0;
-            bool batonDualGroundEnergized = (handsDistSledge < 0.22f &&
-                                             vrState.rightController.grip > 0.65f && vrState.rightController.trigger > 0.65f &&
-                                             vrState.leftController.grip > 0.60f && vrState.leftController.trigger > 0.60f);
-            bool dualGroundPlunge = (rVel.y < -1.25f && lVel.y < -1.25f && rightLocal.y < -0.40f);
-            bool isBatonGroundDischarge = batonDualGroundEnergized && dualGroundPlunge;
-
-            // Inmate Pit Brawl Collar Tie Snap-Down & Guillotine Choke (ADR 0165)
-            static DWORD s_lastSnapdownChokeTime = 0;
-            static DWORD s_snapdownStartTime = 0;
-            bool collarSnapdownGrip = (leftLocal.z > -0.35f && leftLocal.z < -0.12f && vrState.leftController.grip > 0.65f);
-            bool collarSnapdownPull = (lVel.y < -0.90f);
-            if (collarSnapdownGrip && collarSnapdownPull && (now - s_lastSnapdownChokeTime > 1500)) {
-                if (s_snapdownStartTime == 0) {
-                    s_snapdownStartTime = now;
-                    VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL COLLAR TIE SNAP-DOWN INITIATED (Ly: %.2f)", lVel.y);
-                    HapticRequest(0, (0.90f), kHapticFinisher); // Cervical snap-down jerk (210 Hz)
-                }
-            }
-            bool guillotineWrapStrike = (s_snapdownStartTime > 0 && (now - s_snapdownStartTime < 500) && rVel.y > 1.05f && rVel.z < -0.75f);
-            if (s_snapdownStartTime != 0 && (now - s_snapdownStartTime >= 500)) s_snapdownStartTime = 0; // GH #25: timeout reset
-
-            // Security Guard Stun Baton Charged High-Arc Downward Skull Breaker (ADR 0166)
-            static DWORD s_lastSkullBreakerTime = 0;
-            bool batonOverheadEnergized = (rightLocal.y > 0.25f && vrState.rightController.grip > 0.60f && vrState.rightController.trigger > 0.65f);
-            bool batonExtremeCleave = (rVel.y < -1.45f);
-            bool isBatonSkullBreaker = batonOverheadEnergized && batonExtremeCleave;
-
-            // Security Guard Stun Baton Lateral Cross-Sweep Deflection & Disarm (ADR 0170)
-            static DWORD s_lastBatonDisarmTime = 0;
-            bool batonLateralSweepArmed = (vrState.rightController.grip > 0.60f && vrState.rightController.trigger > 0.65f &&
-                                           rightLocal.y > -0.20f && rightLocal.y < 0.20f);
-            bool batonCrossSweepFast = (fabsf(rVel.x) > 1.25f);
-            bool isBatonLateralDisarm = batonLateralSweepArmed && batonCrossSweepFast;
-
-            // Inmate Pit Brawl Shin Trap & Overhand Hammerfist Ground Finisher (ADR 0169)
-            static DWORD s_lastShinTrapTime = 0;
-            static DWORD s_shinTrapTime = 0;
-            bool shinTrapDeflect = (leftLocal.y < -0.20f && vrState.leftController.grip > 0.55f && lVel.y < -0.85f);
-            if (shinTrapDeflect && (now - s_lastShinTrapTime > 1500)) {
-                if (s_shinTrapTime == 0) {
-                    s_shinTrapTime = now;
-                    VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL SHIN TRAP DEFLECTED (Ly: %.2f)", lVel.y);
-                    HapticRequest(0, (0.75f), kHapticReload); // Shin trap deflection impact (180 Hz)
-                }
-            }
-            bool hammerfistStrike = (s_shinTrapTime > 0 && (now - s_shinTrapTime < 500) && rVel.y < -1.30f);
-            if (s_shinTrapTime != 0 && (now - s_shinTrapTime >= 500)) s_shinTrapTime = 0; // GH #25: timeout reset
-
-            // Inmate Pit Brawl Underhook Suplex & Spine Slam (ADR 0173)
-            static DWORD s_lastSuplexSlamTime = 0;
-            static DWORD s_suplexHoistTime = 0;
-            bool underhookGripHold = (handsDistSledge < 0.25f && vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool underhookVerticalHoist = (lVel.y > 1.10f && rVel.y > 1.10f);
-            if (underhookGripHold && underhookVerticalHoist && (now - s_lastSuplexSlamTime > 1800)) {
-                if (s_suplexHoistTime == 0) {
-                    s_suplexHoistTime = now;
-                    VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL DOUBLE UNDERHOOK HOIST INITIATED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
-                    HapticRequest(0, (0.90f), kHapticFinisher);  // Torso lift resistance (220 Hz)
-                    HapticRequest(1, (0.90f), kHapticFinisher);
-                }
-            }
-            bool suplexSpineSlam = (s_suplexHoistTime > 0 && (now - s_suplexHoistTime < 500) && lVel.y < -1.20f && rVel.y < -1.20f);
-            if (s_suplexHoistTime != 0 && (now - s_suplexHoistTime >= 500)) s_suplexHoistTime = 0; // GH #25: timeout reset
-
-            // Security Guard Stun Baton Dual-Hand Cross-Block Reactive Arc Burst (ADR 0174)
-            static DWORD s_lastCrossArcBurstTime = 0;
-            static DWORD s_crossArcStartTime = 0;
-            bool crossWristFrame = (handsDistSledge < 0.16f &&
-                                    rightLocal.y > -0.15f && rightLocal.y < 0.15f && rightLocal.z > -0.30f && rightLocal.z < -0.10f &&
-                                    vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                    vrState.leftController.trigger > 0.65f && vrState.rightController.trigger > 0.65f);
-            bool isCrossArcBurstReady = false;
-            if (crossWristFrame) {
-                if (s_crossArcStartTime == 0) s_crossArcStartTime = now;
-                if (now - s_crossArcStartTime >= 300) {
-                    HapticRequest(0, (0.60f), kHapticLadder);  // Pre-charge hum (240 Hz)
-                    HapticRequest(1, (0.60f), kHapticLadder);
-                    if (rVel.z < -1.15f || lVel.z < -1.15f) {
-                        isCrossArcBurstReady = true;
-                    }
-                }
-            } else {
-                s_crossArcStartTime = 0;
-            }
-
-            // Security Guard Stun Baton Forward Two-Handed Javelin Thrust (ADR 0178)
-            static DWORD s_lastBatonJavelinTime = 0;
-            bool batonJavelinGrip = (handsDistSledge > 0.18f && handsDistSledge < 0.40f &&
-                                     vrState.rightController.grip > 0.60f && vrState.leftController.grip > 0.50f &&
-                                     vrState.rightController.trigger > 0.65f);
-            bool batonJavelinThrust = (rVel.z < -1.35f && lVel.z < -1.05f);
-            bool isBatonJavelinThrust = batonJavelinGrip && batonJavelinThrust;
-
-            // Inmate Pit Brawl Outside Trip & Mount Ground-and-Pound (ADR 0177)
-            static DWORD s_lastOutsideTripTime = 0;
-            bool outsideTripHook = (leftLocal.y < -0.30f && vrState.leftController.grip > 0.50f && lVel.x < -0.80f);
-            bool outsideTripDrive = (rVel.z < -1.10f && rVel.y < -0.75f);
-            bool isOutsideTripMount = outsideTripHook && outsideTripDrive;
-
-            // Inmate Pit Brawl Kimura Shoulder Lock & Arm Fracture (ADR 0181)
-            static DWORD s_lastKimuraTime = 0;
-            bool kimuraGrip = (handsDistSledge < 0.25f &&
-                               vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                               leftLocal.y > -0.20f && leftLocal.y < 0.20f && rightLocal.y > -0.20f && rightLocal.y < 0.20f);
-            bool kimuraCrank = (rVel.y > 1.05f && fabsf(rVel.x) > 0.85f);
-            bool isKimuraFracture = kimuraGrip && kimuraCrank;
-
-            // Inmate Pit Brawl Standing Arm-Triangle Choke & Tracheal Clamp (ADR 0185)
-            static DWORD s_lastArmTriangleTime = 0;
-            static DWORD s_armTriangleStartTime = 0;
-            bool armTriangleGrapple = (leftLocal.z > -0.35f && leftLocal.z < -0.10f && vrState.leftController.grip > 0.65f &&
-                                       handsDistSledge < 0.20f && vrState.rightController.grip > 0.65f &&
-                                       vrState.leftController.trigger > 0.60f && vrState.rightController.trigger > 0.60f);
-            bool isArmTriangleReady = false;
-            if (armTriangleGrapple) {
-                if (s_armTriangleStartTime == 0) s_armTriangleStartTime = now;
-                if (now - s_armTriangleStartTime >= 300 && (now - s_lastArmTriangleTime > 2000)) {
-                    isArmTriangleReady = true;
-                }
-            } else {
-                s_armTriangleStartTime = 0;
-            }
-
-            // Security Guard Stun Baton Upward Diagonal Cross-Parry & Counter-Discharge (ADR 0186)
-            static DWORD s_lastDiagonalParryTime = 0;
-            bool batonDiagonalParryGrip = (handsDistSledge < 0.24f &&
-                                           vrState.rightController.grip > 0.60f && vrState.rightController.trigger > 0.65f &&
-                                           vrState.leftController.grip > 0.50f &&
-                                           rightLocal.y > 0.05f && rightLocal.y < 0.35f);
-            bool batonDiagonalParryThrust = (rVel.y > 1.15f && fabsf(rVel.x) > 0.85f);
-            bool isBatonDiagonalParry = batonDiagonalParryGrip && batonDiagonalParryThrust;
-
-            // Security Guard Stun Baton Radial Kinetic Sweep & Electrical Stun Ring (ADR 0182)
-            static DWORD s_lastRadialSweepTime = 0;
-            bool batonRadialGrip = (handsDistSledge < 0.25f &&
-                                    vrState.rightController.grip > 0.60f && vrState.rightController.trigger > 0.65f &&
-                                    vrState.leftController.grip > 0.50f);
-            bool batonRadialSweep = (fabsf(rVel.x) > 1.35f && fabsf(lVel.x) > 1.10f &&
-                                     ((rVel.x > 0.0f && lVel.x > 0.0f) || (rVel.x < 0.0f && lVel.x < 0.0f)));
-            bool isBatonRadialSweep = batonRadialGrip && batonRadialSweep;
-
-            // Inmate Pit Brawl Single-Leg Takedown & Ankle Pick Slam (ADR 0189)
-            static DWORD s_lastSingleLegTakedownTime = 0;
-            bool singleLegLowStance = (s_posture.isPhysicallyCrouched || s_posture.isDeepProne || leftLocal.y < -0.30f);
-            bool anklePickGrip = (leftLocal.y < -0.40f && vrState.leftController.grip > 0.60f && lVel.y > 0.85f);
-            bool shoulderDriveThrough = (rVel.z < -1.10f);
-            bool isSingleLegTakedown = singleLegLowStance && anklePickGrip && shoulderDriveThrough;
-
-            // Security Guard Stun Baton Forward High-Voltage Discharge Jab & Taser Trip (ADR 0190)
-            static DWORD s_lastBatonJabTripTime = 0;
-            static DWORD s_batonJabTime = 0;
-            bool batonJabArmed = (vrState.rightController.grip > 0.60f && vrState.rightController.trigger > 0.65f);
-            bool batonLinearJab = (rVel.z < -1.25f);
-            if (batonJabArmed && batonLinearJab && (now - s_lastBatonJabTripTime > 1800)) {
-                if (s_batonJabTime == 0) {
-                    s_batonJabTime = now;
-                    VR_LOG_INFO("Tactical Melee: STUN BATON HIGH-VOLTAGE DISCHARGE JAB CONNECTED (Rz: %.2f)", rVel.z);
-                    HapticRequest(1, (0.98f), kHapticFinisher); // Direct contact discharge (310 Hz)
-                }
-            }
-            bool batonTripSweep = (s_batonJabTime > 0 && (now - s_batonJabTime < 500) &&
-                                   rVel.y < -1.10f && fabsf(rVel.x) > 0.80f);
-            if (s_batonJabTime != 0 && (now - s_batonJabTime >= 500)) s_batonJabTime = 0; // GH #25: timeout reset
-
-            // Inmate Pit Brawl Double-Leg Takedown & High-Amplitude Mat Slam (ADR 0193)
-            static DWORD s_lastDoubleLegSlamTime = 0;
-            static DWORD s_doubleLegLiftTime = 0;
-            bool doubleLegLowStance = (s_posture.isPhysicallyCrouched || s_posture.isDeepProne || leftLocal.y < -0.30f);
-            bool doubleLegThighWrap = (handsDistSledge < 0.25f &&
-                                       vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                       lVel.y > 1.15f && rVel.y > 1.15f);
-            if (doubleLegLowStance && doubleLegThighWrap && (now - s_lastDoubleLegSlamTime > 2000)) {
-                if (s_doubleLegLiftTime == 0) {
-                    s_doubleLegLiftTime = now;
-                    VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL DOUBLE-LEG LIFT INITIATED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
-                    HapticRequest(0, (0.90f), kHapticFinisher);  // Heavy body lift strain (210 Hz)
-                    HapticRequest(1, (0.90f), kHapticFinisher);
-                }
-            }
-            bool doubleLegSpikeSlam = (s_doubleLegLiftTime > 0 && (now - s_doubleLegLiftTime < 500) &&
-                                       lVel.y < -1.30f && rVel.y < -1.30f);
-            if (s_doubleLegLiftTime != 0 && (now - s_doubleLegLiftTime >= 500)) s_doubleLegLiftTime = 0; // GH #25: timeout reset
-
-            // Security Guard Stun Baton Forward Two-Handed Cross-Pistol Disarm & Neck Strike (ADR 0194)
-            static DWORD s_lastPistolDisarmTime = 0;
-            static DWORD s_pistolTrapTime = 0;
-            bool batonPistolDisarmGrip = (handsDistSledge < 0.24f &&
-                                          vrState.rightController.grip > 0.60f && vrState.rightController.trigger > 0.65f &&
-                                          vrState.leftController.grip > 0.50f &&
-                                          rightLocal.y > -0.20f && rightLocal.y < 0.10f);
-            bool batonDownwardPistolTrap = (rVel.y < -0.90f && lVel.y < -0.90f && rVel.z < -0.80f);
-            if (batonPistolDisarmGrip && batonDownwardPistolTrap && (now - s_lastPistolDisarmTime > 1800)) {
-                if (s_pistolTrapTime == 0) {
-                    s_pistolTrapTime = now;
-                    VR_LOG_INFO("Tactical Melee: ENEMY FIREARM TRAPPED & WEDGED WITH STUN BATON (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
-                    HapticRequest(1, (0.95f), kHapticFinisher); // Electrostatic disarm arc snap (280 Hz)
-                    HapticRequest(0, (0.70f), kHapticReload);
-                }
-            }
-            bool batonThroatThrustStrike = (s_pistolTrapTime > 0 && (now - s_pistolTrapTime < 500) && rVel.z < -1.20f);
-            if (s_pistolTrapTime != 0 && (now - s_pistolTrapTime >= 500)) s_pistolTrapTime = 0; // GH #25: timeout reset
-
-            // Inmate Pit Brawl Fireman's Carry & Deck Body-Spike Slam (ADR 0197)
-            static DWORD s_lastFiremansCarryTime = 0;
-            static DWORD s_firemansLoadTime = 0;
-            bool firemansLowDuck = (s_posture.isPhysicallyCrouched || s_posture.isDeepProne || leftLocal.y < -0.25f);
-            bool firemansUnderhookLoad = (handsDistSledge < 0.25f &&
-                                          vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                          rVel.y > 1.10f && lVel.z > 0.70f);
-            if (firemansLowDuck && firemansUnderhookLoad && (now - s_lastFiremansCarryTime > 2000)) {
-                if (s_firemansLoadTime == 0) {
-                    s_firemansLoadTime = now;
-                    VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL FIREMAN'S CARRY LOADED (Ry: %.2f, Lz: %.2f)", rVel.y, lVel.z);
-                    HapticRequest(0, (0.90f), kHapticFinisher);  // Heavy shoulder load strain (220 Hz)
-                    HapticRequest(1, (0.90f), kHapticFinisher);
-                }
-            }
-            bool firemansWhipThrow = (s_firemansLoadTime > 0 && (now - s_firemansLoadTime < 500) &&
-                                      (fabsf(lVel.x) > 1.25f || fabsf(rVel.x) > 1.25f));
-            if (s_firemansLoadTime != 0 && (now - s_firemansLoadTime >= 500)) s_firemansLoadTime = 0; // GH #25: timeout reset
-
-            // Inmate Pit Brawl Standing Front Headlock & Guillotine Neck Crack (ADR 0205)
-            static DWORD s_lastFrontHeadlockTime = 0;
-            bool frontHeadlockWrap = (handsDistSledge < 0.25f && leftLocal.y > -0.15f &&
-                                      vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool frontHeadlockArchTorque = (lVel.y > 1.15f && rVel.y > 1.15f);
-
-            // Security Guard Stun Baton Lateral Two-Handed Cross-Chest Kinetic Parrying Riposte (ADR 0206)
-            static DWORD s_lastCrossParryTime = 0;
-            static DWORD s_crossParryDeflectTime = 0;
-            static char s_crossParryDirKey = 'A';
-            bool crossParryStance = (handsDistSledge > 0.18f && handsDistSledge < 0.35f &&
-                                     fabsf(rightLocal.x - leftLocal.x) > 0.20f &&
-                                     vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                     vrState.rightController.trigger > 0.65f);
-            bool crossParryDeflect = (crossParryStance && (fabsf(rVel.x) > 0.85f || fabsf(lVel.x) > 0.85f));
-            if (crossParryDeflect && (now - s_lastCrossParryTime > 2000)) {
-                if (s_crossParryDeflectTime == 0) {
-                    s_crossParryDeflectTime = now;
-                    s_crossParryDirKey = (rVel.x > 0.0f || lVel.x > 0.0f) ? 'D' : 'A';
-                    VR_LOG_INFO("Tactical Melee: STUN BATON CROSS-CHEST PARRY DEFLECTED (Dir: %c, Vx: %.2f)", s_crossParryDirKey, rVel.x);
-                    HapticRequest(0, (0.85f), kHapticFinisher);  // Parry deflection shockwave (300 Hz)
-                    HapticRequest(1, (0.85f), kHapticReload);
-                }
-            }
-            bool crossParryRiposte = (s_crossParryDeflectTime > 0 && (now - s_crossParryDeflectTime < 500) && rVel.z < -1.25f);
-            if (s_crossParryDeflectTime != 0 && (now - s_crossParryDeflectTime >= 500)) s_crossParryDeflectTime = 0; // GH #25: timeout reset
-
-            // Inmate Pit Brawl Suloev Stretch Hamstring Submission Lock (ADR 0201)
-            static DWORD s_lastSuloevTime = 0;
-            bool suloevLowCrouch = (s_posture.isPhysicallyCrouched || s_posture.isDeepProne || leftLocal.y < -0.30f);
-            bool suloevHookHold = (handsDistSledge < 0.25f && leftLocal.y < -0.35f &&
-                                   vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool suloevArchPull = (lVel.y > 1.05f && rVel.y > 1.05f);
-
-            // Security Guard Stun Baton Forward High-Arc Overhead Vault Drop Strike (ADR 0202)
-            static DWORD s_lastVaultDropTime = 0;
-            bool isLookingDownward = (s_headlook.lastHmdPitch < -0.436f); // < -25 deg downward look
-            bool batonOverheadVault = (rightLocal.y > 0.20f &&
-                                       vrState.rightController.grip > 0.60f &&
-                                       vrState.rightController.trigger > 0.65f);
-            bool batonVaultPlunge = (rVel.y < -1.35f);
-
-            // Inmate Pit Brawl Duck-Under Back-Clinch Belly-to-Back Suplex Slam (ADR 0213)
-            static DWORD s_lastBackSuplexTime = 0;
-            static DWORD s_backSuplexClinchTime = 0;
-            bool duckUnderLow = (s_posture.isPhysicallyCrouched || s_posture.isDeepProne || leftLocal.y < -0.25f);
-            bool duckUnderRearSlip = (duckUnderLow && handsDistSledge < 0.24f &&
-                                      fabsf(rVel.x) > 0.85f &&
-                                      vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            if (duckUnderRearSlip && (now - s_lastBackSuplexTime > 2000)) {
-                if (s_backSuplexClinchTime == 0) {
-                    s_backSuplexClinchTime = now;
-                    VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL REAR WAIST CLINCH LOCKED (Rx: %.2f)", rVel.x);
-                    HapticRequest(0, (0.90f), kHapticFinisher);  // Abdominal lift strain (220 Hz)
-                    HapticRequest(1, (0.90f), kHapticFinisher);
-                }
-            }
-            bool backSuplexHoistSlam = (s_backSuplexClinchTime > 0 && (now - s_backSuplexClinchTime < 500) &&
-                                        lVel.y > 1.20f && rVel.y > 1.20f);
-
-            // Security Guard Stun Baton Charged High-Velocity Forward Radial Thrust Disarm (ADR 0214)
-            static DWORD s_lastRadialDisarmTime = 0;
-            static DWORD s_radialDisarmTwistTime = 0;
-            static char s_radialDisarmDirKey = 'A';
-            bool radialDisarmStance = (handsDistSledge < 0.24f &&
-                                       vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                       vrState.rightController.trigger > 0.65f);
-            bool radialDisarmTwist = (radialDisarmStance && fabsf(rVel.x - lVel.x) > 1.15f);
-            if (radialDisarmTwist && (now - s_lastRadialDisarmTime > 2000)) {
-                if (s_radialDisarmTwistTime == 0) {
-                    s_radialDisarmTwistTime = now;
-                    s_radialDisarmDirKey = (rVel.x > 0.0f) ? 'D' : 'A';
-                    VR_LOG_INFO("Tactical Melee: STUN BATON RADIAL DISARM TWIST EXECUTED (Dir: %c, DeltaVx: %.2f)", s_radialDisarmDirKey, rVel.x - lVel.x);
-                    HapticRequest(0, (0.95f), kHapticFinisher);  // Torque disarm snap (310 Hz)
-                    HapticRequest(1, (0.95f), kHapticFinisher);
-                }
-            }
-            bool radialDisarmThrust = (s_radialDisarmTwistTime > 0 && (now - s_radialDisarmTwistTime < 500) && rVel.z < -1.35f);
-
-            // Inmate Pit Brawl Clinch Thai Plum Collar Tie & Liver Knee Strike (ADR 0217)
-            static DWORD s_lastThaiPlumTime = 0;
-            static DWORD s_thaiPlumClinchTime = 0;
-            bool thaiPlumGrip = (handsDistSledge < 0.25f &&
-                                 leftLocal.y > -0.10f && rightLocal.y > -0.10f &&
-                                 vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            if (thaiPlumGrip && (now - s_lastThaiPlumTime > 2000)) {
-                if (s_thaiPlumClinchTime == 0) {
-                    s_thaiPlumClinchTime = now;
-                    VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL THAI PLUM COLLAR TIE LOCKED (Ly: %.2f, Ry: %.2f)", leftLocal.y, rightLocal.y);
-                    HapticRequest(0, (0.90f), kHapticFinisher);  // Cervical collar drag tension (220 Hz)
-                    HapticRequest(1, (0.90f), kHapticFinisher);
-                }
-            }
-            bool thaiPlumKneeDrive = (s_thaiPlumClinchTime > 0 && (now - s_thaiPlumClinchTime < 600) &&
-                                      lVel.y < -1.10f && rVel.y < -1.10f);
-
-            // Security Guard Stun Baton Forward Two-Handed Javelin Vault Leap Thrust (ADR 0218)
-            static DWORD s_lastJavelinVaultTime = 0;
-            bool javelinVaultStance = (handsDistSledge < 0.22f &&
-                                       vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                       vrState.rightController.trigger > 0.65f);
-            bool isJumpingMotion = ((vrState.rightController.buttons & RIDDICK_VR_BTN_B) != 0 || rVel.y > 0.85f || lVel.y > 0.85f);
-            bool javelinVaultStrike = (javelinVaultStance && isJumpingMotion && rVel.z < -1.40f && lVel.z < -1.20f);
-
-            // Inmate Pit Brawl Double Collar Tie Whizzer Takedown & Arm Trap (ADR 0221)
-            static DWORD s_lastWhizzerTime = 0;
-            static char s_whizzerDirKey = 'A';
-            bool whizzerClinchGrip = (handsDistSledge < 0.25f &&
-                                      rightLocal.y > -0.15f && rightLocal.y < 0.15f &&
-                                      vrState.rightController.grip > 0.65f && vrState.leftController.grip > 0.65f);
-            bool whizzerDownWhip = (whizzerClinchGrip && rVel.y < -1.15f && fabsf(lVel.x) > 0.90f);
-            if (whizzerDownWhip && (now - s_lastWhizzerTime > 2000)) {
-                s_whizzerDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Arc Kinetic Hammerfist Deck Strike (ADR 0222)
-            static DWORD s_lastHammerfistTime = 0;
-            bool batonHammerfistElevated = (rightLocal.y > 0.15f &&
-                                            vrState.rightController.grip > 0.65f &&
-                                            vrState.rightController.trigger > 0.65f);
-            bool batonHammerfistPlunge = (batonHammerfistElevated && rVel.y < -1.35f && rVel.z < -0.80f);
-
-            // Inmate Pit Brawl Double Underhook Body Lock Foot Sweep & Hip Toss (ADR 0225)
-            static DWORD s_lastHipTossTime = 0;
-            static char s_hipTossDirKey = 'A';
-            bool underhookBodyLockGrip = (handsDistSledge < 0.22f &&
-                                          leftLocal.y > -0.20f && leftLocal.y < 0.15f &&
-                                          rightLocal.y > -0.20f && rightLocal.y < 0.15f &&
-                                          vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool hipTossRotation = (underhookBodyLockGrip && fabsf(rVel.x - lVel.x) > 1.20f &&
-                                    (rVel.y > 1.05f || lVel.y > 1.05f));
-            if (hipTossRotation && (now - s_lastHipTossTime > 2000)) {
-                s_hipTossDirKey = (rVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Lateral Two-Handed Kinetic Shield Bash & Arc Burst (ADR 0226)
-            static DWORD s_lastBatonBashTime = 0;
-            bool batonShieldBashStance = (handsDistSledge > 0.18f && handsDistSledge < 0.35f &&
-                                          fabsf(rightLocal.x - leftLocal.x) > 0.20f &&
-                                          vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                          vrState.rightController.trigger > 0.65f);
-            bool batonShieldBashThrust = (batonShieldBashStance && rVel.z < -1.35f && lVel.z < -1.15f);
-
-            // Inmate Pit Brawl Clinch Thai Plum Elbow Spike & Cranial Fracture (ADR 0229)
-            static DWORD s_lastThaiPlumElbowTime = 0;
-            static char s_thaiPlumElbowDirKey = 'A';
-            bool thaiPlumElbowStance = (handsDistSledge < 0.25f &&
-                                        leftLocal.y > -0.10f && rightLocal.y > 0.15f &&
-                                        vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool thaiPlumElbowPlunge = (thaiPlumElbowStance && rVel.y < -1.30f && lVel.z > 0.60f);
-            if (thaiPlumElbowPlunge && (now - s_lastThaiPlumElbowTime > 2000)) {
-                s_thaiPlumElbowDirKey = (rVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Voltage Grounding Thrust & Arc Discharge Ring (ADR 0230)
-            static DWORD s_lastGroundingThrustTime = 0;
-            bool groundingThrustStance = ((leftLocal.y < -0.25f || s_posture.isPhysicallyCrouched) &&
-                                          handsDistSledge < 0.24f &&
-                                          vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                          vrState.rightController.trigger > 0.65f);
-            bool groundingThrustLunge = (groundingThrustStance && rVel.z < -1.35f && lVel.z < -1.10f);
-
-            // Inmate Pit Brawl Double Underhook Lateral Suplex Arch & Mat Spike (ADR 0233)
-            static DWORD s_lastLateralSuplexTime = 0;
-            static char s_lateralSuplexDirKey = 'A';
-            bool lateralSuplexStance = (handsDistSledge < 0.28f &&
-                                        leftLocal.y > -0.20f && rightLocal.y > -0.20f &&
-                                        vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool lateralSuplexThrow = (lateralSuplexStance && rVel.y > 0.70f && lVel.y > 0.70f &&
-                                       (fabsf(rVel.x) > 0.85f || fabsf(lVel.x) > 0.85f));
-            if (lateralSuplexThrow && (now - s_lastLateralSuplexTime > 2000)) {
-                s_lateralSuplexDirKey = (rVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Arc Kinetic Cleave & Shockwave Stun (ADR 0234)
-            static DWORD s_lastKineticCleaveTime = 0;
-            bool kineticCleaveStance = (handsDistSledge < 0.28f &&
-                                        rightLocal.y > 0.18f && leftLocal.y > 0.10f &&
-                                        vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                        vrState.rightController.trigger > 0.65f);
-            bool kineticCleaveSwing = (kineticCleaveStance && rVel.y < -1.40f && lVel.y < -1.10f);
-
-            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Shoulder Dislocation (ADR 0237)
-            static DWORD s_lastWhizzerCounterTime = 0;
-            static char s_whizzerCounterDirKey = 'A';
-            bool whizzerCounterStance = (handsDistSledge < 0.26f &&
-                                         leftLocal.y > -0.15f && leftLocal.y < 0.15f &&
-                                         vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool whizzerCounterThrow = (whizzerCounterStance && rVel.y < -1.25f && fabsf(lVel.x) > 0.95f);
-            if (whizzerCounterThrow && (now - s_lastWhizzerCounterTime > 2000)) {
-                s_whizzerCounterDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward Two-Handed Kinetic Cleave & Arc Discharge Blast (ADR 0238)
-            static DWORD s_lastCleaveArcBlastTime = 0;
-            bool cleaveArcBlastStance = (handsDistSledge < 0.28f &&
-                                         rightLocal.y > 0.16f && leftLocal.y > 0.08f &&
-                                         vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                         vrState.rightController.trigger > 0.65f);
-            bool cleaveArcBlastStrike = (cleaveArcBlastStance && rVel.y < -1.30f && lVel.y < -1.05f && rVel.z < -1.00f);
-
-            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Cervical Compression Mat Spike (ADR 0241)
-            static DWORD s_lastCervicalSpikeTime = 0;
-            static char s_cervicalSpikeDirKey = 'A';
-            bool cervicalSpikeStance = (handsDistSledge < 0.26f &&
-                                        leftLocal.y > -0.10f && leftLocal.y < 0.20f &&
-                                        vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool cervicalSpikeThrow = (cervicalSpikeStance && rVel.y < -1.35f &&
-                                       lVel.y < -1.05f && fabsf(lVel.x) > 0.85f);
-            if (cervicalSpikeThrow && (now - s_lastCervicalSpikeTime > 2000)) {
-                s_cervicalSpikeDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Ground Arc Disruption (ADR 0242)
-            static DWORD s_lastVaultGroundArcTime = 0;
-            bool isJumpingStance = ((vrState.rightController.buttons & RIDDICK_VR_BTN_B) != 0 || rVel.y > 0.85f || lVel.y > 0.85f);
-            bool vaultGroundArcStance = (handsDistSledge < 0.24f &&
-                                         vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                         vrState.rightController.trigger > 0.65f);
-            bool vaultGroundArcPlunge = (vaultGroundArcStance && isJumpingStance && rVel.y < -1.40f && lVel.y < -1.15f);
-
-            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Grating Slam (ADR 0245)
-            static DWORD s_lastThoracicSlamTime = 0;
-            static char s_thoracicSlamDirKey = 'A';
-            bool thoracicSlamStance = (handsDistSledge < 0.26f &&
-                                       leftLocal.y > -0.20f && leftLocal.y < 0.15f &&
-                                       vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool thoracicSlamThrow = (thoracicSlamStance && rVel.y < -1.30f &&
-                                      fabsf(lVel.x) > 0.90f && lVel.y > 0.60f);
-            if (thoracicSlamThrow && (now - s_lastThoracicSlamTime > 2000)) {
-                s_thoracicSlamDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Kinetic Cleave Shockwave (ADR 0246)
-            static DWORD s_lastVaultKineticCleaveTime = 0;
-            bool vaultKineticCleaveStance = (handsDistSledge < 0.28f &&
-                                             rightLocal.y > 0.15f &&
-                                             vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                             vrState.rightController.trigger > 0.65f);
-            bool vaultKineticCleavePlunge = (vaultKineticCleaveStance && isJumpingStance &&
-                                             rVel.y < -1.45f && lVel.y < -1.15f);
-
-            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Cervical Hyperextension Mat Spike (ADR 0249)
-            static DWORD s_lastHyperextensionSpikeTime = 0;
-            static char s_hyperextensionSpikeDirKey = 'A';
-            bool hyperextensionSpikeStance = (handsDistSledge < 0.26f &&
-                                              leftLocal.y > -0.05f &&
-                                              vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool hyperextensionSpikeThrow = (hyperextensionSpikeStance && rVel.y < -1.40f &&
-                                             lVel.y > 0.85f && fabsf(lVel.x) > 0.90f);
-            if (hyperextensionSpikeThrow && (now - s_lastHyperextensionSpikeTime > 2000)) {
-                s_hyperextensionSpikeDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Concussive Deck Impact Shockwave (ADR 0250)
-            static DWORD s_lastDeckImpactTime = 0;
-            bool deckImpactStance = (handsDistSledge < 0.28f &&
-                                     vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                     vrState.rightController.trigger > 0.65f);
-            bool deckImpactPlunge = (deckImpactStance && isJumpingStance &&
-                                     rVel.y < -1.50f && lVel.y < -1.25f);
-
-            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Cervical Compression Ground Finisher (ADR 0253)
-            static DWORD s_lastWhizzerGroundFinisherTime = 0;
-            static char s_whizzerGroundFinisherDirKey = 'A';
-            bool whizzerGroundFinisherStance = (handsDistSledge < 0.26f &&
-                                                leftLocal.y > -0.25f && leftLocal.y < 0.10f &&
-                                                vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool whizzerGroundFinisherThrow = (whizzerGroundFinisherStance && rVel.y < -1.45f &&
-                                               lVel.y < -1.15f && fabsf(lVel.x) > 0.80f);
-            if (whizzerGroundFinisherThrow && (now - s_lastWhizzerGroundFinisherTime > 2000)) {
-                s_whizzerGroundFinisherDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Deck Arc Dispersion (ADR 0254)
-            static DWORD s_lastOmnidirectionalArcTime = 0;
-            bool omnidirectionalArcStance = (handsDistSledge < 0.28f &&
-                                             vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                             vrState.rightController.trigger > 0.65f);
-            bool omnidirectionalArcPlunge = (omnidirectionalArcStance && isJumpingStance &&
-                                             rVel.y < -1.45f && lVel.y < -1.20f &&
-                                             fabsf(rVel.x - lVel.x) > 0.80f);
-
-            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Cervical Compression Ground Dislocation (ADR 0257)
-            static DWORD s_lastWhizzerGroundDislocationTime = 0;
-            static char s_whizzerGroundDislocationDirKey = 'A';
-            bool whizzerGroundDislocationStance = (handsDistSledge < 0.26f &&
-                                                   leftLocal.y > -0.30f && leftLocal.y < 0.05f &&
-                                                   vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool whizzerGroundDislocationThrow = (whizzerGroundDislocationStance && rVel.y < -1.50f &&
-                                                  lVel.y < -1.20f && fabsf(lVel.x) > 0.85f);
-            if (whizzerGroundDislocationThrow && (now - s_lastWhizzerGroundDislocationTime > 2000)) {
-                s_whizzerGroundDislocationDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Deck Arc Pulse (ADR 0258)
-            static DWORD s_lastOmnidirectionalPulseTime = 0;
-            bool omnidirectionalPulseStance = (handsDistSledge < 0.28f &&
-                                               vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                               vrState.rightController.trigger > 0.65f);
-            bool omnidirectionalPulsePlunge = (omnidirectionalPulseStance && isJumpingStance &&
-                                               rVel.y < -1.55f && lVel.y < -1.30f &&
-                                               fabsf(rVel.x - lVel.x) > 0.90f);
-
-            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Cervical Compression Ground Finish & Sternum Knee Drop (ADR 0261)
-            static DWORD s_lastSternumKneeDropTime = 0;
-            static char s_sternumKneeDropDirKey = 'A';
-            bool sternumKneeDropStance = (handsDistSledge < 0.26f &&
-                                          leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
-                                          vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool sternumKneeDropThrow = (sternumKneeDropStance && rVel.y < -1.55f &&
-                                         lVel.y < -1.30f && fabsf(lVel.x) > 0.85f);
-            if (sternumKneeDropThrow && (now - s_lastSternumKneeDropTime > 2000)) {
-                s_sternumKneeDropDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Pulse Discharge Wave (ADR 0262)
-            static DWORD s_lastKineticPulseWaveTime = 0;
-            bool kineticPulseWaveStance = (handsDistSledge < 0.28f &&
-                                           vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                           vrState.rightController.trigger > 0.65f);
-            bool kineticPulseWavePlunge = (kineticPulseWaveStance && isJumpingStance &&
-                                           rVel.y < -1.60f && lVel.y < -1.35f &&
-                                           fabsf(rVel.x - lVel.x) > 0.95f);
-
-            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Sternum Bone Fracture Mat Spike (ADR 0265)
-            static DWORD s_lastSternumFractureSpikeTime = 0;
-            static char s_sternumFractureSpikeDirKey = 'A';
-            bool sternumFractureSpikeStance = (handsDistSledge < 0.26f &&
-                                               leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
-                                               vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool sternumFractureSpikeThrow = (sternumFractureSpikeStance && rVel.y < -1.60f &&
-                                              lVel.y < -1.35f && fabsf(lVel.x) > 0.85f);
-            if (sternumFractureSpikeThrow && (now - s_lastSternumFractureSpikeTime > 2000)) {
-                s_sternumFractureSpikeDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Cleave Wave (ADR 0266)
-            static DWORD s_lastPlasmaCleaveWaveTime = 0;
-            bool plasmaCleaveWaveStance = (handsDistSledge < 0.28f &&
-                                           vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                           vrState.rightController.trigger > 0.65f);
-            bool plasmaCleaveWavePlunge = (plasmaCleaveWaveStance && isJumpingStance &&
-                                           rVel.y < -1.65f && lVel.y < -1.40f &&
-                                           fabsf(rVel.x - lVel.x) > 1.00f);
-
-            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Sternum Bone Fracture Thoracic Grating Slam (ADR 0269)
-            static DWORD s_lastSternumGratingSlamTime = 0;
-            static char s_sternumGratingSlamDirKey = 'A';
-            bool sternumGratingSlamStance = (handsDistSledge < 0.26f &&
-                                             leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
-                                             vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool sternumGratingSlamThrow = (sternumGratingSlamStance && rVel.y < -1.65f &&
-                                            lVel.y < -1.40f && fabsf(lVel.x) > 0.85f);
-            if (sternumGratingSlamThrow && (now - s_lastSternumGratingSlamTime > 2000)) {
-                s_sternumGratingSlamDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Shockwave Overload (ADR 0270)
-            static DWORD s_lastPlasmaOverloadWaveTime = 0;
-            bool plasmaOverloadWaveStance = (handsDistSledge < 0.28f &&
-                                             vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                             vrState.rightController.trigger > 0.65f);
-            bool plasmaOverloadWavePlunge = (plasmaOverloadWaveStance && isJumpingStance &&
-                                             rVel.y < -1.70f && lVel.y < -1.45f &&
-                                             fabsf(rVel.x - lVel.x) > 1.05f);
-
-            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Cervical Compression Grating Fracture Slam (ADR 0273)
-            static DWORD s_lastCervicalGratingSlamTime = 0;
-            static char s_cervicalGratingSlamDirKey = 'A';
-            bool cervicalGratingSlamStance = (handsDistSledge < 0.26f &&
-                                              leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
-                                              vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool cervicalGratingSlamThrow = (cervicalGratingSlamStance && rVel.y < -1.70f &&
-                                             lVel.y < -1.45f && fabsf(lVel.x) > 0.85f);
-            if (cervicalGratingSlamThrow && (now - s_lastCervicalGratingSlamTime > 2000)) {
-                s_cervicalGratingSlamDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Detonation (ADR 0274)
-            static DWORD s_lastPlasmaResonantWaveTime = 0;
-            bool plasmaResonantWaveStance = (handsDistSledge < 0.28f &&
-                                             vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                             vrState.rightController.trigger > 0.65f);
-            bool plasmaResonantWavePlunge = (plasmaResonantWaveStance && isJumpingStance &&
-                                             rVel.y < -1.75f && lVel.y < -1.50f &&
-                                             fabsf(rVel.x - lVel.x) > 1.10f);
-
-            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Cervical Compression Grating Hyperextension Finisher (ADR 0277)
-            static DWORD s_lastHyperextensionFinisherTime = 0;
-            static char s_hyperextensionFinisherDirKey = 'A';
-            bool hyperextensionFinisherStance = (handsDistSledge < 0.26f &&
-                                                 leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
-                                                 vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool hyperextensionFinisherThrow = (hyperextensionFinisherStance && rVel.y < -1.75f &&
-                                                lVel.y < -1.50f && fabsf(lVel.x) > 0.85f);
-            if (hyperextensionFinisherThrow && (now - s_lastHyperextensionFinisherTime > 2000)) {
-                s_hyperextensionFinisherDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Harmonic Deck Quake (ADR 0278)
-            static DWORD s_lastPlasmaHarmonicQuakeTime = 0;
-            bool plasmaHarmonicQuakeStance = (handsDistSledge < 0.28f &&
-                                              vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                              vrState.rightController.trigger > 0.65f);
-            bool plasmaHarmonicQuakePlunge = (plasmaHarmonicQuakeStance && isJumpingStance &&
-                                              rVel.y < -1.80f && lVel.y < -1.55f &&
-                                              fabsf(rVel.x - lVel.x) > 1.15f);
-
-            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Hyperextension Mat Dislocation (ADR 0281)
-            static DWORD s_lastThoracicDislocationTime = 0;
-            static char s_thoracicDislocationDirKey = 'A';
-            bool thoracicDislocationStance = (handsDistSledge < 0.26f &&
-                                              leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
-                                              vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool thoracicDislocationThrow = (thoracicDislocationStance && rVel.y < -1.80f &&
-                                             lVel.y < -1.55f && fabsf(lVel.x) > 0.85f);
-            if (thoracicDislocationThrow && (now - s_lastThoracicDislocationTime > 2000)) {
-                s_thoracicDislocationDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Seism Shockwave (ADR 0282)
-            static DWORD s_lastPlasmaResonantSeismTime = 0;
-            bool plasmaResonantSeismStance = (handsDistSledge < 0.28f &&
-                                              vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                              vrState.rightController.trigger > 0.65f);
-            bool plasmaResonantSeismPlunge = (plasmaResonantSeismStance && isJumpingStance &&
-                                              rVel.y < -1.85f && lVel.y < -1.60f &&
-                                              fabsf(rVel.x - lVel.x) > 1.20f);
-
-            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Hyperextension Mat Slam Finisher (ADR 0285)
-            static DWORD s_lastThoracicMatSlamTime = 0;
-            static char s_thoracicMatSlamDirKey = 'A';
-            bool thoracicMatSlamStance = (handsDistSledge < 0.26f &&
-                                          leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
-                                          vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool thoracicMatSlamThrow = (thoracicMatSlamStance && rVel.y < -1.85f &&
-                                         lVel.y < -1.60f && fabsf(lVel.x) > 0.85f);
-            if (thoracicMatSlamThrow && (now - s_lastThoracicMatSlamTime > 2000)) {
-                s_thoracicMatSlamDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Seism Overdrive (ADR 0286)
-            static DWORD s_lastPlasmaSeismOverdriveTime = 0;
-            bool plasmaSeismOverdriveStance = (handsDistSledge < 0.28f &&
-                                               vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                               vrState.rightController.trigger > 0.65f);
-            bool plasmaSeismOverdrivePlunge = (plasmaSeismOverdriveStance && isJumpingStance &&
-                                               rVel.y < -1.90f && lVel.y < -1.65f &&
-                                               fabsf(rVel.x - lVel.x) > 1.25f);
-
-            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Hyperextension Ground Pin Lock (ADR 0289)
-            static DWORD s_lastThoracicPinLockTime = 0;
-            static char s_thoracicPinLockDirKey = 'A';
-            bool thoracicPinLockStance = (handsDistSledge < 0.26f &&
-                                          leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
-                                          vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool thoracicPinLockThrow = (thoracicPinLockStance && rVel.y < -1.90f &&
-                                         lVel.y < -1.65f && fabsf(lVel.x) > 0.85f);
-            if (thoracicPinLockThrow && (now - s_lastThoracicPinLockTime > 2000)) {
-                s_thoracicPinLockDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Shockwave (ADR 0290)
-            static DWORD s_lastPlasmaCataclysmTime = 0;
-            bool plasmaCataclysmStance = (handsDistSledge < 0.28f &&
-                                          vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                          vrState.rightController.trigger > 0.65f);
-            bool plasmaCataclysmPlunge = (plasmaCataclysmStance && isJumpingStance &&
-                                          rVel.y < -1.95f && lVel.y < -1.70f &&
-                                          fabsf(rVel.x - lVel.x) > 1.30f);
-
-            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Hyperextension Sternum Elbow Drop (ADR 0293)
-            static DWORD s_lastSternumElbowDropTime = 0;
-            static char s_sternumElbowDropDirKey = 'A';
-            bool sternumElbowDropStance = (handsDistSledge < 0.26f &&
-                                           leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
-                                           vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool sternumElbowDropPlunge = (sternumElbowDropStance && rVel.y < -1.95f &&
-                                           lVel.y < -1.70f && fabsf(lVel.x) > 0.90f);
-            if (sternumElbowDropPlunge && (now - s_lastSternumElbowDropTime > 2000)) {
-                s_sternumElbowDropDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Overdrive (ADR 0294)
-            static DWORD s_lastPlasmaCataclysmOverdriveTime = 0;
-            bool plasmaCataclysmOverdriveStance = (handsDistSledge < 0.28f &&
-                                                  vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                                  vrState.rightController.trigger > 0.65f);
-            bool plasmaCataclysmOverdrivePlunge = (plasmaCataclysmOverdriveStance && isJumpingStance &&
-                                                  rVel.y < -2.00f && lVel.y < -1.75f &&
-                                                  fabsf(rVel.x - lVel.x) > 1.35f);
-
-            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Hyperextension Cranial Deck Driver (ADR 0297)
-            static DWORD s_lastCranialDeckDriverTime = 0;
-            static char s_cranialDeckDriverDirKey = 'A';
-            bool cranialDeckDriverStance = (handsDistSledge < 0.26f &&
-                                            leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
-                                            vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool cranialDeckDriverPlunge = (cranialDeckDriverStance && rVel.y < -2.00f &&
-                                            lVel.y < -1.75f && fabsf(lVel.x) > 0.90f);
-            if (cranialDeckDriverPlunge && (now - s_lastCranialDeckDriverTime > 2000)) {
-                s_cranialDeckDriverDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Singularity (ADR 0298)
-            static DWORD s_lastPlasmaSingularityTime = 0;
-            bool plasmaSingularityStance = (handsDistSledge < 0.28f &&
-                                            vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                            vrState.rightController.trigger > 0.65f);
-            bool plasmaSingularityPlunge = (plasmaSingularityStance && isJumpingStance &&
-                                            rVel.y < -2.05f && lVel.y < -1.80f &&
-                                            fabsf(rVel.x - lVel.x) > 1.40f);
-
-            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Hyperextension Sternum Knee Spike Finisher (ADR 0301)
-            static DWORD s_lastSternumKneeSpikeTime = 0;
-            static char s_sternumKneeSpikeDirKey = 'A';
-            bool sternumKneeSpikeStance = (handsDistSledge < 0.26f &&
-                                           leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
-                                           vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool sternumKneeSpikePlunge = (sternumKneeSpikeStance && rVel.y < -2.05f &&
-                                           lVel.y < -1.80f && fabsf(lVel.x) > 0.90f);
-            if (sternumKneeSpikePlunge && (now - s_lastSternumKneeSpikeTime > 2000)) {
-                s_sternumKneeSpikeDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Supernova (ADR 0302)
-            static DWORD s_lastPlasmaSupernovaTime = 0;
-            bool plasmaSupernovaStance = (handsDistSledge < 0.28f &&
-                                          vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                          vrState.rightController.trigger > 0.65f);
-            bool plasmaSupernovaPlunge = (plasmaSupernovaStance && isJumpingStance &&
-                                          rVel.y < -2.10f && lVel.y < -1.85f &&
-                                          fabsf(rVel.x - lVel.x) > 1.45f);
-
-            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Hyperextension Cervical Deck Pin Spike (ADR 0305)
-            static DWORD s_lastCervicalDeckPinTime = 0;
-            static char s_cervicalDeckPinDirKey = 'A';
-            bool cervicalDeckPinStance = (handsDistSledge < 0.26f &&
-                                          leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
-                                          vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool cervicalDeckPinPlunge = (cervicalDeckPinStance && rVel.y < -2.10f &&
-                                          lVel.y < -1.85f && fabsf(lVel.x) > 0.90f);
-            if (cervicalDeckPinPlunge && (now - s_lastCervicalDeckPinTime > 2000)) {
-                s_cervicalDeckPinDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Hypernova (ADR 0306)
-            static DWORD s_lastPlasmaHypernovaTime = 0;
-            bool plasmaHypernovaStance = (handsDistSledge < 0.28f &&
-                                          vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                          vrState.rightController.trigger > 0.65f);
-            bool plasmaHypernovaPlunge = (plasmaHypernovaStance && isJumpingStance &&
-                                          rVel.y < -2.15f && lVel.y < -1.90f &&
-                                          fabsf(rVel.x - lVel.x) > 1.50f);
-
-            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Hyperextension Cranial Grating Grind (ADR 0309)
-            static DWORD s_lastCranialGrindTime = 0;
-            static char s_cranialGrindDirKey = 'A';
-            bool cranialGrindStance = (handsDistSledge < 0.26f &&
-                                       leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
-                                       vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool cranialGrindPlunge = (cranialGrindStance && rVel.y < -2.15f &&
-                                       lVel.y < -1.90f && fabsf(lVel.x) > 0.90f);
-            if (cranialGrindPlunge && (now - s_lastCranialGrindTime > 2000)) {
-                s_cranialGrindDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Singularity Overdrive (ADR 0310)
-            static DWORD s_lastPlasmaSingularityOverdriveTime = 0;
-            bool plasmaSingularityOverdriveStance = (handsDistSledge < 0.28f &&
-                                                    vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                                    vrState.rightController.trigger > 0.65f);
-            bool plasmaSingularityOverdrivePlunge = (plasmaSingularityOverdriveStance && isJumpingStance &&
-                                                    rVel.y < -2.20f && lVel.y < -1.95f &&
-                                                    fabsf(rVel.x - lVel.x) > 1.55f);
-
-            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Hyperextension Cranial Post-Impactor Slam (ADR 0313)
-            static DWORD s_lastCranialPostImpactTime = 0;
-            static char s_cranialPostImpactDirKey = 'A';
-            bool cranialPostImpactStance = (handsDistSledge < 0.26f &&
-                                            leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
-                                            vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool cranialPostImpactPlunge = (cranialPostImpactStance && rVel.y < -2.20f &&
-                                            lVel.y < -1.95f && fabsf(lVel.x) > 0.95f);
-            if (cranialPostImpactPlunge && (now - s_lastCranialPostImpactTime > 2000)) {
-                s_cranialPostImpactDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Genesis Overdrive (ADR 0314)
-            static DWORD s_lastPlasmaGenesisTime = 0;
-            bool plasmaGenesisStance = (handsDistSledge < 0.28f &&
-                                        vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                        vrState.rightController.trigger > 0.65f);
-            bool plasmaGenesisPlunge = (plasmaGenesisStance && isJumpingStance &&
-                                        rVel.y < -2.25f && lVel.y < -2.00f &&
-                                        fabsf(rVel.x - lVel.x) > 1.60f);
-
-            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Hyperextension Cranial Deck Grating Stomp Finisher (ADR 0317)
-            static DWORD s_lastCranialStompTime = 0;
-            static char s_cranialStompDirKey = 'A';
-            bool cranialStompStance = (handsDistSledge < 0.26f &&
-                                       leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
-                                       vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool cranialStompPlunge = (cranialStompStance && rVel.y < -2.25f &&
-                                       lVel.y < -2.00f && fabsf(lVel.x) > 0.95f);
-            if (cranialStompPlunge && (now - s_lastCranialStompTime > 2000)) {
-                s_cranialStompDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Big Bang Overdrive (ADR 0318)
-            static DWORD s_lastPlasmaBigBangTime = 0;
-            bool plasmaBigBangStance = (handsDistSledge < 0.28f &&
-                                        vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                        vrState.rightController.trigger > 0.65f);
-            bool plasmaBigBangPlunge = (plasmaBigBangStance && isJumpingStance &&
-                                        rVel.y < -2.30f && lVel.y < -2.05f &&
-                                        fabsf(rVel.x - lVel.x) > 1.65f);
-
-            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Hyperextension Cranial Post Double-Strike Execution (ADR 0321)
-            static DWORD s_lastCranialDoubleStrikeTime = 0;
-            static char s_cranialDoubleStrikeDirKey = 'A';
-            bool cranialDoubleStrikeStance = (handsDistSledge < 0.26f &&
-                                              leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
-                                              vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool cranialDoubleStrikePlunge = (cranialDoubleStrikeStance && rVel.y < -2.30f &&
-                                              lVel.y < -2.05f && fabsf(lVel.x) > 0.95f);
-            if (cranialDoubleStrikePlunge && (now - s_lastCranialDoubleStrikeTime > 2000)) {
-                s_cranialDoubleStrikeDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Cosmic Dawn Overdrive (ADR 0322)
-            static DWORD s_lastPlasmaCosmicDawnTime = 0;
-            bool plasmaCosmicDawnStance = (handsDistSledge < 0.28f &&
-                                           vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                           vrState.rightController.trigger > 0.65f);
-            bool plasmaCosmicDawnPlunge = (plasmaCosmicDawnStance && isJumpingStance &&
-                                           rVel.y < -2.35f && lVel.y < -2.10f &&
-                                           fabsf(rVel.x - lVel.x) > 1.70f);
-
-            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Hyperextension Cranial Post Pivot-Twist Fracture (ADR 0325)
-            static DWORD s_lastCranialPivotTwistTime = 0;
-            static char s_cranialPivotTwistDirKey = 'A';
-            bool cranialPivotTwistStance = (handsDistSledge < 0.26f &&
-                                            leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
-                                            vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool cranialPivotTwistPlunge = (cranialPivotTwistStance && rVel.y < -2.35f &&
-                                            lVel.y < -2.10f && fabsf(lVel.x) > 1.00f);
-            if (cranialPivotTwistPlunge && (now - s_lastCranialPivotTwistTime > 2000)) {
-                s_cranialPivotTwistDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Supercluster Overdrive (ADR 0326)
-            static DWORD s_lastPlasmaSuperclusterTime = 0;
-            bool plasmaSuperclusterStance = (handsDistSledge < 0.28f &&
-                                             vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                             vrState.rightController.trigger > 0.65f);
-            bool plasmaSuperclusterPlunge = (plasmaSuperclusterStance && isJumpingStance &&
-                                             rVel.y < -2.40f && lVel.y < -2.15f &&
-                                             fabsf(rVel.x - lVel.x) > 1.75f);
-
-            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Hyperextension Cranial Post Pivot-Twist Deck Slam (ADR 0329)
-            static DWORD s_lastCranialPivotSlamTime = 0;
-            static char s_cranialPivotSlamDirKey = 'A';
-            bool cranialPivotSlamStance = (handsDistSledge < 0.26f &&
-                                           leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
-                                           vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool cranialPivotSlamPlunge = (cranialPivotSlamStance && rVel.y < -2.40f &&
-                                           lVel.y < -2.15f && fabsf(lVel.x) > 1.00f);
-            if (cranialPivotSlamPlunge && (now - s_lastCranialPivotSlamTime > 2000)) {
-                s_cranialPivotSlamDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Omniverse Overdrive (ADR 0330)
-            static DWORD s_lastPlasmaOmniverseTime = 0;
-            bool plasmaOmniverseStance = (handsDistSledge < 0.28f &&
-                                          vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                          vrState.rightController.trigger > 0.65f);
-            bool plasmaOmniversePlunge = (plasmaOmniverseStance && isJumpingStance &&
-                                          rVel.y < -2.45f && lVel.y < -2.20f &&
-                                          fabsf(rVel.x - lVel.x) > 1.80f);
-
-            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Cranial Post Lever-Pin Lock Takedown (ADR 0333)
-            static DWORD s_lastCranialLeverPinTime = 0;
-            static char s_cranialLeverPinDirKey = 'A';
-            bool cranialLeverPinStance = (handsDistSledge < 0.26f &&
-                                          leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
-                                          vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool cranialLeverPinPlunge = (cranialLeverPinStance && rVel.y < -2.45f &&
-                                          lVel.y < -2.20f && fabsf(lVel.x) > 1.05f);
-            if (cranialLeverPinPlunge && (now - s_lastCranialLeverPinTime > 2000)) {
-                s_cranialLeverPinDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Metaverse Overdrive (ADR 0334)
-            static DWORD s_lastPlasmaMetaverseTime = 0;
-            bool plasmaMetaverseStance = (handsDistSledge < 0.28f &&
-                                          vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                          vrState.rightController.trigger > 0.65f);
-            bool plasmaMetaversePlunge = (plasmaMetaverseStance && isJumpingStance &&
-                                          rVel.y < -2.50f && lVel.y < -2.25f &&
-                                          fabsf(rVel.x - lVel.x) > 1.85f);
-
-            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Cranial Post Fulcrum Leverage Chokehold Finisher (ADR 0337)
-            static DWORD s_lastCranialFulcrumChokeTime = 0;
-            static char s_cranialFulcrumChokeDirKey = 'A';
-            bool cranialFulcrumChokeStance = (handsDistSledge < 0.26f &&
-                                              leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
-                                              vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool cranialFulcrumChokePlunge = (cranialFulcrumChokeStance && rVel.y < -2.50f &&
-                                              lVel.y < -2.25f && fabsf(lVel.x) > 1.10f);
-            if (cranialFulcrumChokePlunge && (now - s_lastCranialFulcrumChokeTime > 2000)) {
-                s_cranialFulcrumChokeDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Hyperdimensional Overdrive (ADR 0338)
-            static DWORD s_lastPlasmaHyperdimensionalTime = 0;
-            bool plasmaHyperdimensionalStance = (handsDistSledge < 0.28f &&
-                                                 vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                                 vrState.rightController.trigger > 0.65f);
-            bool plasmaHyperdimensionalPlunge = (plasmaHyperdimensionalStance && isJumpingStance &&
-                                                 rVel.y < -2.55f && lVel.y < -2.30f &&
-                                                 fabsf(rVel.x - lVel.x) > 1.90f);
-
-            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Cranial Post Fulcrum Leverage Armbar Fracture (ADR 0341)
-            static DWORD s_lastCranialFulcrumArmbarTime = 0;
-            static char s_cranialFulcrumArmbarDirKey = 'A';
-            bool cranialFulcrumArmbarStance = (handsDistSledge < 0.26f &&
-                                               leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
-                                               vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool cranialFulcrumArmbarPlunge = (cranialFulcrumArmbarStance && rVel.y < -2.55f &&
-                                               lVel.y < -2.30f && fabsf(lVel.x) > 1.15f);
-            if (cranialFulcrumArmbarPlunge && (now - s_lastCranialFulcrumArmbarTime > 2000)) {
-                s_cranialFulcrumArmbarDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Transdimensional Overdrive (ADR 0342)
-            static DWORD s_lastPlasmaTransdimensionalTime = 0;
-            bool plasmaTransdimensionalStance = (handsDistSledge < 0.28f &&
-                                                 vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                                 vrState.rightController.trigger > 0.65f);
-            bool plasmaTransdimensionalPlunge = (plasmaTransdimensionalStance && isJumpingStance &&
-                                                 rVel.y < -2.60f && lVel.y < -2.35f &&
-                                                 fabsf(rVel.x - lVel.x) > 1.95f);
-
-            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Cranial Post Fulcrum Leverage Sternum Knee Drive (ADR 0345)
-            static DWORD s_lastCranialFulcrumKneeTime = 0;
-            static char s_cranialFulcrumKneeDirKey = 'A';
-            bool cranialFulcrumKneeStance = (handsDistSledge < 0.26f &&
-                                             leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
-                                             vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool cranialFulcrumKneePlunge = (cranialFulcrumKneeStance && rVel.y < -2.60f &&
-                                             lVel.y < -2.35f && fabsf(lVel.x) > 1.20f);
-            if (cranialFulcrumKneePlunge && (now - s_lastCranialFulcrumKneeTime > 2000)) {
-                s_cranialFulcrumKneeDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Interdimensional Overdrive (ADR 0346)
-            static DWORD s_lastPlasmaInterdimensionalTime = 0;
-            bool plasmaInterdimensionalStance = (handsDistSledge < 0.28f &&
-                                                 vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                                 vrState.rightController.trigger > 0.65f);
-            bool plasmaInterdimensionalPlunge = (plasmaInterdimensionalStance && isJumpingStance &&
-                                                 rVel.y < -2.65f && lVel.y < -2.40f &&
-                                                 fabsf(rVel.x - lVel.x) > 2.00f);
-
-            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Cranial Post Fulcrum Leverage Ribcage Fracture Deck Slam (ADR 0349)
-            static DWORD s_lastCranialFulcrumRibSlamTime = 0;
-            static char s_cranialFulcrumRibSlamDirKey = 'A';
-            bool cranialFulcrumRibSlamStance = (handsDistSledge < 0.26f &&
-                                                leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
-                                                vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool cranialFulcrumRibSlamPlunge = (cranialFulcrumRibSlamStance && rVel.y < -2.65f &&
-                                                lVel.y < -2.40f && fabsf(lVel.x) > 1.25f);
-            if (cranialFulcrumRibSlamPlunge && (now - s_lastCranialFulcrumRibSlamTime > 2000)) {
-                s_cranialFulcrumRibSlamDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Continuum Singularity Overdrive (ADR 0350)
-            static DWORD s_lastPlasmaContinuumSingularityTime = 0;
-            bool plasmaContinuumSingularityStance = (handsDistSledge < 0.28f &&
-                                                     vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                                     vrState.rightController.trigger > 0.65f);
-            bool plasmaContinuumSingularityPlunge = (plasmaContinuumSingularityStance && isJumpingStance &&
-                                                     rVel.y < -2.70f && lVel.y < -2.45f &&
-                                                     fabsf(rVel.x - lVel.x) > 2.05f);
-
-            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Cranial Post Fulcrum Leverage Clavicle Fracture Ground Pin (ADR 0353)
-            static DWORD s_lastCranialFulcrumClaviclePinTime = 0;
-            static char s_cranialFulcrumClaviclePinDirKey = 'A';
-            bool cranialFulcrumClaviclePinStance = (handsDistSledge < 0.26f &&
-                                                    leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
-                                                    vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool cranialFulcrumClaviclePinPlunge = (cranialFulcrumClaviclePinStance && rVel.y < -2.70f &&
-                                                    lVel.y < -2.45f && fabsf(lVel.x) > 1.30f);
-            if (cranialFulcrumClaviclePinPlunge && (now - s_lastCranialFulcrumClaviclePinTime > 2000)) {
-                s_cranialFulcrumClaviclePinDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Multiverse Singularity Overdrive (ADR 0354)
-            static DWORD s_lastPlasmaMultiverseSingularityTime = 0;
-            bool plasmaMultiverseSingularityStance = (handsDistSledge < 0.28f &&
-                                                      vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                                      vrState.rightController.trigger > 0.65f);
-            bool plasmaMultiverseSingularityPlunge = (plasmaMultiverseSingularityStance && isJumpingStance &&
-                                                      rVel.y < -2.75f && lVel.y < -2.50f &&
-                                                      fabsf(rVel.x - lVel.x) > 2.10f);
-
-            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Cranial Post Fulcrum Leverage Scapula Fracture Deck Pin (ADR 0357)
-            static DWORD s_lastCranialFulcrumScapulaPinTime = 0;
-            static char s_cranialFulcrumScapulaPinDirKey = 'A';
-            bool cranialFulcrumScapulaPinStance = (handsDistSledge < 0.26f &&
-                                                    leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
-                                                    vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool cranialFulcrumScapulaPinPlunge = (cranialFulcrumScapulaPinStance && rVel.y < -2.75f &&
-                                                    lVel.y < -2.50f && fabsf(lVel.x) > 1.35f);
-            if (cranialFulcrumScapulaPinPlunge && (now - s_lastCranialFulcrumScapulaPinTime > 2000)) {
-                s_cranialFulcrumScapulaPinDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Omniverse Singularity Overdrive (ADR 0358)
-            static DWORD s_lastPlasmaOmniverseSingularityTime = 0;
-            bool plasmaOmniverseSingularityStance = (handsDistSledge < 0.28f &&
-                                                     vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                                     vrState.rightController.trigger > 0.65f);
-            bool plasmaOmniverseSingularityPlunge = (plasmaOmniverseSingularityStance && isJumpingStance &&
-                                                     rVel.y < -2.80f && lVel.y < -2.55f &&
-                                                     fabsf(rVel.x - lVel.x) > 2.15f);
-
-            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Cranial Post Fulcrum Leverage Sternum Crushing Ground Pin (ADR 0361)
-            static DWORD s_lastCranialFulcrumSternumPinTime = 0;
-            static char s_cranialFulcrumSternumPinDirKey = 'A';
-            bool cranialFulcrumSternumPinStance = (handsDistSledge < 0.26f &&
-                                                    leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
-                                                    vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool cranialFulcrumSternumPinPlunge = (cranialFulcrumSternumPinStance && rVel.y < -2.80f &&
-                                                    lVel.y < -2.55f && fabsf(lVel.x) > 1.40f);
-            if (cranialFulcrumSternumPinPlunge && (now - s_lastCranialFulcrumSternumPinTime > 2000)) {
-                s_cranialFulcrumSternumPinDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Trans-Cosmic Singularity Overdrive (ADR 0362)
-            static DWORD s_lastPlasmaTransCosmicSingularityTime = 0;
-            bool plasmaTransCosmicSingularityStance = (handsDistSledge < 0.28f &&
-                                                       vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                                       vrState.rightController.trigger > 0.65f);
-            bool plasmaTransCosmicSingularityPlunge = (plasmaTransCosmicSingularityStance && isJumpingStance &&
-                                                       rVel.y < -2.85f && lVel.y < -2.60f &&
-                                                       fabsf(rVel.x - lVel.x) > 2.20f);
-
-            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Cranial Post Fulcrum Leverage Mandible Dislocation Ground Pin (ADR 0365)
-            static DWORD s_lastCranialFulcrumMandiblePinTime = 0;
-            static char s_cranialFulcrumMandiblePinDirKey = 'A';
-            bool cranialFulcrumMandiblePinStance = (handsDistSledge < 0.26f &&
-                                                     leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
-                                                     vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool cranialFulcrumMandiblePinPlunge = (cranialFulcrumMandiblePinStance && rVel.y < -2.85f &&
-                                                     lVel.y < -2.60f && fabsf(lVel.x) > 1.45f);
-            if (cranialFulcrumMandiblePinPlunge && (now - s_lastCranialFulcrumMandiblePinTime > 2000)) {
-                s_cranialFulcrumMandiblePinDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Macrocosm Singularity Overdrive (ADR 0366)
-            static DWORD s_lastPlasmaMacrocosmSingularityTime = 0;
-            bool plasmaMacrocosmSingularityStance = (handsDistSledge < 0.28f &&
-                                                       vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                                       vrState.rightController.trigger > 0.65f);
-            bool plasmaMacrocosmSingularityPlunge = (plasmaMacrocosmSingularityStance && isJumpingStance &&
-                                                       rVel.y < -2.90f && lVel.y < -2.65f &&
-                                                       fabsf(rVel.x - lVel.x) > 2.25f);
-
-            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Cranial Post Fulcrum Leverage Zygomatic Arch Fracture Ground Pin (ADR 0369)
-            static DWORD s_lastCranialFulcrumZygomaticPinTime = 0;
-            static char s_cranialFulcrumZygomaticPinDirKey = 'A';
-            bool cranialFulcrumZygomaticPinStance = (handsDistSledge < 0.26f &&
-                                                     leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
-                                                     vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
-            bool cranialFulcrumZygomaticPinPlunge = (cranialFulcrumZygomaticPinStance && rVel.y < -2.90f &&
-                                                     lVel.y < -2.65f && fabsf(lVel.x) > 1.50f);
-            if (cranialFulcrumZygomaticPinPlunge && (now - s_lastCranialFulcrumZygomaticPinTime > 2000)) {
-                s_cranialFulcrumZygomaticPinDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-            }
-
-            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Universal Singularity Overdrive (ADR 0370)
-            static DWORD s_lastPlasmaUniversalSingularityTime = 0;
-            bool plasmaUniversalSingularityStance = (handsDistSledge < 0.28f &&
-                                                       vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                                       vrState.rightController.trigger > 0.65f);
-            bool plasmaUniversalSingularityPlunge = (plasmaUniversalSingularityStance && isJumpingStance &&
-                                                       rVel.y < -2.95f && lVel.y < -2.70f &&
-                                                       fabsf(rVel.x - lVel.x) > 2.30f);
-
-            // Inmate Pit Brawl Outside Leg Hook Sweep & Ground Knee Drop (ADR 0209)
-            static DWORD s_lastOutsideLegSweepTime = 0;
-            static DWORD s_outsideLegSweepHookTime = 0;
-            static char s_outsideLegSweepDirKey = 'A';
-            bool outsideLegSweepHook = (leftLocal.y < -0.30f && fabsf(lVel.x) > 0.90f);
-            if (outsideLegSweepHook && (now - s_lastOutsideLegSweepTime > 2000)) {
-                if (s_outsideLegSweepHookTime == 0) {
-                    s_outsideLegSweepHookTime = now;
-                    s_outsideLegSweepDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
-                    VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL OUTSIDE LEG HOOKED (Dir: %c, Lx: %.2f)", s_outsideLegSweepDirKey, lVel.x);
-                    HapticRequest(0, (0.85f), kHapticReload); // Sweep trip torque (200 Hz)
-                }
-            }
-            bool outsideLegKneeDrop = (s_outsideLegSweepHookTime > 0 && (now - s_outsideLegSweepHookTime < 500) && rVel.y < -1.25f);
-            if (s_outsideLegSweepHookTime != 0 && (now - s_outsideLegSweepHookTime >= 500)) s_outsideLegSweepHookTime = 0; // GH #25: timeout reset
-
-            // Security Guard Stun Baton Forward Two-Handed Cross-Chest Block & Arc Thrust Disruption (ADR 0198 & 0210)
-            static DWORD s_lastCrossThrustTime = 0;
-            static DWORD s_crossBlockHoldStart = 0;
-            bool crossChestGuardStance = (handsDistSledge > 0.20f && handsDistSledge < 0.38f &&
-                                          fabsf(rightLocal.x - leftLocal.x) > 0.22f &&
-                                          rightLocal.y > -0.15f && rightLocal.y < 0.15f &&
-                                          rightLocal.z > -0.30f && rightLocal.z < -0.10f &&
-                                          vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
-                                          vrState.leftController.trigger > 0.65f && vrState.rightController.trigger > 0.65f);
-            bool isCrossThrustReady = false;
-            bool isCrossThrustOvercharged = false;
-            if (crossChestGuardStance) {
-                if (s_crossBlockHoldStart == 0) s_crossBlockHoldStart = now;
-                DWORD crossHoldDuration = now - s_crossBlockHoldStart;
-                if (crossHoldDuration >= 500) {
-                    HapticRequest(0, (0.90f), kHapticFinisher);  // Escalating supercharge hum (340 Hz)
-                    HapticRequest(1, (0.90f), kHapticFinisher);
-                    if (rVel.z < -1.30f && lVel.z < -1.10f) {
-                        isCrossThrustOvercharged = true;
-                    }
-                } else if (crossHoldDuration >= 300) {
-                    HapticRequest(0, (0.65f), kHapticLadder);  // Electrostatic barrier hum (240 Hz)
-                    HapticRequest(1, (0.65f), kHapticLadder);
-                    if (rVel.z < -1.25f && lVel.z < -1.05f) {
-                        isCrossThrustReady = true;
-                    }
-                }
-            } else {
-                s_crossBlockHoldStart = 0;
-            }
-
-            if (plasmaUniversalSingularityPlunge && (now - s_lastPlasmaUniversalSingularityTime > 2000)) {
-                s_lastPlasmaUniversalSingularityTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.plasmaUniversalSingularityPlunge && (now - s_melee.lastPlasmaUniversalSingularityTime > 2000)) {
+                s_melee.lastPlasmaUniversalSingularityTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM UNIVERSAL SINGULARITY OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
                 SendKey('W', true);
@@ -3616,12 +4081,12 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 goto combat_gesture_done;
             }
 
-            if (cranialFulcrumZygomaticPinPlunge && (now - s_lastCranialFulcrumZygomaticPinTime > 2000)) {
-                s_lastCranialFulcrumZygomaticPinTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST FULCRUM ZYGOMATIC PIN EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialFulcrumZygomaticPinDirKey, rVel.y, lVel.y);
+            if (meleeStrikes.cranialFulcrumZygomaticPinPlunge && (now - s_melee.lastCranialFulcrumZygomaticPinTime > 2000)) {
+                s_melee.lastCranialFulcrumZygomaticPinTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST FULCRUM ZYGOMATIC PIN EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_melee.cranialFulcrumZygomaticPinDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
-                SendKey(s_cranialFulcrumZygomaticPinDirKey, true);
+                SendKey(s_melee.cranialFulcrumZygomaticPinDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
@@ -3656,16 +4121,16 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, false);
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_cranialFulcrumZygomaticPinDirKey, false);
+                SendKey(s_melee.cranialFulcrumZygomaticPinDirKey, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Concussive zygomatic fracture shockwave (540 Hz)
                 HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer overhook drag torque (470 Hz)
                 goto combat_gesture_done;
             }
 
-            if (plasmaMacrocosmSingularityPlunge && (now - s_lastPlasmaMacrocosmSingularityTime > 2000)) {
-                s_lastPlasmaMacrocosmSingularityTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.plasmaMacrocosmSingularityPlunge && (now - s_melee.lastPlasmaMacrocosmSingularityTime > 2000)) {
+                s_melee.lastPlasmaMacrocosmSingularityTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM MACROCOSM SINGULARITY OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
                 SendKey('W', true);
@@ -3778,12 +4243,12 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 goto combat_gesture_done;
             }
 
-            if (cranialFulcrumMandiblePinPlunge && (now - s_lastCranialFulcrumMandiblePinTime > 2000)) {
-                s_lastCranialFulcrumMandiblePinTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST FULCRUM MANDIBLE PIN EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialFulcrumMandiblePinDirKey, rVel.y, lVel.y);
+            if (meleeStrikes.cranialFulcrumMandiblePinPlunge && (now - s_melee.lastCranialFulcrumMandiblePinTime > 2000)) {
+                s_melee.lastCranialFulcrumMandiblePinTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST FULCRUM MANDIBLE PIN EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_melee.cranialFulcrumMandiblePinDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
-                SendKey(s_cranialFulcrumMandiblePinDirKey, true);
+                SendKey(s_melee.cranialFulcrumMandiblePinDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
@@ -3816,16 +4281,16 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, false);
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_cranialFulcrumMandiblePinDirKey, false);
+                SendKey(s_melee.cranialFulcrumMandiblePinDirKey, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Concussive mandible fracture shockwave (530 Hz)
                 HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer overhook drag torque (460 Hz)
                 goto combat_gesture_done;
             }
 
-            if (plasmaTransCosmicSingularityPlunge && (now - s_lastPlasmaTransCosmicSingularityTime > 2000)) {
-                s_lastPlasmaTransCosmicSingularityTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.plasmaTransCosmicSingularityPlunge && (now - s_melee.lastPlasmaTransCosmicSingularityTime > 2000)) {
+                s_melee.lastPlasmaTransCosmicSingularityTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM TRANS-COSMIC SINGULARITY OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
                 SendKey('W', true);
@@ -3934,12 +4399,12 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 goto combat_gesture_done;
             }
 
-            if (cranialFulcrumSternumPinPlunge && (now - s_lastCranialFulcrumSternumPinTime > 2000)) {
-                s_lastCranialFulcrumSternumPinTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST FULCRUM STERNUM PIN EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialFulcrumSternumPinDirKey, rVel.y, lVel.y);
+            if (meleeStrikes.cranialFulcrumSternumPinPlunge && (now - s_melee.lastCranialFulcrumSternumPinTime > 2000)) {
+                s_melee.lastCranialFulcrumSternumPinTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST FULCRUM STERNUM PIN EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_melee.cranialFulcrumSternumPinDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
-                SendKey(s_cranialFulcrumSternumPinDirKey, true);
+                SendKey(s_melee.cranialFulcrumSternumPinDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
@@ -3970,16 +4435,16 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, false);
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_cranialFulcrumSternumPinDirKey, false);
+                SendKey(s_melee.cranialFulcrumSternumPinDirKey, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Concussive sternum fracture shockwave (520 Hz)
                 HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer overhook drag torque (450 Hz)
                 goto combat_gesture_done;
             }
 
-            if (plasmaOmniverseSingularityPlunge && (now - s_lastPlasmaOmniverseSingularityTime > 2000)) {
-                s_lastPlasmaOmniverseSingularityTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.plasmaOmniverseSingularityPlunge && (now - s_melee.lastPlasmaOmniverseSingularityTime > 2000)) {
+                s_melee.lastPlasmaOmniverseSingularityTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM OMNIVERSE SINGULARITY OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
                 SendKey('W', true);
@@ -4081,12 +4546,12 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck omniverse recoil (450 Hz)
                 goto combat_gesture_done;
             }
-            if (cranialFulcrumScapulaPinPlunge && (now - s_lastCranialFulcrumScapulaPinTime > 2000)) {
-                s_lastCranialFulcrumScapulaPinTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST FULCRUM SCAPULA PIN EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialFulcrumScapulaPinDirKey, rVel.y, lVel.y);
+            if (meleeStrikes.cranialFulcrumScapulaPinPlunge && (now - s_melee.lastCranialFulcrumScapulaPinTime > 2000)) {
+                s_melee.lastCranialFulcrumScapulaPinTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST FULCRUM SCAPULA PIN EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_melee.cranialFulcrumScapulaPinDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
-                SendKey(s_cranialFulcrumScapulaPinDirKey, true);
+                SendKey(s_melee.cranialFulcrumScapulaPinDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
@@ -4115,16 +4580,16 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, false);
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_cranialFulcrumScapulaPinDirKey, false);
+                SendKey(s_melee.cranialFulcrumScapulaPinDirKey, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Concussive scapula fracture shockwave (510 Hz)
                 HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer overhook drag torque (440 Hz)
                 goto combat_gesture_done;
             }
 
-            if (plasmaMultiverseSingularityPlunge && (now - s_lastPlasmaMultiverseSingularityTime > 2000)) {
-                s_lastPlasmaMultiverseSingularityTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.plasmaMultiverseSingularityPlunge && (now - s_melee.lastPlasmaMultiverseSingularityTime > 2000)) {
+                s_melee.lastPlasmaMultiverseSingularityTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM MULTIVERSE SINGULARITY OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
                 SendKey('W', true);
@@ -4218,12 +4683,12 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck multiverse recoil (440 Hz)
                 goto combat_gesture_done;
             }
-            if (cranialFulcrumClaviclePinPlunge && (now - s_lastCranialFulcrumClaviclePinTime > 2000)) {
-                s_lastCranialFulcrumClaviclePinTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST FULCRUM CLAVICLE PIN EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialFulcrumClaviclePinDirKey, rVel.y, lVel.y);
+            if (meleeStrikes.cranialFulcrumClaviclePinPlunge && (now - s_melee.lastCranialFulcrumClaviclePinTime > 2000)) {
+                s_melee.lastCranialFulcrumClaviclePinTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST FULCRUM CLAVICLE PIN EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_melee.cranialFulcrumClaviclePinDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
-                SendKey(s_cranialFulcrumClaviclePinDirKey, true);
+                SendKey(s_melee.cranialFulcrumClaviclePinDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
@@ -4250,16 +4715,16 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, false);
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_cranialFulcrumClaviclePinDirKey, false);
+                SendKey(s_melee.cranialFulcrumClaviclePinDirKey, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Concussive clavicle fracture shockwave (510 Hz)
                 HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer overhook drag torque (440 Hz)
                 goto combat_gesture_done;
             }
 
-            if (plasmaContinuumSingularityPlunge && (now - s_lastPlasmaContinuumSingularityTime > 2000)) {
-                s_lastPlasmaContinuumSingularityTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.plasmaContinuumSingularityPlunge && (now - s_melee.lastPlasmaContinuumSingularityTime > 2000)) {
+                s_melee.lastPlasmaContinuumSingularityTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM CONTINUUM SINGULARITY OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
                 SendKey('W', true);
@@ -4345,12 +4810,12 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck continuum recoil (430 Hz)
                 goto combat_gesture_done;
             }
-            if (cranialFulcrumRibSlamPlunge && (now - s_lastCranialFulcrumRibSlamTime > 2000)) {
-                s_lastCranialFulcrumRibSlamTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST FULCRUM RIBCAGE SLAM EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialFulcrumRibSlamDirKey, rVel.y, lVel.y);
+            if (meleeStrikes.cranialFulcrumRibSlamPlunge && (now - s_melee.lastCranialFulcrumRibSlamTime > 2000)) {
+                s_melee.lastCranialFulcrumRibSlamTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST FULCRUM RIBCAGE SLAM EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_melee.cranialFulcrumRibSlamDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
-                SendKey(s_cranialFulcrumRibSlamDirKey, true);
+                SendKey(s_melee.cranialFulcrumRibSlamDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
@@ -4375,16 +4840,16 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, false);
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_cranialFulcrumRibSlamDirKey, false);
+                SendKey(s_melee.cranialFulcrumRibSlamDirKey, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Concussive ribcage fracture shockwave (500 Hz)
                 HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer overhook drag torque (430 Hz)
                 goto combat_gesture_done;
             }
 
-            if (plasmaInterdimensionalPlunge && (now - s_lastPlasmaInterdimensionalTime > 2000)) {
-                s_lastPlasmaInterdimensionalTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.plasmaInterdimensionalPlunge && (now - s_melee.lastPlasmaInterdimensionalTime > 2000)) {
+                s_melee.lastPlasmaInterdimensionalTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM INTERDIMENSIONAL OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendGestureTap(VK_SPACE, "melee/stun-baton-interdimensional-overdrive");
                 SendKey('W', true);
@@ -4464,12 +4929,12 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck Interdimensional recoil (420 Hz)
                 goto combat_gesture_done;
             }
-            if (cranialFulcrumKneePlunge && (now - s_lastCranialFulcrumKneeTime > 2000)) {
-                s_lastCranialFulcrumKneeTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST FULCRUM KNEE EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialFulcrumKneeDirKey, rVel.y, lVel.y);
+            if (meleeStrikes.cranialFulcrumKneePlunge && (now - s_melee.lastCranialFulcrumKneeTime > 2000)) {
+                s_melee.lastCranialFulcrumKneeTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST FULCRUM KNEE EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_melee.cranialFulcrumKneeDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
-                SendKey(s_cranialFulcrumKneeDirKey, true);
+                SendKey(s_melee.cranialFulcrumKneeDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
@@ -4494,16 +4959,16 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, false);
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_cranialFulcrumKneeDirKey, false);
+                SendKey(s_melee.cranialFulcrumKneeDirKey, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Concussive fulcrum knee fracture shockwave (500 Hz)
                 HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer overhook drag torque (420 Hz)
                 goto combat_gesture_done;
             }
 
-            if (plasmaTransdimensionalPlunge && (now - s_lastPlasmaTransdimensionalTime > 2000)) {
-                s_lastPlasmaTransdimensionalTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.plasmaTransdimensionalPlunge && (now - s_melee.lastPlasmaTransdimensionalTime > 2000)) {
+                s_melee.lastPlasmaTransdimensionalTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM TRANSDIMENSIONAL OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendGestureTap(VK_SPACE, "melee/stun-baton-transdimensional-overdrive");
                 SendKey('W', true);
@@ -4579,12 +5044,12 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck Transdimensional recoil (410 Hz)
                 goto combat_gesture_done;
             }
-            if (cranialFulcrumArmbarPlunge && (now - s_lastCranialFulcrumArmbarTime > 2000)) {
-                s_lastCranialFulcrumArmbarTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST FULCRUM ARMBAR EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialFulcrumArmbarDirKey, rVel.y, lVel.y);
+            if (meleeStrikes.cranialFulcrumArmbarPlunge && (now - s_melee.lastCranialFulcrumArmbarTime > 2000)) {
+                s_melee.lastCranialFulcrumArmbarTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST FULCRUM ARMBAR EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_melee.cranialFulcrumArmbarDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
-                SendKey(s_cranialFulcrumArmbarDirKey, true);
+                SendKey(s_melee.cranialFulcrumArmbarDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
@@ -4607,16 +5072,16 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, false);
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_cranialFulcrumArmbarDirKey, false);
+                SendKey(s_melee.cranialFulcrumArmbarDirKey, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Concussive fulcrum armbar fracture shockwave (490 Hz)
                 HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer overhook drag torque (410 Hz)
                 goto combat_gesture_done;
             }
 
-            if (plasmaHyperdimensionalPlunge && (now - s_lastPlasmaHyperdimensionalTime > 2000)) {
-                s_lastPlasmaHyperdimensionalTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.plasmaHyperdimensionalPlunge && (now - s_melee.lastPlasmaHyperdimensionalTime > 2000)) {
+                s_melee.lastPlasmaHyperdimensionalTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM HYPERDIMENSIONAL OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendGestureTap(VK_SPACE, "melee/stun-baton-hyperdimensional-overdrive");
                 SendKey('W', true);
@@ -4688,12 +5153,12 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck Hyperdimensional recoil (400 Hz)
                 goto combat_gesture_done;
             }
-            if (cranialFulcrumChokePlunge && (now - s_lastCranialFulcrumChokeTime > 2000)) {
-                s_lastCranialFulcrumChokeTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST FULCRUM CHOKE EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialFulcrumChokeDirKey, rVel.y, lVel.y);
+            if (meleeStrikes.cranialFulcrumChokePlunge && (now - s_melee.lastCranialFulcrumChokeTime > 2000)) {
+                s_melee.lastCranialFulcrumChokeTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST FULCRUM CHOKE EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_melee.cranialFulcrumChokeDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
-                SendKey(s_cranialFulcrumChokeDirKey, true);
+                SendKey(s_melee.cranialFulcrumChokeDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
@@ -4714,16 +5179,16 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, false);
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_cranialFulcrumChokeDirKey, false);
+                SendKey(s_melee.cranialFulcrumChokeDirKey, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Concussive fulcrum leverage shockwave (480 Hz)
                 HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer collar tie drag torque (400 Hz)
                 goto combat_gesture_done;
             }
 
-            if (plasmaMetaversePlunge && (now - s_lastPlasmaMetaverseTime > 2000)) {
-                s_lastPlasmaMetaverseTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.plasmaMetaversePlunge && (now - s_melee.lastPlasmaMetaverseTime > 2000)) {
+                s_melee.lastPlasmaMetaverseTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM METAVERSE OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -4787,12 +5252,12 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck Metaverse recoil (390 Hz)
                 goto combat_gesture_done;
             }
-            if (cranialLeverPinPlunge && (now - s_lastCranialLeverPinTime > 2000)) {
-                s_lastCranialLeverPinTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST LEVER PIN EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialLeverPinDirKey, rVel.y, lVel.y);
+            if (meleeStrikes.cranialLeverPinPlunge && (now - s_melee.lastCranialLeverPinTime > 2000)) {
+                s_melee.lastCranialLeverPinTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST LEVER PIN EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_melee.cranialLeverPinDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
-                SendKey(s_cranialLeverPinDirKey, true);
+                SendKey(s_melee.cranialLeverPinDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
@@ -4811,16 +5276,16 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, false);
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_cranialLeverPinDirKey, false);
+                SendKey(s_melee.cranialLeverPinDirKey, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Concussive fulcrum lever lock shockwave (470 Hz)
                 HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer collar tie drag torque (390 Hz)
                 goto combat_gesture_done;
             }
 
-            if (plasmaOmniversePlunge && (now - s_lastPlasmaOmniverseTime > 2000)) {
-                s_lastPlasmaOmniverseTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.plasmaOmniversePlunge && (now - s_melee.lastPlasmaOmniverseTime > 2000)) {
+                s_melee.lastPlasmaOmniverseTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM OMNIVERSE OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-overdrive");
                 SendKey('W', true);
@@ -4884,12 +5349,12 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck Omniverse recoil (380 Hz)
                 goto combat_gesture_done;
             }
-            if (cranialPivotSlamPlunge && (now - s_lastCranialPivotSlamTime > 2000)) {
-                s_lastCranialPivotSlamTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST PIVOT SLAM EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialPivotSlamDirKey, rVel.y, lVel.y);
+            if (meleeStrikes.cranialPivotSlamPlunge && (now - s_melee.lastCranialPivotSlamTime > 2000)) {
+                s_melee.lastCranialPivotSlamTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST PIVOT SLAM EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_melee.cranialPivotSlamDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
-                SendKey(s_cranialPivotSlamDirKey, true);
+                SendKey(s_melee.cranialPivotSlamDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
@@ -4906,15 +5371,15 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, false);
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_cranialPivotSlamDirKey, false);
+                SendKey(s_melee.cranialPivotSlamDirKey, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Concussive deck impact and spinal fracture shockwave (460 Hz)
                 HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer collar tie drag (380 Hz)
                 goto combat_gesture_done;
             }
-            if (plasmaSuperclusterPlunge && (now - s_lastPlasmaSuperclusterTime > 2000)) {
-                s_lastPlasmaSuperclusterTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.plasmaSuperclusterPlunge && (now - s_melee.lastPlasmaSuperclusterTime > 2000)) {
+                s_melee.lastPlasmaSuperclusterTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM SUPERCLUSTER OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -4974,12 +5439,12 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck Supercluster recoil (360 Hz)
                 goto combat_gesture_done;
             }
-            if (cranialPivotTwistPlunge && (now - s_lastCranialPivotTwistTime > 2000)) {
-                s_lastCranialPivotTwistTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST PIVOT TWIST EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialPivotTwistDirKey, rVel.y, lVel.y);
+            if (meleeStrikes.cranialPivotTwistPlunge && (now - s_melee.lastCranialPivotTwistTime > 2000)) {
+                s_melee.lastCranialPivotTwistTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST PIVOT TWIST EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_melee.cranialPivotTwistDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
-                SendKey(s_cranialPivotTwistDirKey, true);
+                SendKey(s_melee.cranialPivotTwistDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
@@ -4992,15 +5457,15 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, false);
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_cranialPivotTwistDirKey, false);
+                SendKey(s_melee.cranialPivotTwistDirKey, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Cervical vertebra fracture shockwave (450 Hz)
                 HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer collar tie drag (370 Hz)
                 goto combat_gesture_done;
             }
-            if (plasmaCosmicDawnPlunge && (now - s_lastPlasmaCosmicDawnTime > 2000)) {
-                s_lastPlasmaCosmicDawnTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.plasmaCosmicDawnPlunge && (now - s_melee.lastPlasmaCosmicDawnTime > 2000)) {
+                s_melee.lastPlasmaCosmicDawnTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM COSMIC DAWN OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -5058,12 +5523,12 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck Cosmic Dawn recoil (340 Hz)
                 goto combat_gesture_done;
             }
-            if (cranialDoubleStrikePlunge && (now - s_lastCranialDoubleStrikeTime > 2000)) {
-                s_lastCranialDoubleStrikeTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST DOUBLE STRIKE EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialDoubleStrikeDirKey, rVel.y, lVel.y);
+            if (meleeStrikes.cranialDoubleStrikePlunge && (now - s_melee.lastCranialDoubleStrikeTime > 2000)) {
+                s_melee.lastCranialDoubleStrikeTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST DOUBLE STRIKE EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_melee.cranialDoubleStrikeDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
-                SendKey(s_cranialDoubleStrikeDirKey, true);
+                SendKey(s_melee.cranialDoubleStrikeDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
@@ -5074,15 +5539,15 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, false);
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_cranialDoubleStrikeDirKey, false);
+                SendKey(s_melee.cranialDoubleStrikeDirKey, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Dual cranial structural impact shockwave (440 Hz)
                 HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer collar tie drag (360 Hz)
                 goto combat_gesture_done;
             }
-            if (plasmaBigBangPlunge && (now - s_lastPlasmaBigBangTime > 2000)) {
-                s_lastPlasmaBigBangTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.plasmaBigBangPlunge && (now - s_melee.lastPlasmaBigBangTime > 2000)) {
+                s_melee.lastPlasmaBigBangTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM BIG BANG OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -5136,12 +5601,12 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck Big Bang recoil (320 Hz)
                 goto combat_gesture_done;
             }
-            if (cranialStompPlunge && (now - s_lastCranialStompTime > 2000)) {
-                s_lastCranialStompTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL DECK STOMP EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialStompDirKey, rVel.y, lVel.y);
+            if (meleeStrikes.cranialStompPlunge && (now - s_melee.lastCranialStompTime > 2000)) {
+                s_melee.lastCranialStompTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL DECK STOMP EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_melee.cranialStompDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
-                SendKey(s_cranialStompDirKey, true);
+                SendKey(s_melee.cranialStompDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
@@ -5150,15 +5615,15 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, false);
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_cranialStompDirKey, false);
+                SendKey(s_melee.cranialStompDirKey, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Cranial deck grating fracture shockwave (430 Hz)
                 HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer collar tie drag (350 Hz)
                 goto combat_gesture_done;
             }
-            if (plasmaGenesisPlunge && (now - s_lastPlasmaGenesisTime > 2000)) {
-                s_lastPlasmaGenesisTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.plasmaGenesisPlunge && (now - s_melee.lastPlasmaGenesisTime > 2000)) {
+                s_melee.lastPlasmaGenesisTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM GENESIS OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -5208,27 +5673,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck genesis recoil (300 Hz)
                 goto combat_gesture_done;
             }
-            if (cranialPostImpactPlunge && (now - s_lastCranialPostImpactTime > 2000)) {
-                s_lastCranialPostImpactTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST IMPACT SLAM EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialPostImpactDirKey, rVel.y, lVel.y);
+            if (meleeStrikes.cranialPostImpactPlunge && (now - s_melee.lastCranialPostImpactTime > 2000)) {
+                s_melee.lastCranialPostImpactTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST IMPACT SLAM EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_melee.cranialPostImpactDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
-                SendKey(s_cranialPostImpactDirKey, true);
+                SendKey(s_melee.cranialPostImpactDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
                 SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_cranialPostImpactDirKey, false);
+                SendKey(s_melee.cranialPostImpactDirKey, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Cranial steel post collision shockwave (420 Hz)
                 HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer collar tie drag (340 Hz)
                 goto combat_gesture_done;
             }
-            if (plasmaSingularityOverdrivePlunge && (now - s_lastPlasmaSingularityOverdriveTime > 2000)) {
-                s_lastPlasmaSingularityOverdriveTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.plasmaSingularityOverdrivePlunge && (now - s_melee.lastPlasmaSingularityOverdriveTime > 2000)) {
+                s_melee.lastPlasmaSingularityOverdriveTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM SINGULARITY OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -5276,27 +5741,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck singularity recoil (280 Hz)
                 goto combat_gesture_done;
             }
-            if (cranialGrindPlunge && (now - s_lastCranialGrindTime > 2000)) {
-                s_lastCranialGrindTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL GRATING GRIND EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialGrindDirKey, rVel.y, lVel.y);
+            if (meleeStrikes.cranialGrindPlunge && (now - s_melee.lastCranialGrindTime > 2000)) {
+                s_melee.lastCranialGrindTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL GRATING GRIND EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_melee.cranialGrindDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
-                SendKey(s_cranialGrindDirKey, true);
+                SendKey(s_melee.cranialGrindDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
                 SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_cranialGrindDirKey, false);
+                SendKey(s_melee.cranialGrindDirKey, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Cranial diamond grating abrasion shockwave (410 Hz)
                 HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer collar tie drag (330 Hz)
                 goto combat_gesture_done;
             }
-            if (plasmaHypernovaPlunge && (now - s_lastPlasmaHypernovaTime > 2000)) {
-                s_lastPlasmaHypernovaTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.plasmaHypernovaPlunge && (now - s_melee.lastPlasmaHypernovaTime > 2000)) {
+                s_melee.lastPlasmaHypernovaTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM HYPERNOVA EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -5342,27 +5807,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck hypernova recoil (260 Hz)
                 goto combat_gesture_done;
             }
-            if (cervicalDeckPinPlunge && (now - s_lastCervicalDeckPinTime > 2000)) {
-                s_lastCervicalDeckPinTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CERVICAL DECK PIN SPIKE EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cervicalDeckPinDirKey, rVel.y, lVel.y);
+            if (meleeStrikes.cervicalDeckPinPlunge && (now - s_melee.lastCervicalDeckPinTime > 2000)) {
+                s_melee.lastCervicalDeckPinTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CERVICAL DECK PIN SPIKE EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_melee.cervicalDeckPinDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
-                SendKey(s_cervicalDeckPinDirKey, true);
+                SendKey(s_melee.cervicalDeckPinDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
                 SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_cervicalDeckPinDirKey, false);
+                SendKey(s_melee.cervicalDeckPinDirKey, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Cervical vertebra fracture shockwave (400 Hz)
                 HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer collar tie drag (320 Hz)
                 goto combat_gesture_done;
             }
-            if (plasmaSupernovaPlunge && (now - s_lastPlasmaSupernovaTime > 2000)) {
-                s_lastPlasmaSupernovaTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.plasmaSupernovaPlunge && (now - s_melee.lastPlasmaSupernovaTime > 2000)) {
+                s_melee.lastPlasmaSupernovaTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM SUPERNOVA EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -5406,27 +5871,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck supernova recoil (240 Hz)
                 goto combat_gesture_done;
             }
-            if (sternumKneeSpikePlunge && (now - s_lastSternumKneeSpikeTime > 2000)) {
-                s_lastSternumKneeSpikeTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER STERNUM KNEE SPIKE EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_sternumKneeSpikeDirKey, rVel.y, lVel.y);
+            if (meleeStrikes.sternumKneeSpikePlunge && (now - s_melee.lastSternumKneeSpikeTime > 2000)) {
+                s_melee.lastSternumKneeSpikeTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER STERNUM KNEE SPIKE EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_melee.sternumKneeSpikeDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
-                SendKey(s_sternumKneeSpikeDirKey, true);
+                SendKey(s_melee.sternumKneeSpikeDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
                 SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_sternumKneeSpikeDirKey, false);
+                SendKey(s_melee.sternumKneeSpikeDirKey, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Sternum fracture shockwave (400 Hz)
                 HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer collar tie drag (310 Hz)
                 goto combat_gesture_done;
             }
-            if (plasmaSingularityPlunge && (now - s_lastPlasmaSingularityTime > 2000)) {
-                s_lastPlasmaSingularityTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.plasmaSingularityPlunge && (now - s_melee.lastPlasmaSingularityTime > 2000)) {
+                s_melee.lastPlasmaSingularityTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM SINGULARITY EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -5466,27 +5931,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck singularity recoil (220 Hz)
                 goto combat_gesture_done;
             }
-            if (cranialDeckDriverPlunge && (now - s_lastCranialDeckDriverTime > 2000)) {
-                s_lastCranialDeckDriverTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL DECK DRIVER EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialDeckDriverDirKey, rVel.y, lVel.y);
+            if (meleeStrikes.cranialDeckDriverPlunge && (now - s_melee.lastCranialDeckDriverTime > 2000)) {
+                s_melee.lastCranialDeckDriverTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL DECK DRIVER EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_melee.cranialDeckDriverDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
-                SendKey(s_cranialDeckDriverDirKey, true);
+                SendKey(s_melee.cranialDeckDriverDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
                 SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_cranialDeckDriverDirKey, false);
+                SendKey(s_melee.cranialDeckDriverDirKey, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Cranial deck grating impact shockwave (390 Hz)
                 HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer collar tie drag (300 Hz)
                 goto combat_gesture_done;
             }
-            if (plasmaCataclysmOverdrivePlunge && (now - s_lastPlasmaCataclysmOverdriveTime > 2000)) {
-                s_lastPlasmaCataclysmOverdriveTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.plasmaCataclysmOverdrivePlunge && (now - s_melee.lastPlasmaCataclysmOverdriveTime > 2000)) {
+                s_melee.lastPlasmaCataclysmOverdriveTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -5522,27 +5987,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.98f), kHapticFinisher);  // Structural girder recoil (200 Hz)
                 goto combat_gesture_done;
             }
-            if (sternumElbowDropPlunge && (now - s_lastSternumElbowDropTime > 2000)) {
-                s_lastSternumElbowDropTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER STERNUM ELBOW DROP EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_sternumElbowDropDirKey, rVel.y, lVel.y);
+            if (meleeStrikes.sternumElbowDropPlunge && (now - s_melee.lastSternumElbowDropTime > 2000)) {
+                s_melee.lastSternumElbowDropTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER STERNUM ELBOW DROP EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_melee.sternumElbowDropDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
-                SendKey(s_sternumElbowDropDirKey, true);
+                SendKey(s_melee.sternumElbowDropDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
                 SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_sternumElbowDropDirKey, false);
+                SendKey(s_melee.sternumElbowDropDirKey, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Sternum fracture shockwave (380 Hz)
                 HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer collar tie drag (290 Hz)
                 goto combat_gesture_done;
             }
-            if (plasmaCataclysmPlunge && (now - s_lastPlasmaCataclysmTime > 2000)) {
-                s_lastPlasmaCataclysmTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.plasmaCataclysmPlunge && (now - s_melee.lastPlasmaCataclysmTime > 2000)) {
+                s_melee.lastPlasmaCataclysmTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -5574,27 +6039,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.98f), kHapticFinisher);  // Structural girder recoil (160 Hz)
                 goto combat_gesture_done;
             }
-            if (thoracicPinLockThrow && (now - s_lastThoracicPinLockTime > 2000)) {
-                s_lastThoracicPinLockTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER THORACIC PIN LOCK EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_thoracicPinLockDirKey, rVel.y, lVel.y);
+            if (meleeStrikes.thoracicPinLockThrow && (now - s_melee.lastThoracicPinLockTime > 2000)) {
+                s_melee.lastThoracicPinLockTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER THORACIC PIN LOCK EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_melee.thoracicPinLockDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
-                SendKey(s_thoracicPinLockDirKey, true);
+                SendKey(s_melee.thoracicPinLockDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
                 SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_thoracicPinLockDirKey, false);
+                SendKey(s_melee.thoracicPinLockDirKey, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Shoulder joint keylock fracture shockwave (360 Hz)
                 HapticRequest(0, (0.92f), kHapticFinisher);  // Whizzer collar tie drag (270 Hz)
                 goto combat_gesture_done;
             }
-            if (plasmaSeismOverdrivePlunge && (now - s_lastPlasmaSeismOverdriveTime > 2000)) {
-                s_lastPlasmaSeismOverdriveTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.plasmaSeismOverdrivePlunge && (now - s_melee.lastPlasmaSeismOverdriveTime > 2000)) {
+                s_melee.lastPlasmaSeismOverdriveTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT SEISM OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -5624,27 +6089,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.98f), kHapticFinisher);  // Structural girder recoil (150 Hz)
                 goto combat_gesture_done;
             }
-            if (thoracicMatSlamThrow && (now - s_lastThoracicMatSlamTime > 2000)) {
-                s_lastThoracicMatSlamTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER THORACIC MAT SLAM EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_thoracicMatSlamDirKey, rVel.y, lVel.y);
+            if (meleeStrikes.thoracicMatSlamThrow && (now - s_melee.lastThoracicMatSlamTime > 2000)) {
+                s_melee.lastThoracicMatSlamTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER THORACIC MAT SLAM EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_melee.thoracicMatSlamDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
-                SendKey(s_thoracicMatSlamDirKey, true);
+                SendKey(s_melee.thoracicMatSlamDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
                 SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_thoracicMatSlamDirKey, false);
+                SendKey(s_melee.thoracicMatSlamDirKey, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Thoracic cage fracture shockwave (360 Hz)
                 HapticRequest(0, (0.92f), kHapticFinisher);  // Whizzer collar tie drag (270 Hz)
                 goto combat_gesture_done;
             }
-            if (plasmaResonantSeismPlunge && (now - s_lastPlasmaResonantSeismTime > 2000)) {
-                s_lastPlasmaResonantSeismTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.plasmaResonantSeismPlunge && (now - s_melee.lastPlasmaResonantSeismTime > 2000)) {
+                s_melee.lastPlasmaResonantSeismTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT SEISM EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -5672,27 +6137,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.98f), kHapticFinisher);  // Structural girder recoil (140 Hz)
                 goto combat_gesture_done;
             }
-            if (thoracicDislocationThrow && (now - s_lastThoracicDislocationTime > 2000)) {
-                s_lastThoracicDislocationTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER THORACIC DISLOCATION EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_thoracicDislocationDirKey, rVel.y, lVel.y);
+            if (meleeStrikes.thoracicDislocationThrow && (now - s_melee.lastThoracicDislocationTime > 2000)) {
+                s_melee.lastThoracicDislocationTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER THORACIC DISLOCATION EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_melee.thoracicDislocationDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
-                SendKey(s_thoracicDislocationDirKey, true);
+                SendKey(s_melee.thoracicDislocationDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
                 SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_thoracicDislocationDirKey, false);
+                SendKey(s_melee.thoracicDislocationDirKey, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Thoracic vertebra dislocation shockwave (360 Hz)
                 HapticRequest(0, (0.92f), kHapticFinisher);  // Whizzer collar tie drag (260 Hz)
                 goto combat_gesture_done;
             }
-            if (plasmaHarmonicQuakePlunge && (now - s_lastPlasmaHarmonicQuakeTime > 2000)) {
-                s_lastPlasmaHarmonicQuakeTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.plasmaHarmonicQuakePlunge && (now - s_melee.lastPlasmaHarmonicQuakeTime > 2000)) {
+                s_melee.lastPlasmaHarmonicQuakeTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA HARMONIC DECK QUAKE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -5718,27 +6183,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck recoil (130 Hz)
                 goto combat_gesture_done;
             }
-            if (hyperextensionFinisherThrow && (now - s_lastHyperextensionFinisherTime > 2000)) {
-                s_lastHyperextensionFinisherTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER HYPEREXTENSION FINISHER EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_hyperextensionFinisherDirKey, rVel.y, lVel.y);
+            if (meleeStrikes.hyperextensionFinisherThrow && (now - s_melee.lastHyperextensionFinisherTime > 2000)) {
+                s_melee.lastHyperextensionFinisherTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER HYPEREXTENSION FINISHER EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_melee.hyperextensionFinisherDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
-                SendKey(s_hyperextensionFinisherDirKey, true);
+                SendKey(s_melee.hyperextensionFinisherDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
                 SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_hyperextensionFinisherDirKey, false);
+                SendKey(s_melee.hyperextensionFinisherDirKey, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Cervical hyperextension fracture shockwave (360 Hz)
                 HapticRequest(0, (0.92f), kHapticFinisher);  // Whizzer collar tie drag (260 Hz)
                 goto combat_gesture_done;
             }
-            if (plasmaResonantWavePlunge && (now - s_lastPlasmaResonantWaveTime > 2000)) {
-                s_lastPlasmaResonantWaveTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.plasmaResonantWavePlunge && (now - s_melee.lastPlasmaResonantWaveTime > 2000)) {
+                s_melee.lastPlasmaResonantWaveTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT DETONATION EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -5762,27 +6227,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck recoil (120 Hz)
                 goto combat_gesture_done;
             }
-            if (cervicalGratingSlamThrow && (now - s_lastCervicalGratingSlamTime > 2000)) {
-                s_lastCervicalGratingSlamTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CERVICAL GRATING SLAM EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cervicalGratingSlamDirKey, rVel.y, lVel.y);
+            if (meleeStrikes.cervicalGratingSlamThrow && (now - s_melee.lastCervicalGratingSlamTime > 2000)) {
+                s_melee.lastCervicalGratingSlamTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CERVICAL GRATING SLAM EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_melee.cervicalGratingSlamDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
-                SendKey(s_cervicalGratingSlamDirKey, true);
+                SendKey(s_melee.cervicalGratingSlamDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
                 SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_cervicalGratingSlamDirKey, false);
+                SendKey(s_melee.cervicalGratingSlamDirKey, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Cervical vertebra fracture shockwave (360 Hz)
                 HapticRequest(0, (0.92f), kHapticFinisher);  // Whizzer collar tie drag (250 Hz)
                 goto combat_gesture_done;
             }
-            if (plasmaOverloadWavePlunge && (now - s_lastPlasmaOverloadWaveTime > 2000)) {
-                s_lastPlasmaOverloadWaveTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.plasmaOverloadWavePlunge && (now - s_melee.lastPlasmaOverloadWaveTime > 2000)) {
+                s_melee.lastPlasmaOverloadWaveTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA OVERLOAD WAVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -5804,27 +6269,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck recoil (110 Hz)
                 goto combat_gesture_done;
             }
-            if (sternumGratingSlamThrow && (now - s_lastSternumGratingSlamTime > 2000)) {
-                s_lastSternumGratingSlamTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER STERNUM GRATING SLAM EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_sternumGratingSlamDirKey, rVel.y, lVel.y);
+            if (meleeStrikes.sternumGratingSlamThrow && (now - s_melee.lastSternumGratingSlamTime > 2000)) {
+                s_melee.lastSternumGratingSlamTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER STERNUM GRATING SLAM EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_melee.sternumGratingSlamDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
-                SendKey(s_sternumGratingSlamDirKey, true);
+                SendKey(s_melee.sternumGratingSlamDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
                 SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_sternumGratingSlamDirKey, false);
+                SendKey(s_melee.sternumGratingSlamDirKey, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Thoracic cage fracture shockwave (360 Hz)
                 HapticRequest(0, (0.92f), kHapticFinisher);  // Whizzer collar tie drag (250 Hz)
                 goto combat_gesture_done;
             }
-            if (plasmaCleaveWavePlunge && (now - s_lastPlasmaCleaveWaveTime > 2000)) {
-                s_lastPlasmaCleaveWaveTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.plasmaCleaveWavePlunge && (now - s_melee.lastPlasmaCleaveWaveTime > 2000)) {
+                s_melee.lastPlasmaCleaveWaveTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA CLEAVE WAVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -5844,27 +6309,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck recoil (100 Hz)
                 goto combat_gesture_done;
             }
-            if (sternumFractureSpikeThrow && (now - s_lastSternumFractureSpikeTime > 2000)) {
-                s_lastSternumFractureSpikeTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER STERNUM FRACTURE SPIKE EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_sternumFractureSpikeDirKey, rVel.y, lVel.y);
+            if (meleeStrikes.sternumFractureSpikeThrow && (now - s_melee.lastSternumFractureSpikeTime > 2000)) {
+                s_melee.lastSternumFractureSpikeTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER STERNUM FRACTURE SPIKE EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_melee.sternumFractureSpikeDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
-                SendKey(s_sternumFractureSpikeDirKey, true);
+                SendKey(s_melee.sternumFractureSpikeDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
                 SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_sternumFractureSpikeDirKey, false);
+                SendKey(s_melee.sternumFractureSpikeDirKey, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Sternum bone fracture shockwave (360 Hz)
                 HapticRequest(0, (0.92f), kHapticFinisher);  // Collar tie tension (250 Hz)
                 goto combat_gesture_done;
             }
-            if (kineticPulseWavePlunge && (now - s_lastKineticPulseWaveTime > 2000)) {
-                s_lastKineticPulseWaveTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.kineticPulseWavePlunge && (now - s_melee.lastKineticPulseWaveTime > 2000)) {
+                s_melee.lastKineticPulseWaveTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL KINETIC PULSE WAVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -5882,27 +6347,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck recoil (90 Hz)
                 goto combat_gesture_done;
             }
-            if (sternumKneeDropThrow && (now - s_lastSternumKneeDropTime > 2000)) {
-                s_lastSternumKneeDropTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER STERNUM KNEE DROP EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_sternumKneeDropDirKey, rVel.y, lVel.y);
+            if (meleeStrikes.sternumKneeDropThrow && (now - s_melee.lastSternumKneeDropTime > 2000)) {
+                s_melee.lastSternumKneeDropTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER STERNUM KNEE DROP EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_melee.sternumKneeDropDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
-                SendKey(s_sternumKneeDropDirKey, true);
+                SendKey(s_melee.sternumKneeDropDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
                 SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_sternumKneeDropDirKey, false);
+                SendKey(s_melee.sternumKneeDropDirKey, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Sternum bone fracture shockwave (360 Hz)
                 HapticRequest(0, (0.92f), kHapticFinisher);  // Collar tie tension (240 Hz)
                 goto combat_gesture_done;
             }
-            if (omnidirectionalPulsePlunge && (now - s_lastOmnidirectionalPulseTime > 2000)) {
-                s_lastOmnidirectionalPulseTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.omnidirectionalPulsePlunge && (now - s_melee.lastOmnidirectionalPulseTime > 2000)) {
+                s_melee.lastOmnidirectionalPulseTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL DECK ARC PULSE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -5920,27 +6385,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.98f), kHapticFinisher);  // Seismic deck concussion (80 Hz)
                 goto combat_gesture_done;
             }
-            if (whizzerGroundDislocationThrow && (now - s_lastWhizzerGroundDislocationTime > 2000)) {
-                s_lastWhizzerGroundDislocationTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER GROUND DISLOCATION EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_whizzerGroundDislocationDirKey, rVel.y, lVel.y);
+            if (meleeStrikes.whizzerGroundDislocationThrow && (now - s_melee.lastWhizzerGroundDislocationTime > 2000)) {
+                s_melee.lastWhizzerGroundDislocationTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER GROUND DISLOCATION EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_melee.whizzerGroundDislocationDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
-                SendKey(s_whizzerGroundDislocationDirKey, true);
+                SendKey(s_melee.whizzerGroundDislocationDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
                 SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_whizzerGroundDislocationDirKey, false);
+                SendKey(s_melee.whizzerGroundDislocationDirKey, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Shoulder socket fracture and vertebral crack (360 Hz)
                 HapticRequest(0, (0.92f), kHapticFinisher);  // Overhook torque strain (230 Hz)
                 goto combat_gesture_done;
             }
-            if (omnidirectionalArcPlunge && (now - s_lastOmnidirectionalArcTime > 2000)) {
-                s_lastOmnidirectionalArcTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.omnidirectionalArcPlunge && (now - s_melee.lastOmnidirectionalArcTime > 2000)) {
+                s_melee.lastOmnidirectionalArcTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL DECK ARC EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -5956,27 +6421,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.95f), kHapticFinisher);  // Landing seismic dispersion (75 Hz)
                 goto combat_gesture_done;
             }
-            if (whizzerGroundFinisherThrow && (now - s_lastWhizzerGroundFinisherTime > 2000)) {
-                s_lastWhizzerGroundFinisherTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER GROUND FINISHER EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_whizzerGroundFinisherDirKey, rVel.y, lVel.y);
+            if (meleeStrikes.whizzerGroundFinisherThrow && (now - s_melee.lastWhizzerGroundFinisherTime > 2000)) {
+                s_melee.lastWhizzerGroundFinisherTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER GROUND FINISHER EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_melee.whizzerGroundFinisherDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
-                SendKey(s_whizzerGroundFinisherDirKey, true);
+                SendKey(s_melee.whizzerGroundFinisherDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
                 SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_whizzerGroundFinisherDirKey, false);
+                SendKey(s_melee.whizzerGroundFinisherDirKey, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Bone fracture impact shockwave (360 Hz)
                 HapticRequest(0, (0.90f), kHapticFinisher);  // Downward collar tie drag (220 Hz)
                 goto combat_gesture_done;
             }
-            if (deckImpactPlunge && (now - s_lastDeckImpactTime > 2000)) {
-                s_lastDeckImpactTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.deckImpactPlunge && (now - s_melee.lastDeckImpactTime > 2000)) {
+                s_melee.lastDeckImpactTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON VAULT CONCUSSIVE DECK IMPACT EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -5992,27 +6457,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck resonance (60 Hz)
                 goto combat_gesture_done;
             }
-            if (hyperextensionSpikeThrow && (now - s_lastHyperextensionSpikeTime > 2000)) {
-                s_lastHyperextensionSpikeTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL HYPEREXTENSION MAT SPIKE EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_hyperextensionSpikeDirKey, rVel.y, lVel.y);
+            if (meleeStrikes.hyperextensionSpikeThrow && (now - s_melee.lastHyperextensionSpikeTime > 2000)) {
+                s_melee.lastHyperextensionSpikeTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL HYPEREXTENSION MAT SPIKE EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_melee.hyperextensionSpikeDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
-                SendKey(s_hyperextensionSpikeDirKey, true);
+                SendKey(s_melee.hyperextensionSpikeDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
                 SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_hyperextensionSpikeDirKey, false);
+                SendKey(s_melee.hyperextensionSpikeDirKey, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Cervical facet dislocation and mat impact shockwave (360 Hz)
                 HapticRequest(0, (0.92f), kHapticFinisher);  // Chin thrust hyperextension torque (240 Hz)
                 goto combat_gesture_done;
             }
-            if (vaultKineticCleavePlunge && (now - s_lastVaultKineticCleaveTime > 2000)) {
-                s_lastVaultKineticCleaveTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.vaultKineticCleavePlunge && (now - s_melee.lastVaultKineticCleaveTime > 2000)) {
+                s_melee.lastVaultKineticCleaveTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON VAULT KINETIC CLEAVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -6028,27 +6493,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.90f), kHapticFinisher);  // Two-handed landing frame recoil (80 Hz)
                 goto combat_gesture_done;
             }
-            if (thoracicSlamThrow && (now - s_lastThoracicSlamTime > 2000)) {
-                s_lastThoracicSlamTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL THORACIC GRATING SLAM EXECUTED (Dir: %c, Ry: %.2f, Lx: %.2f)", s_thoracicSlamDirKey, rVel.y, lVel.x);
+            if (meleeStrikes.thoracicSlamThrow && (now - s_melee.lastThoracicSlamTime > 2000)) {
+                s_melee.lastThoracicSlamTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL THORACIC GRATING SLAM EXECUTED (Dir: %c, Ry: %.2f, Lx: %.2f)", s_melee.thoracicSlamDirKey, rVel.y, lVel.x);
                 SendKey('W', true);
-                SendKey(s_thoracicSlamDirKey, true);
+                SendKey(s_melee.thoracicSlamDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
                 SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_thoracicSlamDirKey, false);
+                SendKey(s_melee.thoracicSlamDirKey, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Ribcage crush and deck grating impact shockwave (360 Hz)
                 HapticRequest(0, (0.90f), kHapticFinisher);  // Thoracic squeeze lift strain (220 Hz)
                 goto combat_gesture_done;
             }
-            if (vaultGroundArcPlunge && (now - s_lastVaultGroundArcTime > 2000)) {
-                s_lastVaultGroundArcTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.vaultGroundArcPlunge && (now - s_melee.lastVaultGroundArcTime > 2000)) {
+                s_melee.lastVaultGroundArcTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON VAULT JUMP GROUND ARC EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -6064,27 +6529,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.95f), kHapticFinisher);  // Landing seismic dispersion (70 Hz)
                 goto combat_gesture_done;
             }
-            if (cervicalSpikeThrow && (now - s_lastCervicalSpikeTime > 2000)) {
-                s_lastCervicalSpikeTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL CERVICAL MAT SPIKE EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cervicalSpikeDirKey, rVel.y, lVel.y);
+            if (meleeStrikes.cervicalSpikeThrow && (now - s_melee.lastCervicalSpikeTime > 2000)) {
+                s_melee.lastCervicalSpikeTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL CERVICAL MAT SPIKE EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_melee.cervicalSpikeDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
-                SendKey(s_cervicalSpikeDirKey, true);
+                SendKey(s_melee.cervicalSpikeDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
                 SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_cervicalSpikeDirKey, false);
+                SendKey(s_melee.cervicalSpikeDirKey, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Cervical vertebra fracture shockwave (360 Hz)
                 HapticRequest(0, (0.90f), kHapticFinisher);  // Collar tie neck drag tension (220 Hz)
                 goto combat_gesture_done;
             }
-            if (cleaveArcBlastStrike && (now - s_lastCleaveArcBlastTime > 2000)) {
-                s_lastCleaveArcBlastTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.cleaveArcBlastStrike && (now - s_melee.lastCleaveArcBlastTime > 2000)) {
+                s_melee.lastCleaveArcBlastTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON TWO-HANDED CLEAVE & ARC BLAST EXECUTED (Ry: %.2f, Rz: %.2f)", rVel.y, rVel.z);
                 SendKey('S', true);
                 SendKey('W', true);
@@ -6100,27 +6565,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.90f), kHapticFinisher);  // Two-handed shaft recoil (220 Hz)
                 goto combat_gesture_done;
             }
-            if (whizzerCounterThrow && (now - s_lastWhizzerCounterTime > 2000)) {
-                s_lastWhizzerCounterTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER COUNTER-THROW EXECUTED (Dir: %c, Ry: %.2f, Lx: %.2f)", s_whizzerCounterDirKey, rVel.y, lVel.x);
+            if (meleeStrikes.whizzerCounterThrow && (now - s_melee.lastWhizzerCounterTime > 2000)) {
+                s_melee.lastWhizzerCounterTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER COUNTER-THROW EXECUTED (Dir: %c, Ry: %.2f, Lx: %.2f)", s_melee.whizzerCounterDirKey, rVel.y, lVel.x);
                 SendKey('W', true);
-                SendKey(s_whizzerCounterDirKey, true);
+                SendKey(s_melee.whizzerCounterDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
                 SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_whizzerCounterDirKey, false);
+                SendKey(s_melee.whizzerCounterDirKey, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Shoulder capsule dislocation and bone crack (350 Hz)
                 HapticRequest(0, (0.85f), kHapticReload);  // Overhook fulcrum strain (210 Hz)
                 goto combat_gesture_done;
             }
-            if (kineticCleaveSwing && (now - s_lastKineticCleaveTime > 2000)) {
-                s_lastKineticCleaveTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.kineticCleaveSwing && (now - s_melee.lastKineticCleaveTime > 2000)) {
+                s_melee.lastKineticCleaveTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON KINETIC CLEAVE & SHOCKWAVE STUN STRUCK (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey('S', true);
                 SendKey('W', true);
@@ -6134,27 +6599,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.88f), kHapticReload);  // Secondary grip dielectric dissipation (240 Hz)
                 goto combat_gesture_done;
             }
-            if (lateralSuplexThrow && (now - s_lastLateralSuplexTime > 2000)) {
-                s_lastLateralSuplexTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL LATERAL SUPLEX EXECUTED (Dir: %c, Ry: %.2f, Rx: %.2f)", s_lateralSuplexDirKey, rVel.y, rVel.x);
+            if (meleeStrikes.lateralSuplexThrow && (now - s_melee.lastLateralSuplexTime > 2000)) {
+                s_melee.lastLateralSuplexTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL LATERAL SUPLEX EXECUTED (Dir: %c, Ry: %.2f, Rx: %.2f)", s_melee.lateralSuplexDirKey, rVel.y, rVel.x);
                 SendKey('W', true);
-                SendKey(s_lateralSuplexDirKey, true);
+                SendKey(s_melee.lateralSuplexDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
                 SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_lateralSuplexDirKey, false);
+                SendKey(s_melee.lateralSuplexDirKey, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Spine compression and mat impact shockwave (360 Hz)
                 HapticRequest(0, (0.92f), kHapticFinisher);  // Double underhook torso lift torque (190 Hz)
                 goto combat_gesture_done;
             }
-            if (groundingThrustLunge && (now - s_lastGroundingThrustTime > 2000)) {
-                s_lastGroundingThrustTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.groundingThrustLunge && (now - s_melee.lastGroundingThrustTime > 2000)) {
+                s_melee.lastGroundingThrustTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON GROUNDING THRUST & ARC RING EXECUTED (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
                 SendKey('C', true);
                 SendKey('W', true);
@@ -6170,25 +6635,25 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.90f), kHapticFinisher);  // Floor conduit surge (60 Hz)
                 goto combat_gesture_done;
             }
-            if (thaiPlumElbowPlunge && (now - s_lastThaiPlumElbowTime > 2000)) {
-                s_lastThaiPlumElbowTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL THAI PLUM ELBOW SPIKE STRUCK (Dir: %c, Ry: %.2f)", s_thaiPlumElbowDirKey, rVel.y);
+            if (meleeStrikes.thaiPlumElbowPlunge && (now - s_melee.lastThaiPlumElbowTime > 2000)) {
+                s_melee.lastThaiPlumElbowTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL THAI PLUM ELBOW SPIKE STRUCK (Dir: %c, Ry: %.2f)", s_melee.thaiPlumElbowDirKey, rVel.y);
                 SendKey('W', true);
-                SendKey(s_thaiPlumElbowDirKey, true);
+                SendKey(s_melee.thaiPlumElbowDirKey, true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
                 SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
                 SendKey(VK_SPACE, false);
-                SendKey(s_thaiPlumElbowDirKey, false);
+                SendKey(s_melee.thaiPlumElbowDirKey, false);
                 SendKey('W', false);
                 HapticRequest(0, (0.85f), kHapticFinisher);  // Cervical collar tension (220 Hz)
                 HapticRequest(1, (0.98f), kHapticFinisher); // Cranial bone fracture shockwave (350 Hz)
                 goto combat_gesture_done;
             }
-            if (batonShieldBashThrust && (now - s_lastBatonBashTime > 2000)) {
-                s_lastBatonBashTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.batonShieldBashThrust && (now - s_melee.lastBatonBashTime > 2000)) {
+                s_melee.lastBatonBashTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON KINETIC SHIELD BASH & ARC BURST EXECUTED (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -6202,27 +6667,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.98f), kHapticFinisher);  // Blunt kinetic recoil (80 Hz)
                 goto combat_gesture_done;
             }
-            if (hipTossRotation && (now - s_lastHipTossTime > 2000)) {
-                s_lastHipTossTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL DOUBLE UNDERHOOK HIP TOSS EXECUTED (Dir: %c, DeltaVx: %.2f)", s_hipTossDirKey, rVel.x - lVel.x);
+            if (meleeStrikes.hipTossRotation && (now - s_melee.lastHipTossTime > 2000)) {
+                s_melee.lastHipTossTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL DOUBLE UNDERHOOK HIP TOSS EXECUTED (Dir: %c, DeltaVx: %.2f)", s_melee.hipTossDirKey, rVel.x - lVel.x);
                 SendKey('W', true);
-                SendKey(s_hipTossDirKey, true);
+                SendKey(s_melee.hipTossDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
                 SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_hipTossDirKey, false);
+                SendKey(s_melee.hipTossDirKey, false);
                 SendKey('W', false);
                 HapticRequest(0, (0.90f), kHapticFinisher);  // Thoracic squeeze lift tension (230 Hz)
                 HapticRequest(1, (0.98f), kHapticFinisher); // Hip toss deck impact blast (40 Hz)
                 goto combat_gesture_done;
             }
-            if (batonHammerfistPlunge && (now - s_lastHammerfistTime > 2000)) {
-                s_lastHammerfistTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.batonHammerfistPlunge && (now - s_melee.lastHammerfistTime > 2000)) {
+                s_melee.lastHammerfistTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON KINETIC HAMMERFIST DECK STRIKE EXECUTED (Ry: %.2f, Rz: %.2f)", rVel.y, rVel.z);
                 SendKey('S', true);
                 SendKey('W', true);
@@ -6236,27 +6701,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.70f), kHapticReload);  // Forearm bone recoil (70 Hz)
                 goto combat_gesture_done;
             }
-            if (whizzerDownWhip && (now - s_lastWhizzerTime > 2000)) {
-                s_lastWhizzerTime = now;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER TAKEDOWN EXECUTED (Dir: %c, Ry: %.2f)", s_whizzerDirKey, rVel.y);
+            if (meleeStrikes.whizzerDownWhip && (now - s_melee.lastWhizzerTime > 2000)) {
+                s_melee.lastWhizzerTime = now;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER TAKEDOWN EXECUTED (Dir: %c, Ry: %.2f)", s_melee.whizzerDirKey, rVel.y);
                 SendKey('W', true);
-                SendKey(s_whizzerDirKey, true);
+                SendKey(s_melee.whizzerDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
                 SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_whizzerDirKey, false);
+                SendKey(s_melee.whizzerDirKey, false);
                 SendKey('W', false);
                 HapticRequest(0, (0.85f), kHapticReload);  // Overhook shoulder lever strain (210 Hz)
                 HapticRequest(1, (0.98f), kHapticFinisher); // Concussive mat impact (45 Hz)
                 goto combat_gesture_done;
             }
-            if (javelinVaultStrike && (now - s_lastJavelinVaultTime > 2000)) {
-                s_lastJavelinVaultTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.javelinVaultStrike && (now - s_melee.lastJavelinVaultTime > 2000)) {
+                s_melee.lastJavelinVaultTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON JAVELIN VAULT LEAP THRUST EXECUTED (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -6270,10 +6735,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.90f), kHapticFinisher);  // Landing deck recoil (60 Hz)
                 goto combat_gesture_done;
             }
-            if (thaiPlumKneeDrive && (now - s_lastThaiPlumTime > 2000)) {
-                s_lastThaiPlumTime = now;
-                s_thaiPlumClinchTime = 0;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.thaiPlumKneeDrive && (now - s_melee.lastThaiPlumTime > 2000)) {
+                s_melee.lastThaiPlumTime = now;
+                s_melee.thaiPlumClinchTime = 0;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL THAI PLUM LIVER KNEE STRUCK (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
                 SendKey('W', true);
                 SendKey('C', true);
@@ -6287,29 +6752,29 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(1, (0.98f), kHapticFinisher); // Concussive liver impact shockwave (320 Hz)
                 goto combat_gesture_done;
             }
-            if (radialDisarmThrust && (now - s_lastRadialDisarmTime > 2000)) {
-                s_lastRadialDisarmTime = now;
-                s_radialDisarmTwistTime = 0;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.radialDisarmThrust && (now - s_melee.lastRadialDisarmTime > 2000)) {
+                s_melee.lastRadialDisarmTime = now;
+                s_melee.radialDisarmTwistTime = 0;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON RADIAL DISARM PENETRATIVE THRUST DISCHARGED (Rz: %.2f)", rVel.z);
                 SendMouseClick(false, true); // GH #33: foreground-guarded (was mouse_event RIGHTDOWN)
-                SendKey(s_radialDisarmDirKey, true);
+                SendKey(s_melee.radialDisarmDirKey, true);
                 SendKey('W', true);
                 SendKey('E', true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
                 SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
                 SendKey('E', false);
                 SendKey('W', false);
-                SendKey(s_radialDisarmDirKey, false);
+                SendKey(s_melee.radialDisarmDirKey, false);
                 SendMouseClick(false, false); // GH #33: foreground-guarded (was mouse_event RIGHTUP)
                 HapticRequest(1, (0.98f), kHapticFinisher); // Penetrative arc detonation blast (350 Hz)
                 HapticRequest(0, (0.70f), kHapticReload);
                 goto combat_gesture_done;
             }
-            if (backSuplexHoistSlam && (now - s_lastBackSuplexTime > 2000)) {
-                s_lastBackSuplexTime = now;
-                s_backSuplexClinchTime = 0;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.backSuplexHoistSlam && (now - s_melee.lastBackSuplexTime > 2000)) {
+                s_melee.lastBackSuplexTime = now;
+                s_melee.backSuplexClinchTime = 0;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL BELLY-TO-BACK SUPLEX SLAM EXECUTED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
                 SendKey('S', true);
                 SendKey('W', true);
@@ -6325,10 +6790,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(1, (0.98f), kHapticFinisher);
                 goto combat_gesture_done;
             }
-            if (isCrossThrustOvercharged && (now - s_lastCrossThrustTime > 2000)) {
-                s_lastCrossThrustTime = now;
-                s_crossBlockHoldStart = 0;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.isCrossThrustOvercharged && (now - s_melee.lastCrossThrustTime > 2000)) {
+                s_melee.lastCrossThrustTime = now;
+                s_melee.crossBlockHoldStart = 0;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON CROSS-CHEST OVERCHARGE DETONATION DISCHARGED");
                 SendMouseClick(false, true); // GH #33: foreground-guarded (was mouse_event RIGHTDOWN)
                 SendKey('W', true);
@@ -6346,12 +6811,12 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.98f), kHapticFinisher);
                 goto combat_gesture_done;
             }
-            if (outsideLegKneeDrop && (now - s_lastOutsideLegSweepTime > 2000)) {
-                s_lastOutsideLegSweepTime = now;
-                s_outsideLegSweepHookTime = 0;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.outsideLegKneeDrop && (now - s_melee.lastOutsideLegSweepTime > 2000)) {
+                s_melee.lastOutsideLegSweepTime = now;
+                s_melee.outsideLegSweepHookTime = 0;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL KNEE DROP FINISHER EXECUTED (Ry: %.2f)", rVel.y);
-                SendKey(s_outsideLegSweepDirKey, true);
+                SendKey(s_melee.outsideLegSweepDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendKey('S', true);
@@ -6360,33 +6825,33 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('S', false);
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
-                SendKey(s_outsideLegSweepDirKey, false);
+                SendKey(s_melee.outsideLegSweepDirKey, false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Concussive knee-drop mat impact (320 Hz)
                 HapticRequest(0, (0.95f), kHapticFinisher);
                 goto combat_gesture_done;
             }
-            if (crossParryRiposte && (now - s_lastCrossParryTime > 2000)) {
-                s_lastCrossParryTime = now;
-                s_crossParryDeflectTime = 0;
-                s_lastFinisherTime = now;
-                VR_LOG_INFO("Tactical Melee: STUN BATON CROSS-PARRY RIPOSTE DISCHARGED (Dir: %c, Rz: %.2f)", s_crossParryDirKey, rVel.z);
+            if (meleeStrikes.crossParryRiposte && (now - s_melee.lastCrossParryTime > 2000)) {
+                s_melee.lastCrossParryTime = now;
+                s_melee.crossParryDeflectTime = 0;
+                s_melee.lastFinisherTime = now;
+                VR_LOG_INFO("Tactical Melee: STUN BATON CROSS-PARRY RIPOSTE DISCHARGED (Dir: %c, Rz: %.2f)", s_melee.crossParryDirKey, rVel.z);
                 SendMouseClick(false, true); // GH #33: foreground-guarded (was mouse_event RIGHTDOWN)
-                SendKey(s_crossParryDirKey, true);
+                SendKey(s_melee.crossParryDirKey, true);
                 SendKey('W', true);
                 SendKey('Q', true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
                 SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
                 SendKey('Q', false);
                 SendKey('W', false);
-                SendKey(s_crossParryDirKey, false);
+                SendKey(s_melee.crossParryDirKey, false);
                 SendMouseClick(false, false); // GH #33: foreground-guarded (was mouse_event RIGHTUP)
                 HapticRequest(1, (0.98f), kHapticFinisher); // Electro-kinetic counter-detonation blast (350 Hz)
                 HapticRequest(0, (0.70f), kHapticReload);
                 goto combat_gesture_done;
             }
-            if (frontHeadlockWrap && frontHeadlockArchTorque && (now - s_lastFrontHeadlockTime > 2000)) {
-                s_lastFrontHeadlockTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.frontHeadlockWrap && meleeStrikes.frontHeadlockArchTorque && (now - s_melee.lastFrontHeadlockTime > 2000)) {
+                s_melee.lastFrontHeadlockTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL FRONT HEADLOCK GUILLOTINE CRACK (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
                 SendKey('W', true);
                 SendKey('S', true);
@@ -6402,9 +6867,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(1, (0.98f), kHapticFinisher);
                 goto combat_gesture_done;
             }
-            if (isLookingDownward && batonOverheadVault && batonVaultPlunge && (now - s_lastVaultDropTime > 2000)) {
-                s_lastVaultDropTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.isLookingDownward && meleeStrikes.batonOverheadVault && meleeStrikes.batonVaultPlunge && (now - s_melee.lastVaultDropTime > 2000)) {
+                s_melee.lastVaultDropTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON HIGH-ARC OVERHEAD VAULT DROP STRIKE EXECUTED (Ry: %.2f)", rVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('S', true);
@@ -6418,9 +6883,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.95f), kHapticFinisher);  // Heavy landing deck dispersion (55 Hz)
                 goto combat_gesture_done;
             }
-            if (suloevLowCrouch && suloevHookHold && suloevArchPull && (now - s_lastSuloevTime > 2000)) {
-                s_lastSuloevTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.suloevLowCrouch && meleeStrikes.suloevHookHold && meleeStrikes.suloevArchPull && (now - s_melee.lastSuloevTime > 2000)) {
+                s_melee.lastSuloevTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL SULOEV STRETCH SUBMISSION EXECUTED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
                 SendKey('C', true);
                 SendKey('S', true);
@@ -6434,10 +6899,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(1, (0.98f), kHapticFinisher);
                 goto combat_gesture_done;
             }
-            if (isCrossThrustReady && (now - s_lastCrossThrustTime > 2000)) {
-                s_lastCrossThrustTime = now;
-                s_crossBlockHoldStart = 0;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.isCrossThrustReady && (now - s_melee.lastCrossThrustTime > 2000)) {
+                s_melee.lastCrossThrustTime = now;
+                s_melee.crossBlockHoldStart = 0;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON CROSS-CHEST BLOCK & ARC THRUST DISRUPTION DISCHARGED");
                 SendMouseClick(false, true); // GH #33: foreground-guarded (was mouse_event RIGHTDOWN)
                 SendKey('W', true);
@@ -6453,10 +6918,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.98f), kHapticFinisher);
                 goto combat_gesture_done;
             }
-            if (firemansWhipThrow && (now - s_lastFiremansCarryTime > 2000)) {
-                s_lastFiremansCarryTime = now;
-                s_firemansLoadTime = 0;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.firemansWhipThrow && (now - s_melee.lastFiremansCarryTime > 2000)) {
+                s_melee.lastFiremansCarryTime = now;
+                s_melee.firemansLoadTime = 0;
+                s_melee.lastFinisherTime = now;
                 char throwDirKey = (rVel.x > 0.0f || lVel.x > 0.0f) ? 'D' : 'A';
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL FIREMAN'S CARRY SLAM EXECUTED (Dir: %c, ThrowX: %.2f)", throwDirKey, rVel.x);
                 SendKey('W', true);
@@ -6473,10 +6938,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(1, (0.98f), kHapticFinisher);
                 goto combat_gesture_done;
             }
-            if (batonThroatThrustStrike && (now - s_lastPistolDisarmTime > 1800)) {
-                s_lastPistolDisarmTime = now;
-                s_pistolTrapTime = 0;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.batonThroatThrustStrike && (now - s_melee.lastPistolDisarmTime > 1800)) {
+                s_melee.lastPistolDisarmTime = now;
+                s_melee.pistolTrapTime = 0;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON CROSS-PISTOL DISARM & THROAT THRUST EXECUTED (Rz: %.2f)", rVel.z);
                 SendKey('W', true);
                 SendMouseClick(false, true); // GH #33: foreground-guarded (was mouse_event RIGHTDOWN)
@@ -6490,10 +6955,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.65f), kHapticLadder);
                 goto combat_gesture_done;
             }
-            if (doubleLegSpikeSlam && (now - s_lastDoubleLegSlamTime > 2000)) {
-                s_lastDoubleLegSlamTime = now;
-                s_doubleLegLiftTime = 0;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.doubleLegSpikeSlam && (now - s_melee.lastDoubleLegSlamTime > 2000)) {
+                s_melee.lastDoubleLegSlamTime = now;
+                s_melee.doubleLegLiftTime = 0;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL DOUBLE-LEG MAT SLAM EXECUTED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
                 SendKey('C', true);
                 SendKey('W', true);
@@ -6509,10 +6974,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(1, (0.98f), kHapticFinisher);
                 goto combat_gesture_done;
             }
-            if (batonTripSweep && (now - s_lastBatonJabTripTime > 1800)) {
-                s_lastBatonJabTripTime = now;
-                s_batonJabTime = 0;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.batonTripSweep && (now - s_melee.lastBatonJabTripTime > 1800)) {
+                s_melee.lastBatonJabTripTime = now;
+                s_melee.batonJabTime = 0;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON JAB-TO-TASER-TRIP TAKEDOWN EXECUTED (Ry: %.2f, Rx: %.2f)", rVel.y, rVel.x);
                 SendKey('W', true);
                 SendKey('S', true);
@@ -6526,9 +6991,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.60f), kHapticLadder);
                 goto combat_gesture_done;
             }
-            if (isSingleLegTakedown && (now - s_lastSingleLegTakedownTime > 1800)) {
-                s_lastSingleLegTakedownTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.isSingleLegTakedown && (now - s_melee.lastSingleLegTakedownTime > 1800)) {
+                s_melee.lastSingleLegTakedownTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL SINGLE-LEG ANKLE PICK TAKEDOWN EXECUTED (Ly: %.2f, Rz: %.2f)", lVel.y, rVel.z);
                 SendKey('C', true);
                 SendKey('W', true);
@@ -6542,9 +7007,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(1, (0.98f), kHapticFinisher); // Deck takedown slam (260 Hz)
                 goto combat_gesture_done;
             }
-            if (isBatonDiagonalParry && (now - s_lastDiagonalParryTime > 1800)) {
-                s_lastDiagonalParryTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.isBatonDiagonalParry && (now - s_melee.lastDiagonalParryTime > 1800)) {
+                s_melee.lastDiagonalParryTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON UPWARD DIAGONAL CROSS-PARRY & DISCHARGE EXECUTED (Ry: %.2f, Rx: %.2f)", rVel.y, rVel.x);
                 SendMouseClick(false, true); // GH #33: foreground-guarded (was mouse_event RIGHTDOWN)
                 SendKey('W', true);
@@ -6558,10 +7023,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.75f), kHapticReload);  // Off-hand conductive arc feedback (160 Hz)
                 goto combat_gesture_done;
             }
-            if (isArmTriangleReady) {
-                s_lastArmTriangleTime = now;
-                s_armTriangleStartTime = 0;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.isArmTriangleReady) {
+                s_melee.lastArmTriangleTime = now;
+                s_melee.armTriangleStartTime = 0;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL STANDING ARM-TRIANGLE CHOKE LOCKED & EXECUTED");
                 SendKey('W', true);
                 SendKey('C', true);
@@ -6575,9 +7040,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(1, (0.98f), kHapticFinisher); // Cervical submission snap (280 Hz)
                 goto combat_gesture_done;
             }
-            if (isBatonRadialSweep && (now - s_lastRadialSweepTime > 2000)) {
-                s_lastRadialSweepTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.isBatonRadialSweep && (now - s_melee.lastRadialSweepTime > 2000)) {
+                s_melee.lastRadialSweepTime = now;
+                s_melee.lastFinisherTime = now;
                 char dirKey = (rVel.x > 0.0f) ? 'D' : 'A';
                 VR_LOG_INFO("Tactical Melee: STUN BATON RADIAL KINETIC SWEEP & STUN RING EXECUTED (Dir: %c, Rx: %.2f)", dirKey, rVel.x);
                 SendKey(dirKey, true);
@@ -6592,9 +7057,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.85f), kHapticReload);  // Off-hand follow-through ionization (280 Hz)
                 goto combat_gesture_done;
             }
-            if (isKimuraFracture && (now - s_lastKimuraTime > 2000)) {
-                s_lastKimuraTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.isKimuraFracture && (now - s_melee.lastKimuraTime > 2000)) {
+                s_melee.lastKimuraTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL KIMURA SHOULDER LOCK & FRACTURE EXECUTED (Ry: %.2f, Rx: %.2f)", rVel.y, rVel.x);
                 SendKey('S', true);
                 SendKey('A', true);
@@ -6608,9 +7073,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(1, (0.98f), kHapticFinisher); // Humerus fracture crack (320 Hz)
                 goto combat_gesture_done;
             }
-            if (isBatonJavelinThrust && (now - s_lastBatonJavelinTime > 1800)) {
-                s_lastBatonJavelinTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.isBatonJavelinThrust && (now - s_melee.lastBatonJavelinTime > 1800)) {
+                s_melee.lastBatonJavelinTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON FORWARD TWO-HANDED JAVELIN THRUST EXECUTED (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
                 SendKey('W', true);
                 SendKey(VK_SPACE, true);
@@ -6624,9 +7089,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.65f), kHapticLadder);
                 goto combat_gesture_done;
             }
-            if (isOutsideTripMount && (now - s_lastOutsideTripTime > 1800)) {
-                s_lastOutsideTripTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.isOutsideTripMount && (now - s_melee.lastOutsideTripTime > 1800)) {
+                s_melee.lastOutsideTripTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL OUTSIDE TRIP & MOUNT POUND EXECUTED (Lx: %.2f, Rz: %.2f)", lVel.x, rVel.z);
                 SendKey('W', true);
                 SendKey('C', true);
@@ -6638,10 +7103,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(1, (0.98f), kHapticFinisher); // Cranial deck pound shockwave (260 Hz)
                 goto combat_gesture_done;
             }
-            if (isCrossArcBurstReady && (now - s_lastCrossArcBurstTime > 1800)) {
-                s_lastCrossArcBurstTime = now;
-                s_crossArcStartTime = 0;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.isCrossArcBurstReady && (now - s_melee.lastCrossArcBurstTime > 1800)) {
+                s_melee.lastCrossArcBurstTime = now;
+                s_melee.crossArcStartTime = 0;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON DUAL-HAND CROSS-BLOCK REACTIVE ARC BURST DISCHARGED");
                 SendMouseClick(false, true); // GH #33: foreground-guarded (was mouse_event RIGHTDOWN)
                 SendKey(VK_SPACE, true);
@@ -6653,10 +7118,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(1, (0.98f), kHapticFinisher);
                 goto combat_gesture_done;
             }
-            if (suplexSpineSlam && (now - s_lastSuplexSlamTime > 1800)) {
-                s_lastSuplexSlamTime = now;
-                s_suplexHoistTime = 0;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.suplexSpineSlam && (now - s_melee.lastSuplexSlamTime > 1800)) {
+                s_melee.lastSuplexSlamTime = now;
+                s_melee.suplexHoistTime = 0;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL UNDERHOOK SUPLEX SPINE SLAM EXECUTED");
                 SendKey('S', true);
                 SendKey(VK_SPACE, true);
@@ -6670,9 +7135,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(1, (0.98f), kHapticFinisher);
                 goto combat_gesture_done;
             }
-            if (isBatonLateralDisarm && (now - s_lastBatonDisarmTime > 1500)) {
-                s_lastBatonDisarmTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.isBatonLateralDisarm && (now - s_melee.lastBatonDisarmTime > 1500)) {
+                s_melee.lastBatonDisarmTime = now;
+                s_melee.lastFinisherTime = now;
                 char dirKey = (rVel.x < 0) ? 'A' : 'D';
                 VR_LOG_INFO("Tactical Melee: STUN BATON LATERAL CROSS-SWEEP DEFLECTION & DISARM (Rx: %.2f)", rVel.x);
                 SendKey(dirKey, true);
@@ -6685,10 +7150,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.65f), kHapticLadder);
                 goto combat_gesture_done;
             }
-            if (hammerfistStrike && (now - s_lastShinTrapTime > 1500)) {
-                s_lastShinTrapTime = now;
-                s_shinTrapTime = 0;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.hammerfistStrike && (now - s_melee.lastShinTrapTime > 1500)) {
+                s_melee.lastShinTrapTime = now;
+                s_melee.shinTrapTime = 0;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: OVERHAND HAMMERFIST COMPLETED COMBO (Ry: %.2f)", rVel.y);
                 SendKey('S', true);
                 SendKey(VK_SPACE, true);
@@ -6700,9 +7165,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.60f), kHapticLadder);
                 goto combat_gesture_done;
             }
-            if (isBatonSkullBreaker && (now - s_lastSkullBreakerTime > 1500)) {
-                s_lastSkullBreakerTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.isBatonSkullBreaker && (now - s_melee.lastSkullBreakerTime > 1500)) {
+                s_melee.lastSkullBreakerTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON CHARGED HIGH-ARC DOWNWARD SKULL BREAKER CLEAVED (Ry: %.2f)", rVel.y);
                 SendKey('W', true);
                 SendKey('S', true);
@@ -6714,10 +7179,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.60f), kHapticLadder);
                 goto combat_gesture_done;
             }
-            if (guillotineWrapStrike && (now - s_lastSnapdownChokeTime > 1500)) {
-                s_lastSnapdownChokeTime = now;
-                s_snapdownStartTime = 0;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.guillotineWrapStrike && (now - s_melee.lastSnapdownChokeTime > 1500)) {
+                s_melee.lastSnapdownChokeTime = now;
+                s_melee.snapdownStartTime = 0;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: GUILLOTINE CHOKE LOCKED (Ry: %.2f, Rz: %.2f)", rVel.y, rVel.z);
                 SendKey('S', true);
                 SendKey('C', true);
@@ -6729,9 +7194,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.70f), kHapticReload);
                 goto combat_gesture_done;
             }
-            if (isBatonGroundDischarge && (now - s_lastBatonGroundShockTime > 2000)) {
-                s_lastBatonGroundShockTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.isBatonGroundDischarge && (now - s_melee.lastBatonGroundShockTime > 2000)) {
+                s_melee.lastBatonGroundShockTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON DUAL-HAND GROUND DISCHARGE KINETIC SHOCKWAVE DETONATED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey('S', true);
                 SendKey(VK_SPACE, true);
@@ -6745,10 +7210,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(1, (0.98f), kHapticFinisher);
                 goto combat_gesture_done;
             }
-            if (cervicalSnapWhip && (now - s_lastPalmChinComboTime > 1500)) {
-                s_lastPalmChinComboTime = now;
-                s_palmChinStrikeTime = 0;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.cervicalSnapWhip && (now - s_melee.lastPalmChinComboTime > 1500)) {
+                s_melee.lastPalmChinComboTime = now;
+                s_melee.palmChinStrikeTime = 0;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: CERVICAL SNAP COMPLETED COMBO (Lx: %.2f)", lVel.x);
                 SendKey('W', true);
                 SendKey(VK_SPACE, true);
@@ -6760,7 +7225,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(1, (0.70f), kHapticReload);
                 goto combat_gesture_done;
             }
-            if (isBatonArcTrapArmed) {
+            if (meleeStrikes.isBatonArcTrapArmed) {
                 VR_LOG_INFO("Tactical Melee: STUN BATON HIGH-VOLTAGE CAPACITANCE BLEED ARC TRAP ARMED");
                 SendKeyTap('E');
                 SendKeyTap('Q');
@@ -6769,7 +7234,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.70f), kHapticReload);
                 goto combat_gesture_done;
             }
-            if (isCrossChestArcWall) {
+            if (meleeStrikes.isCrossChestArcWall) {
                 SendKey('S', true);
                 SendKey('Q', true);
                 SendMouseClick(false, true); // GH #33: foreground-guarded (was mouse_event RIGHTDOWN)
@@ -6778,7 +7243,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('S', false);
                 goto combat_gesture_done;
             }
-            if (isInductionOverheated) {
+            if (meleeStrikes.isInductionOverheated) {
                 VR_LOG_INFO("Tactical Melee: STUN BATON INDUCTION COIL OVERHEAT ARC DETONATED");
                 SendKey('S', true);
                 SendKey('Q', true);
@@ -6790,7 +7255,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(1, (0.98f), kHapticFinisher);
                 goto combat_gesture_done;
             }
-            if (isDischargingArcWave) {
+            if (meleeStrikes.isDischargingArcWave) {
                 VR_LOG_INFO("Tactical Melee: STUN BATON OVERLOAD RADIAL ARC WAVE DISCHARGED (Lx: %.2f, Rx: %.2f)", lVel.x, rVel.x);
                 SendKey('S', true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
@@ -6802,9 +7267,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(1, (0.98f), kHapticFinisher);
                 goto combat_gesture_done;
             }
-            if (isBatonGroundPin && (now - s_lastBatonGroundPinTime > 1500)) {
-                s_lastBatonGroundPinTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.isBatonGroundPin && (now - s_melee.lastBatonGroundPinTime > 1500)) {
+                s_melee.lastBatonGroundPinTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON GROUND PIN & TASER KNEEL (Ry: %.2f)", rVel.y);
                 SendKey('C', true);
                 SendKey('S', true);
@@ -6818,9 +7283,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.65f), kHapticLadder);
                 goto combat_gesture_done;
             }
-            if (isClinchHeadbutt && (now - s_lastHeadbuttTime > 1500)) {
-                s_lastHeadbuttTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.isClinchHeadbutt && (now - s_melee.lastHeadbuttTime > 1500)) {
+                s_melee.lastHeadbuttTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL COLLAR TIE CLINCH & HEADBUTT STUN (Lz: %.2f, Rz: %.2f)", lVel.z, rVel.z);
                 SendKey('W', true);
                 SendKey(VK_SPACE, true);
@@ -6832,10 +7297,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(1, (0.98f), kHapticFinisher);
                 goto combat_gesture_done;
             }
-            if (sternumElbowSmash && (now - s_lastLiverElbowComboTime > 1500)) {
-                s_lastLiverElbowComboTime = now;
-                s_liverHookTime = 0;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.sternumElbowSmash && (now - s_melee.lastLiverElbowComboTime > 1500)) {
+                s_melee.lastLiverElbowComboTime = now;
+                s_melee.liverHookTime = 0;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: STERNUM ELBOW SMASH COMPLETED COMBO (Ry: %.2f)", rVel.y);
                 SendKey('W', true);
                 SendKey('A', true);
@@ -6846,9 +7311,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(1, (0.98f), kHapticFinisher); // Bone-fracturing sternum blunt crack (280 Hz)
                 goto combat_gesture_done;
             }
-            if (isBatonChargedSpear && (now - s_lastSpearThrustTime > 1500)) {
-                s_lastSpearThrustTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.isBatonChargedSpear && (now - s_melee.lastSpearThrustTime > 1500)) {
+                s_melee.lastSpearThrustTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON CHARGED UNDERARM SPEAR THRUST (Rz: %.2f)", rVel.z);
                 SendKey('W', true);
                 SendKey('S', true);
@@ -6860,9 +7325,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.65f), kHapticLadder);  // Forearm bracing recoil (140 Hz)
                 goto combat_gesture_done;
             }
-            if (isKneeStomp && (now - s_lastKneeStompTime > 1500)) {
-                s_lastKneeStompTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.isKneeStomp && (now - s_melee.lastKneeStompTime > 1500)) {
+                s_melee.lastKneeStompTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL SHIN KICK & KNEE HYPER-EXTENSION (Ry: %.2f, Lz: %.2f)", rVel.y, lVel.z);
                 SendKey('C', true);
                 SendKey('S', true);
@@ -6874,9 +7339,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.60f), kHapticLadder);  // Body-weight plant & brace feedback (100 Hz)
                 goto combat_gesture_done;
             }
-            if (isLeadKneeThrust && (now - s_lastLeadKneeTime > 1500)) {
-                s_lastLeadKneeTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.isLeadKneeThrust && (now - s_melee.lastLeadKneeTime > 1500)) {
+                s_melee.lastLeadKneeTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL LEAD KNEE THRUST (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey('W', true);
                 SendKey('C', true);
@@ -6888,9 +7353,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.65f), kHapticLadder);  // Frame clamp vibration (100 Hz)
                 goto combat_gesture_done;
             }
-            if (isDuckUnderKidneyCounter && (now - s_lastKidneyCounterTime > 1500)) {
-                s_lastKidneyCounterTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.isDuckUnderKidneyCounter && (now - s_melee.lastKidneyCounterTime > 1500)) {
+                s_melee.lastKidneyCounterTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL DUCK-UNDER KIDNEY COUNTER-JAB (Rx: %.2f, Rz: %.2f)", rVel.x, rVel.z);
                 SendKey('C', true);
                 SendKey('D', true);
@@ -6901,10 +7366,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(1, (0.98f), kHapticFinisher); // Visceral renal concussive shockwave (220 Hz)
                 goto combat_gesture_done;
             }
-            if (blindRiposteStrike && (now - s_lastEyeRubRiposteTime > 1500)) {
-                s_lastEyeRubRiposteTime = now;
-                s_eyeRubWipeTime = 0;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.blindRiposteStrike && (now - s_melee.lastEyeRubRiposteTime > 1500)) {
+                s_melee.lastEyeRubRiposteTime = now;
+                s_melee.eyeRubWipeTime = 0;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: DIRT/ASH BLIND RECOVERY RIPOSTE DISPATCHED (Rz: %.2f)", rVel.z);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -6915,9 +7380,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(1, (0.98f), kHapticFinisher); // Retaliatory counter-strike blast (240 Hz)
                 goto combat_gesture_done;
             }
-            if (isParrySnap && (now - s_lastParrySnapTime > 1500)) {
-                s_lastParrySnapTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.isParrySnap && (now - s_melee.lastParrySnapTime > 1500)) {
+                s_melee.lastParrySnapTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE SHIV FOREARM DEFENSIVE PARRY-AND-SNAP (Lx: %.2f, Ry: %.2f)", lVel.x, rVel.y);
                 SendKey('W', true);
                 SendKey('E', true);
@@ -6929,9 +7394,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(1, (0.98f), kHapticFinisher); // Joint-shattering bone crack (280 Hz)
                 goto combat_gesture_done;
             }
-            if (isBatonRibJab && (now - s_lastBatonRibJabTime > 1500)) {
-                s_lastBatonRibJabTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.isBatonRibJab && (now - s_melee.lastBatonRibJabTime > 1500)) {
+                s_melee.lastBatonRibJabTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON RIB-JAB & GROUND TAKEDOWN (Ry: %.2f, Rz: %.2f)", rVel.y, rVel.z);
                 SendKey('S', true);
                 SendKey(VK_SPACE, true);
@@ -6942,9 +7407,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(1, (0.98f), kHapticFinisher); // Neuromuscular shock & ground deck impact (290 Hz)
                 goto combat_gesture_done;
             }
-            if (isDoubleEarClap && (now - s_lastDoubleEarClapTime > 1500)) {
-                s_lastDoubleEarClapTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.isDoubleEarClap && (now - s_melee.lastDoubleEarClapTime > 1500)) {
+                s_melee.lastDoubleEarClapTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL DOUBLE-EAR CONCUSSIVE CLAP (Lx: %.2f, Rx: %.2f)", lVel.x, rVel.x);
                 SendKey('W', true);
                 SendKey(VK_SPACE, true);
@@ -6956,10 +7421,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(1, (0.98f), kHapticFinisher);
                 goto combat_gesture_done;
             }
-            if (dartCounterJabStrike && (now - s_lastDartCounterJabTime > 1500)) {
-                s_lastDartCounterJabTime = now;
-                s_dartExtractedTime = 0;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.dartCounterJabStrike && (now - s_melee.lastDartCounterJabTime > 1500)) {
+                s_melee.lastDartCounterJabTime = now;
+                s_melee.dartExtractedTime = 0;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: STUN DART COUNTER-JAB DISPATCHED (Rz: %.2f)", rVel.z);
                 SendKey('E', true);
                 SendKey('3', true);
@@ -6970,9 +7435,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(1, (0.98f), kHapticFinisher); // Bio-electric discharge shockwave (320 Hz)
                 goto combat_gesture_done;
             }
-            if (isRibUnderhook && (now - s_lastRibUnderhookTime > 1500)) {
-                s_lastRibUnderhookTime = now;
-                s_lastFinisherTime = now;
+            if (meleeStrikes.isRibUnderhook && (now - s_melee.lastRibUnderhookTime > 1500)) {
+                s_melee.lastRibUnderhookTime = now;
+                s_melee.lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE SHIV RIB-CAGE UNDERHOOK PUNCTURE & LIFT (Ry: %.2f, Rz: %.2f)", rVel.y, rVel.z);
                 SendKey('W', true);
                 SendKey(VK_SPACE, true);
@@ -6983,7 +7448,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(1, (0.95f), kHapticFinisher); // Cartilage perforation & body lift rumble (280 Hz)
                 goto combat_gesture_done;
             }
-            if (dualSledgeOverhead) {
+            if (meleeStrikes.dualSledgeOverhead) {
                 VR_LOG_INFO("Physical Gesture: HEAVY ORE SLEDGEHAMMER OVERHEAD CRUSH (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
                 SendKey('S', true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
@@ -6993,7 +7458,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.98f), kHapticFinisher);
                 goto combat_gesture_done;
             }
-            if (stealthCarotidSlash) {
+            if (meleeStrikes.stealthCarotidSlash) {
                 VR_LOG_INFO("Physical Stealth: CAROTID ARTERIAL JUGULAR SLASH (SpeedX: %.2f m/s, Ry: %.2f)", rVel.x, rightLocal.y);
                 SendKey('W', true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
@@ -7002,7 +7467,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(1, (0.95f), kHapticFinisher); // Arterial release incision & spray (260 Hz)
                 goto combat_gesture_done;
             }
-            if (twoHandedBatonSlam) {
+            if (meleeStrikes.twoHandedBatonSlam) {
                 VR_LOG_INFO("Physical Gesture: TWO-HANDED STUN BATON DEFIBRILLATOR SLAM (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
                 SendKey('S', true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
@@ -7012,7 +7477,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.98f), kHapticFinisher);
                 goto combat_gesture_done;
             }
-            if (mechPowerPunch) {
+            if (meleeStrikes.mechPowerPunch) {
                 VR_LOG_INFO("Physical Gesture: EXOSKELETON POWER FIST KINETIC SHOCKWAVE PUNCH (Rz: %.2f m/s)", rVel.z);
                 SendKey('W', true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
@@ -7022,7 +7487,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.85f), kHapticReload);
                 goto combat_gesture_done;
             }
-            if (droneEmpSnap) {
+            if (meleeStrikes.droneEmpSnap) {
                 VR_LOG_INFO("Physical Combat: SECURITY DRONE EMP OVERLOAD & CHASSIS SNAP (TorqueRelY: %.2f)", fabsf(lVel.y - rVel.y));
                 SendKeyTap('E');
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
@@ -7031,7 +7496,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.95f), kHapticFinisher);
                 goto combat_gesture_done;
             }
-            if (leftTrayBatter) {
+            if (meleeStrikes.leftTrayBatter) {
                 VR_LOG_INFO("Physical Gesture: INMATE MESS TRAY CONCUSSIVE BATTER (Lz: %.2f)", lVel.z);
                 SendKey('W', true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
@@ -7040,7 +7505,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.90f), kHapticFinisher); // Sheet metal concussive clatter (160 Hz)
                 goto combat_gesture_done;
             }
-            if (dualShieldBash) {
+            if (meleeStrikes.dualShieldBash) {
                 VR_LOG_INFO("Physical Gesture: RIOT SHIELD CONCUSSIVE BASH (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
                 SendKey('W', true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
@@ -7050,7 +7515,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.95f), kHapticFinisher);
                 goto combat_gesture_done;
             }
-            if (dualShieldPlant) {
+            if (meleeStrikes.dualShieldPlant) {
                 VR_LOG_INFO("Physical Gesture: RIOT SHIELD BALLISTIC DECK PLANT (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
                 SendKey('C', true); // Crouch lock cover stance
                 SendKey(VK_SPACE, true);
@@ -7059,7 +7524,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.75f), kHapticReload);
                 goto combat_gesture_done;
             }
-            if (dualStoolHeavySmash) {
+            if (meleeStrikes.dualStoolHeavySmash) {
                 VR_LOG_INFO("Physical Gesture: INMATE STOOL / BLUNT WEAPON HEAVY SMASH (LSpd: %.2f, RSpd: %.2f)", lSpeed, rSpeed);
                 SendKey('S', true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
@@ -7069,7 +7534,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.95f), kHapticFinisher);
                 goto combat_gesture_done;
             }
-            if (dualPalmShove) {
+            if (meleeStrikes.dualPalmShove) {
                 VR_LOG_INFO("Physical Gesture: PIT FIGHTING ARENA DUAL-PALM CONCUSSIVE SHOVE (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
                 SendKey('W', true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
@@ -7079,7 +7544,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.85f), kHapticReload);
                 goto combat_gesture_done;
             }
-            if (isLookingDown && isDownwardPlunge) {
+            if (meleeStrikes.isLookingDown && meleeStrikes.isDownwardPlunge) {
                 VR_LOG_INFO("Physical Gesture: DEATH-FROM-ABOVE AERIAL TAKEDOWN / DROP AMBUSH (Pitch: %.2f rad, Vy: %.2f m/s)", s_headlook.lastHmdPitch, activeVel.y);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
                 SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
@@ -7087,7 +7552,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.95f), kHapticFinisher);
                 goto combat_gesture_done;
             }
-            if (dualOverheadSlam) {
+            if (meleeStrikes.dualOverheadSlam) {
                 VR_LOG_INFO("Physical Gesture: TWO-HANDED OVERHEAD CRUSHING SLAM / PIPE STRIKE (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
                 SendKey('S', true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
@@ -7098,7 +7563,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 HapticRequest(0, (0.95f), kHapticFinisher);
                 goto combat_gesture_done;
             }
-            if (dualCrossSlash) {
+            if (meleeCounters.dualCrossSlash) {
                 VR_LOG_INFO("Physical Gesture: DUAL ULAK SCISSOR CROSS-SLASH (Rx: %.2f, Lx: %.2f)", rVel.x, lVel.x);
                 SendKey('A', true);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
@@ -7184,7 +7649,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 }
             }
         combat_gesture_done:
-            s_lastPunchTime = now;
+            s_melee.lastPunchTime = now;
         }
     }
 
@@ -7192,7 +7657,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // dispatch above (reactive chain, finisher, generic classifier) suppresses
     // lower-priority env tap/click dispatches below so one gesture fires once.
     bool meleeFiredThisFrame =
-        (s_lastPunchTime != punchAtEntry) || (s_lastFinisherTime != finisherAtEntry);
+        (s_melee.lastPunchTime != punchAtEntry) || (s_melee.lastFinisherTime != finisherAtEntry);
 
     // 5b. Physical Boxer Guard Pose Detection ("holding both fists up in front of the VR")
     // Criteria (ADR 0400):
@@ -7208,34 +7673,34 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                          (rightLocal.z >= -0.65f && rightLocal.z <= -0.06f);
     bool handsClose = fabsf(leftLocal.x - rightLocal.x) < 0.54f;
     bool handsSteady = (rSpeed < 1.4f && lSpeed < 1.4f);
-    bool notPunching = (now - s_lastPunchTime > 120) && (now - s_lastFinisherTime > 120); // GH #31
+    bool notPunching = (now - s_melee.lastPunchTime > 120) && (now - s_melee.lastFinisherTime > 120); // GH #31
 
     bool guardPoseDetected = !isClimbingActive && chinLevel && inFrontOfFace && handsClose && handsSteady && notPunching;
 
     // Temporal Hysteresis & Debouncing:
     // Require guard pose to hold for ~40ms to engage
     if (guardPoseDetected) {
-        s_guardPoseReleaseTimer = 0;
-        if (s_guardPoseHoldTimer == 0) {
-            s_guardPoseHoldTimer = now;
-        } else if (now - s_guardPoseHoldTimer >= 40) {
+        s_melee.guardPoseReleaseTimer = 0;
+        if (s_melee.guardPoseHoldTimer == 0) {
+            s_melee.guardPoseHoldTimer = now;
+        } else if (now - s_melee.guardPoseHoldTimer >= 40) {
             s_physicalBlockEngaged = true;
         }
     } else {
-        s_guardPoseHoldTimer = 0;
+        s_melee.guardPoseHoldTimer = 0;
         if (s_physicalBlockEngaged) {
             // If throwing an actual directional punch, release block instantly (0ms)
             bool isThrowingPunch = (rVel.z < -1.15f || lVel.z < -1.15f) || (fabsf(rVel.x) > 1.30f || fabsf(lVel.x) > 1.30f) || (rVel.y < -1.25f || lVel.y < -1.25f);
             if (isThrowingPunch) {
                 s_physicalBlockEngaged = false;
-                s_guardPoseReleaseTimer = 0;
+                s_melee.guardPoseReleaseTimer = 0;
             } else {
                 // When hands drop naturally, require 80ms release buffer to eliminate jitter
-                if (s_guardPoseReleaseTimer == 0) {
-                    s_guardPoseReleaseTimer = now;
-                } else if (now - s_guardPoseReleaseTimer >= 80) {
+                if (s_melee.guardPoseReleaseTimer == 0) {
+                    s_melee.guardPoseReleaseTimer = now;
+                } else if (now - s_melee.guardPoseReleaseTimer >= 80) {
                     s_physicalBlockEngaged = false;
-                    s_guardPoseReleaseTimer = 0;
+                    s_melee.guardPoseReleaseTimer = 0;
                 }
             }
         }
@@ -10962,12 +11427,12 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // Block / Aim: Engaged physically via Boxer Guard pose OR manually via Left Trigger
     bool wantBlock = s_physicalBlockEngaged || (offCtrl.trigger > 0.5f); // Track C #14
     s_isAimingOrBlocking = wantBlock;
-    if (wantBlock != s_currentBlockEngaged) {
+    if (wantBlock != s_melee.currentBlockEngaged) {
         if (wantBlock) {
             // GH #31: punch recovery covers reactive strikes and finishers.
-            if ((now - s_lastPunchTime > 200) && (now - s_lastFinisherTime > 200)) {
+            if ((now - s_melee.lastPunchTime > 200) && (now - s_melee.lastFinisherTime > 200)) {
                 SendMouseClick(false, true); // GH #33: foreground-guarded (was mouse_event RIGHTDOWN)
-                s_currentBlockEngaged = true;
+                s_melee.currentBlockEngaged = true;
                 if (s_physicalBlockEngaged) {
                     VR_LOG_INFO("Combat State: BOXER GUARD / BLOCK MODE engaged (Physical Gesture)");
                     HapticRequest(0, (0.35f), kHapticUi);
@@ -10979,7 +11444,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
         } else {
             SendMouseClick(false, false); // GH #33: foreground-guarded (was mouse_event RIGHTUP)
-            s_currentBlockEngaged = false;
+            s_melee.currentBlockEngaged = false;
             VR_LOG_INFO("Combat State: AIM / BLOCK disengaged");
         }
     }
