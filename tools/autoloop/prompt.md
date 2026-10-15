@@ -39,9 +39,12 @@ work this wake, then stop. Keep total effort bounded (<= 4 concurrent subagents)
    - Engine binaries: `System/Win32_x86/{RndrGL,MSystem,MXR,MCCDyn}.dll` and
      `SbzEngine.exe` (top-level `Riddick.exe`).
    - Use the REA CLI (`rea --help`, plus `rea inspect-binary-layout`,
-     `rea search-bytes`, `rea analyze`, `rea inspect-artifact`). Ghidra/IDA are
-     NOT configured; prefer static PE/string/format analysis when a decompiler
-     is unavailable. Do not install heavy tooling without recording it.
+     `rea search-bytes`, `rea analyze`, `rea decompile`, `rea function`,
+     `rea xrefs`). **Ghidra 12.1.4 is now installed** at
+     `C:\Users\GigelCastel\Tools\ghidra_12.1.4_PUBLIC` with `GHIDRA_INSTALL_DIR`
+     set, so `rea` can decompile native code. Use it for the `MOS DATAFILE2.0`
+     loader and the viewmodel/action paths. Do not install more heavy tooling
+     without recording it.
    - Never claim the procedural `VRHandRenderer` overlay is native. Preserve it
      as a fallback until a tested native path exists.
 5. Validate if code changed: `tools/build-all.ps1` (x86 opengl32 + x64 host),

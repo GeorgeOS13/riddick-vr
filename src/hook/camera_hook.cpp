@@ -4237,25 +4237,33 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // OS cursor visible) so right-stick Y never leaks arrows during gameplay;
     // left-stick Y restored as an OR source for menu navigation.
     {
-        static int s_dialogueDirection = 0;
+        static DialogueNavigationState s_dialogueNav;
         bool menuMode = !has3D || cursorShowing;
         float leftX = vrState.leftController.thumbstickX;
         float leftY = vrState.leftController.thumbstickY;
         float rightX = vrState.rightController.thumbstickX;
         float rightY = vrState.rightController.thumbstickY;
         const float deadzone = g_vrConfig.dialogueDeadzone;
-        DialogueDirection direction = ChooseDialogueDirection(leftX, leftY, rightX, rightY, deadzone);
         float navMagnitude = (std::max)(sqrtf(leftX * leftX + leftY * leftY),
                                         sqrtf(rightX * rightX + rightY * rightY));
 
+        // GH #53 (3.3): direction picking (ChooseDialogueDirection) and the
+        // held/diagonal hysteresis now live in dialogue_navigation.h. This
+        // block only gates menu context and recentring: outside menu/dialogue
+        // or inside the release deadzone we re-arm, so the same direction taps
+        // again on the next deliberate push while a held push stays
+        // edge-triggered and a stick resting on a diagonal cannot flicker.
         if (!menuMode || navMagnitude < deadzone * 0.55f) {
-            s_dialogueDirection = 0;
-        } else if (direction != DialogueDirection::Neutral && static_cast<int>(direction) != s_dialogueDirection) {
-            s_dialogueDirection = static_cast<int>(direction);
-            const VRAction actions[] = { VRAction::DialogueUp, VRAction::DialogueDown,
-                                         VRAction::DialogueLeft, VRAction::DialogueRight };
-            SendActionTap(actions[s_dialogueDirection - 1]);
-            HapticRequest(1, 0.20f, kHapticAmbient);
+            ResetDialogueNavigation(s_dialogueNav);
+        } else {
+            DialogueDirection fired = UpdateDialogueNavigation(
+                s_dialogueNav, leftX, leftY, rightX, rightY, deadzone);
+            if (fired != DialogueDirection::Neutral) {
+                const VRAction actions[] = { VRAction::DialogueUp, VRAction::DialogueDown,
+                                             VRAction::DialogueLeft, VRAction::DialogueRight };
+                SendActionTap(actions[static_cast<int>(fired) - 1]);
+                HapticRequest(1, 0.20f, kHapticAmbient);
+            }
         }
     }
 

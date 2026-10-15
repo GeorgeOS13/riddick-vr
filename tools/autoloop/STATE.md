@@ -2,13 +2,27 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
-> **COORDINATION — active claim (interactive session):**
-> The interactive session is building the read-only **`.xmd` (MOS DATAFILE2.0)
-> parser + native-hand ADR** and will commit it. To avoid conflicting edits,
-> the scheduled loop should pick a DIFFERENT unit of work this wake (e.g. #53
-> proximity-prompt investigation, #45 judder/look-accumulation, #40 ammo quad)
-> and avoid touching `tools/mos_*`, `src/hook/vr_hand_renderer.*`, and
-> `docs/adr/0413*`. Remove this note once that work is committed.
+> **COORDINATION (updated):** the `.xmd` parser (`tools/mos_xmd.py`) and ADR-0413
+> are committed. Ghidra 12.1.4 is installed at
+> `C:\Users\GigelCastel\Tools\ghidra_12.1.4_PUBLIC` and `GHIDRA_INSTALL_DIR` is
+> set, so `rea` can now decompile. Issues #55 (decode MOS geometry/skinning →
+> real hand mesh), #56 (pin target build), #57 (VR portability epic) are open.
+> Loop should now prefer #55 and the #57 gaps; see below.
+
+## Wake 1 — 2026-10-15 (interactive, setup + RE)
+- Provisioned **Ghidra 12.1.4** (`C:\Users\GigelCastel\Tools\ghidra_12.1.4_PUBLIC`,
+  `GHIDRA_INSTALL_DIR` set). `rea doctor` now reports ghidra healthy → real
+  decompilation is available to `rea` (CLI) and future wakes.
+- Committed `tools/mos_xmd.py` — read-only `MOS DATAFILE2.0` `.xmd` parser,
+  validated on Riddick/weapon models (node tree + chunk offsets/sizes +
+  triangle-count cross-check).
+- Wrote `docs/adr/0413-native-first-person-hand-model-reuse.md`.
+- Opened issues: **#55** (decode MOS geometry/skinning → real hand mesh),
+  **#56** (pin target build: EFBB 2004 vs AoDA 2009), **#57** (VR portability
+  epic). Commented the plan on **#46**.
+- Next (loop): start **#55** — use `rea`/Ghidra to xref the `MOS DATAFILE2.0`
+  loader in `MXR.dll`/`MSystem.dll`, recover `VERTEXFRAMES`/`BONEDEFORM`/`NODES`
+  layouts, then extract the hand/forearm mesh.
 
 ## Wake 0 — 2026-10-15 (setup)
 - Created the autoloop harness (`tools/autoloop/`): standing prompt, runner
