@@ -1167,42 +1167,9 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
                 projViews[eye].pose.position = m_locatedViews[eye].pose.position;
                 projViews[eye].pose.orientation = ExtractRoll(m_locatedViews[eye].pose.orientation);
 
-                // Configure in-game action FOV with aspect matching (ADR 0007 / ADR 0399):
-                // Enforce true 16:9 aspect ratio in tangent space so rendered world geometry
-                // is geometrically 1:1 and never squished horizontally.
-                const XrFovf& baseFov = m_locatedViews[eye].fov;
-                float tanLeft = tanf(baseFov.angleLeft);
-                float tanRight = tanf(baseFov.angleRight);
-                float tanUp = tanf(baseFov.angleUp);
-                float tanDown = tanf(baseFov.angleDown);
-
-                float vSpanBase = tanUp - tanDown;
-                float hSpanBase = tanRight - tanLeft;
-                float vc = (tanUp + tanDown) * 0.5f;
-                float hc = (tanRight + tanLeft) * 0.5f;
-
-                constexpr float ACTION_UNZOOM_FACTOR = 1.05f;
-                constexpr float TARGET_ASPECT = 16.0f / 9.0f;
-
-                float targetVSpan = vSpanBase * ACTION_UNZOOM_FACTOR;
-                float targetHSpan = targetVSpan * TARGET_ASPECT;
-
-                if (targetHSpan < hSpanBase * ACTION_UNZOOM_FACTOR) {
-                    targetHSpan = hSpanBase * ACTION_UNZOOM_FACTOR;
-                    targetVSpan = targetHSpan / TARGET_ASPECT;
-                }
-                if (targetVSpan < vSpanBase * ACTION_UNZOOM_FACTOR) {
-                    targetVSpan = vSpanBase * ACTION_UNZOOM_FACTOR;
-                    targetHSpan = targetVSpan * TARGET_ASPECT;
-                }
-
-                float halfH = targetHSpan * 0.5f;
-                float halfV = targetVSpan * 0.5f;
-
-                projViews[eye].fov.angleLeft = atanf(hc - halfH);
-                projViews[eye].fov.angleRight = atanf(hc + halfH);
-                projViews[eye].fov.angleDown = atanf(vc - halfV);
-                projViews[eye].fov.angleUp = atanf(vc + halfV);
+                // In 3D action mode, project swapchains using the headset's native physical lens FOV
+                // Edge-to-edge full VR coverage with ZERO black bars on left, right, top, or bottom.
+                projViews[eye].fov = m_locatedViews[eye].fov;
 
                 projViews[eye].subImage.swapchain = m_swapchains[eye].handle;
                 projViews[eye].subImage.imageRect.offset = {0, 0};

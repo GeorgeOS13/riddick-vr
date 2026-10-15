@@ -963,6 +963,20 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (!isClimbingActive && (now - s_lastPunchTime > 260)) {
         bool dualCrossSlash = (rVel.x < -1.1f && lVel.x > 1.1f) || (rVel.x > 1.1f && lVel.x < -1.1f);
 
+        // ADR 0403: Discriminate deliberate directional punch strikes from raising arms into Boxer Guard.
+        // Raising arms upward (Vy > 0) into guard position must NEVER trigger an attack or cancel guard.
+        bool chinLevelRough = (leftLocal.y >= -0.42f && leftLocal.y <= 0.32f) &&
+                              (rightLocal.y >= -0.42f && rightLocal.y <= 0.32f);
+        bool inFrontRough = (leftLocal.z >= -0.68f && leftLocal.z <= -0.05f) &&
+                            (rightLocal.z >= -0.68f && rightLocal.z <= -0.05f);
+        bool inGuardVolume = chinLevelRough && inFrontRough && (fabsf(leftLocal.x - rightLocal.x) < 0.56f);
+
+        bool isForwardPunch = (rVel.z < -1.20f && rightLocal.z < -0.10f) || (lVel.z < -1.20f && leftLocal.z < -0.10f);
+        bool isHookPunch = (fabsf(rVel.x) > 1.35f && rVel.z < -0.15f) || (fabsf(lVel.x) > 1.35f && lVel.z < -0.15f);
+        bool isUppercutPunch = ((rVel.y > 1.35f && rightLocal.y < -0.10f) || (lVel.y > 1.35f && leftLocal.y < -0.10f)) &&
+                               (rVel.z < -0.20f || lVel.z < -0.20f);
+        bool isMeleeStrike = (dualCrossSlash || isForwardPunch || isHookPunch || isUppercutPunch) && !inGuardVolume;
+
         // 5a. Physical Parry / Counter-Disarm Thrust (ADR 0018)
         // In Starbreeze engine: Left Click while Right Click (Block) is held executes Counter-Disarm!
         // When in active Boxer Guard (s_currentBlockEngaged), driving fists forward into an attack (Vz < -1.15 m/s)
@@ -1038,7 +1052,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
             mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
             vrState.rightHapticPulse = 0.95f; // High-frequency bone-cracking parry shockwave (280 Hz)
-        } else if (dualCrossSlash || rSpeed > 1.10f || lSpeed > 1.10f) {
+        } else if (isMeleeStrike) {
             // Immediately disengage block if currently blocking so attacks are not canceled or stuck
             if (s_currentBlockEngaged) {
                 mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
@@ -6178,30 +6192,31 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // - Hands steady (not throwing a punch, rSpeed < 1.3 m/s and lSpeed < 1.3 m/s)
     // - Outside punch execution recovery window (> 200ms since last punch)
     // - Not actively holding ladder rungs or climbing
-    bool chinLevel = (leftLocal.y >= -0.36f && leftLocal.y <= 0.25f) &&
-                     (rightLocal.y >= -0.36f && rightLocal.y <= 0.25f);
-    bool inFrontOfFace = (leftLocal.z >= -0.58f && leftLocal.z <= -0.10f) &&
-                         (rightLocal.z >= -0.58f && rightLocal.z <= -0.10f);
-    bool handsClose = fabsf(leftLocal.x - rightLocal.x) < 0.48f;
-    bool handsSteady = (rSpeed < 1.3f && lSpeed < 1.3f);
-    bool notPunching = (now - s_lastPunchTime > 200);
+    bool chinLevel = (leftLocal.y >= -0.40f && leftLocal.y <= 0.30f) &&
+                     (rightLocal.y >= -0.40f && rightLocal.y <= 0.30f);
+    bool inFrontOfFace = (leftLocal.z >= -0.65f && leftLocal.z <= -0.06f) &&
+                         (rightLocal.z >= -0.65f && rightLocal.z <= -0.06f);
+    bool handsClose = fabsf(leftLocal.x - rightLocal.x) < 0.54f;
+    bool handsSteady = (rSpeed < 1.4f && lSpeed < 1.4f);
+    bool notPunching = (now - s_lastPunchTime > 120);
 
     bool guardPoseDetected = !isClimbingActive && chinLevel && inFrontOfFace && handsClose && handsSteady && notPunching;
 
     // Temporal Hysteresis & Debouncing:
-    // Require guard pose to hold for ~50ms to engage (prevents false-triggers during punches)
+    // Require guard pose to hold for ~40ms to engage
     if (guardPoseDetected) {
         s_guardPoseReleaseTimer = 0;
         if (s_guardPoseHoldTimer == 0) {
             s_guardPoseHoldTimer = now;
-        } else if (now - s_guardPoseHoldTimer >= 50) {
+        } else if (now - s_guardPoseHoldTimer >= 40) {
             s_physicalBlockEngaged = true;
         }
     } else {
         s_guardPoseHoldTimer = 0;
         if (s_physicalBlockEngaged) {
-            // If throwing a punch, release block instantly (0ms)
-            if (rSpeed > 1.4f || lSpeed > 1.4f) {
+            // If throwing an actual directional punch, release block instantly (0ms)
+            bool isThrowingPunch = (rVel.z < -1.15f || lVel.z < -1.15f) || (fabsf(rVel.x) > 1.30f || fabsf(lVel.x) > 1.30f) || (rVel.y < -1.25f || lVel.y < -1.25f);
+            if (isThrowingPunch) {
                 s_physicalBlockEngaged = false;
                 s_guardPoseReleaseTimer = 0;
             } else {

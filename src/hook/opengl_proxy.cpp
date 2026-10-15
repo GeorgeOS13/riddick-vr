@@ -290,6 +290,32 @@ void WINAPI OpenGLProxy::Hook_glLoadMatrixf(const GLfloat *m) {
             s_has3DGameplayProjection = true;
         }
 
+        if (isPerspective && !StereoRenderer::Instance().IsCinemaMode()) {
+            // ADR 0403: Match 3D gameplay perspective projection aspect ratio to the VR eye buffer
+            // Prevents geometry distortion and horizontal squishing in VR headset lenses
+            uint32_t eyeW = StereoRenderer::Instance().GetEyeWidth();
+            uint32_t eyeH = StereoRenderer::Instance().GetEyeHeight();
+            if (eyeW > 0 && eyeH > 0) {
+                float targetAspect = static_cast<float>(eyeW) / static_cast<float>(eyeH);
+                GLfloat correctedProj[16];
+                memcpy(correctedProj, m, sizeof(correctedProj));
+                // In Starbreeze engine, m[5] is vertical focal length, m[0] is horizontal focal length.
+                // Maintain vertical FOV and scale horizontal focal length to match target aspect ratio.
+                correctedProj[0] = fabsf(m[5]) / targetAspect;
+                memcpy(s_lastProjection, correctedProj, sizeof(s_lastProjection));
+
+                if (s_projMatrixCount == 1 || s_projMatrixCount % 300 == 0) {
+                    VR_LOG_INFO("glLoadMatrixf [3D VR PROJECTION #%u]: InAspect=%.3f OutAspect=%.3f (m0: %.2f->%.2f, m5: %.2f)",
+                        s_projMatrixCount, fabsf(m[5]) / m[0], targetAspect, m[0], correctedProj[0], m[5]);
+                }
+
+                if (real_glLoadMatrixf) {
+                    real_glLoadMatrixf(correctedProj);
+                }
+                return;
+            }
+        }
+
         if (s_projMatrixCount == 1 || s_projMatrixCount % 300 == 0) {
             VR_LOG_INFO("glLoadMatrixf [PROJECTION #%u]: [%.2f, %.2f, %.2f, %.2f] [%.2f, %.2f, %.2f, %.2f]",
                 s_projMatrixCount, m[0], m[5], m[10], m[14], m[1], m[2], m[3], m[15]);
