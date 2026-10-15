@@ -1161,7 +1161,52 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             bool dualGroundPlunge = (rVel.y < -1.25f && lVel.y < -1.25f && rightLocal.y < -0.40f);
             bool isBatonGroundDischarge = batonDualGroundEnergized && dualGroundPlunge;
 
-            if (isBatonGroundDischarge && (now - s_lastBatonGroundShockTime > 2000)) {
+            // Inmate Pit Brawl Collar Tie Snap-Down & Guillotine Choke (ADR 0165)
+            static DWORD s_lastSnapdownChokeTime = 0;
+            static DWORD s_snapdownStartTime = 0;
+            bool collarSnapdownGrip = (leftLocal.z > -0.35f && leftLocal.z < -0.12f && vrState.leftController.grip > 0.65f);
+            bool collarSnapdownPull = (lVel.y < -0.90f);
+            if (collarSnapdownGrip && collarSnapdownPull && (now - s_lastSnapdownChokeTime > 1500)) {
+                if (s_snapdownStartTime == 0) {
+                    s_snapdownStartTime = now;
+                    VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL COLLAR TIE SNAP-DOWN INITIATED (Ly: %.2f)", lVel.y);
+                    vrState.leftHapticPulse = 0.90f; // Cervical snap-down jerk (210 Hz)
+                }
+            }
+            bool guillotineWrapStrike = (s_snapdownStartTime > 0 && (now - s_snapdownStartTime < 500) && rVel.y > 1.05f && rVel.z < -0.75f);
+
+            // Security Guard Stun Baton Charged High-Arc Downward Skull Breaker (ADR 0166)
+            static DWORD s_lastSkullBreakerTime = 0;
+            bool batonOverheadEnergized = (rightLocal.y > 0.25f && vrState.rightController.grip > 0.60f && vrState.rightController.trigger > 0.65f);
+            bool batonExtremeCleave = (rVel.y < -1.45f);
+            bool isBatonSkullBreaker = batonOverheadEnergized && batonExtremeCleave;
+
+            if (isBatonSkullBreaker && (now - s_lastSkullBreakerTime > 1500)) {
+                s_lastSkullBreakerTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Tactical Melee: STUN BATON CHARGED HIGH-ARC DOWNWARD SKULL BREAKER CLEAVED (Ry: %.2f)", rVel.y);
+                SendKey('W', true);
+                SendKey('S', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('S', false);
+                SendKey('W', false);
+                vrState.rightHapticPulse = 0.98f; // Electro-kinetic cranial detonation blast (340 Hz)
+                vrState.leftHapticPulse = 0.60f;
+            } else if (guillotineWrapStrike && (now - s_lastSnapdownChokeTime > 1500)) {
+                s_lastSnapdownChokeTime = now;
+                s_snapdownStartTime = 0;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: GUILLOTINE CHOKE LOCKED (Ry: %.2f, Rz: %.2f)", rVel.y, rVel.z);
+                SendKey('S', true);
+                SendKey('C', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('C', false);
+                SendKey('S', false);
+                vrState.rightHapticPulse = 0.98f; // Tracheal compression chokehold pulse (280 Hz)
+                vrState.leftHapticPulse = 0.70f;
+            } else if (isBatonGroundDischarge && (now - s_lastBatonGroundShockTime > 2000)) {
                 s_lastBatonGroundShockTime = now;
                 s_lastPunchTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON DUAL-HAND GROUND DISCHARGE KINETIC SHOCKWAVE DETONATED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
@@ -3213,6 +3258,37 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     vrState.rightHapticPulse = 0.95f; // Mechanical end-stop detent thud (210 Hz)
                     vrState.leftHapticPulse = 0.50f;
                 }
+            }
+
+            // Dark Athena EVA Solar Collector Photovoltaic Array Tension Guy-Wire Turnbuckle Wrench (ADR 0163)
+            static DWORD s_lastTurnbuckleTime = 0;
+            bool handAtTurnbuckle = (rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > -0.20f && rightLocal.y < 0.20f &&
+                                     vrState.rightController.grip > 0.60f);
+            bool turnbuckleTorqueWrench = (fabsf(rVel.x) > 0.65f);
+            if (handAtTurnbuckle && turnbuckleTorqueWrench && (now - s_lastTurnbuckleTime > 1500)) {
+                s_lastTurnbuckleTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA SOLAR GUY-WIRE TURNBUCKLE TENSIONED & LOCKED (Rx: %.2f)", rVel.x);
+                SendKeyTap('E');
+                SendKeyTap('W');
+                SendKeyTap(VK_SPACE);
+                vrState.rightHapticPulse = 0.95f; // Mechanical turnbuckle detent snap (290 Hz)
+                vrState.leftHapticPulse = 0.50f;
+            }
+
+            // Subterranean Hydroponics Bio-Waste Incinerator Flame Arrestor Mesh Screen Slide-In (ADR 0164)
+            static DWORD s_lastFlameArrestorTime = 0;
+            bool twoHandAtFlameArrestor = (twoHandDist < 0.26f &&
+                                           rightLocal.z > -0.40f && rightLocal.z < -0.16f && rightLocal.y > -0.15f && rightLocal.y < 0.25f &&
+                                           vrState.leftController.grip > 0.55f && vrState.rightController.grip > 0.55f);
+            bool flameArrestorSlideIn = (rVel.z < -0.80f || lVel.z < -0.80f);
+            if (twoHandAtFlameArrestor && flameArrestorSlideIn && (now - s_lastFlameArrestorTime > 1500)) {
+                s_lastFlameArrestorTime = now;
+                VR_LOG_INFO("Environmental Gesture: HYDROPONICS FLAME ARRESTOR MESH SCREEN SLID & SEATED (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
+                SendKeyTap('E');
+                SendKeyTap(VK_RETURN);
+                SendKeyTap(VK_TAB);
+                vrState.rightHapticPulse = 0.90f; // Mechanical seating latch snap (260 Hz)
+                vrState.leftHapticPulse = 0.90f;
             }
         }
     }
