@@ -28,3 +28,26 @@ Accepted
 - Eliminated dead input code paths resulting from `cinemaMode = false`.
 - Retains 100% full VR FOV edge-to-edge with no screen flashing, dual POVs, or unexpected camera shifts.
 - Passes all 60 frames of the autonomous self-play test pipeline with 0 green glitch pixels.
+
+## Update — GH #53 (3.3): held/diagonal hysteresis
+The original latch (`s_dialogueDirection`) prevented repeats while a direction
+was held, but not **flicker**: `ChooseDialogueDirection` breaks ties by
+`|x| > |y|`, so a stick resting on a diagonal (e.g. `(0.62, 0.60)`) flips the
+dominant axis frame-to-frame and re-taps two different selections.
+
+- Added `DialogueNavigationState` + `UpdateDialogueNavigation` /
+  `ResetDialogueNavigation` in `src/hook/dialogue_navigation.h`. The selector is
+  edge-triggered (a held direction taps once) and applies **axis hysteresis**:
+  switching between the horizontal and vertical axes requires the candidate axis
+  to dominate the engaged axis by `kDialogueAxisSwitchMargin = 1.20f` (a ~6°
+  guard band against jitter).
+- `camera_hook.cpp` gates the selector on menu/dialogue context and recentres it
+  when the radial magnitude drops inside the release deadzone (`deadzone *
+  0.55f`), re-arming the same direction for the next deliberate push.
+- `tests/dialogue_navigation_tests.cpp` (`dialogue_navigation_deadzone` CTest)
+  now covers held-repeat suppression, diagonal no-flicker, the dominance
+  margin, recentring re-arm, and sub-deadzone silence.
+
+Still open for #53: 3.1 (explicit left-Y Eyeshine binding resolution) and 3.2
+(collider/target-based contextual interaction with a documented proximity
+fallback).

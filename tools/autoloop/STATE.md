@@ -2,6 +2,40 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 2 — 2026-10-15 21:20 (scheduled loop)
+- **Unit:** GH #53 requirement 3.3 — dialogue-navigation flicker on diagonal.
+- Observation: the selector latched `s_dialogueDirection` (so a held direction
+  did not repeat) but `ChooseDialogueDirection` tie-breaks by `|x| > |y|`, so a
+  stick resting on a diagonal (e.g. `0.62/0.60`) flips the dominant axis
+  frame-to-frame and re-taps two different selections. That violates #53's
+  "must not flicker at diagonal boundaries" criterion.
+- Change:
+  - `src/hook/dialogue_navigation.h`: added `DialogueNavigationState`,
+    `UpdateDialogueNavigation` (edge-triggered + axis hysteresis,
+    `kDialogueAxisSwitchMargin = 1.20f` ≈ 6° guard band), `ResetDialogueNavigation`.
+  - `src/hook/camera_hook.cpp`: dialogue block now gates on menu/dialogue
+    context, recentres below `deadzone * 0.55f`, and fires only the
+    edge-triggered output (preserves the `verify_reported_fixes.py` invariant).
+  - `tests/dialogue_navigation_tests.cpp`: added held-repeat suppression,
+    diagonal no-flicker, dominance-margin boundary, recentre re-arm, and
+    sub-deadzone cases.
+  - `docs/adr/0410-…md`: documented the revision under "Update — GH #53".
+- Evidence: `build\x64` and `build\x86` Release builds succeed (x86
+  `opengl32.dll` + x64 `riddickvr-host.exe`); CTest 3/3 passed on **both** x64
+  and x86; `tools/verify_reported_fixes.py` passed;
+  `tools/scenario_tests.py --check` passed.
+- **Coordination incident:** while this wake's edits were in progress, the
+  interactive session's commit `8d36d85` (`git add -A`) swept my
+  `dialogue_navigation.h` / `camera_hook.cpp` / test edits into `main` alongside
+  its `.xmd` parser work. I did **not** rewrite `main` (forbidden), so the code
+  half of this unit already lives on `main`; this branch carries the ADR + state
+  record for it. Future wakes: stage explicitly (`git add <paths>`) to avoid the
+  same sweep.
+- Next: #53 3.1 (resolve the left-Y Eyeshine binding conflict explicitly) or
+  3.2 (collider/target-based contextual interaction + documented proximity
+  fallback); otherwise, per the updated coordination note, #55 (decode MOS
+  geometry/skinning → real hand mesh).
+
 > **COORDINATION (updated):** the `.xmd` parser (`tools/mos_xmd.py`) and ADR-0413
 > are committed. Ghidra 12.1.4 is installed at
 > `C:\Users\GigelCastel\Tools\ghidra_12.1.4_PUBLIC` and `GHIDRA_INSTALL_DIR` is
