@@ -27,6 +27,8 @@ jobs:
         run: powershell -ExecutionPolicy Bypass -File ./tools/build-all.ps1 -Config Release
       - name: REA address-table self-test
         run: python tools/validate_addresses.py
+      - name: Hook-init regression test (GH #42)
+        run: python tools/verify_hook_init.py
       - name: Verify 368-symbol OpenGL forwarder table intact
         shell: powershell
         run: |

@@ -220,12 +220,14 @@ HGLRC WINAPI OpenGLProxy::Hook_wglCreateContext(HDC hdc) {
 }
 
 BOOL WINAPI OpenGLProxy::Hook_wglDeleteContext(HGLRC hglrc) {
+    RiddickVR_EnsureHookInitialized();
     VR_LOG_INFO("wglDeleteContext called for HGLRC: %p", hglrc);
     StereoRenderer::Instance().Shutdown();
     return real_wglDeleteContext ? real_wglDeleteContext(hglrc) : FALSE;
 }
 
 BOOL WINAPI OpenGLProxy::Hook_wglMakeCurrent(HDC hdc, HGLRC hglrc) {
+    RiddickVR_EnsureHookInitialized();
     BOOL result = real_wglMakeCurrent ? real_wglMakeCurrent(hdc, hglrc) : FALSE;
     if (result && hglrc != nullptr) {
         QueryContextExtensions();
@@ -235,11 +237,13 @@ BOOL WINAPI OpenGLProxy::Hook_wglMakeCurrent(HDC hdc, HGLRC hglrc) {
 }
 
 BOOL WINAPI OpenGLProxy::Hook_wglSwapBuffers(HDC hdc) {
+    RiddickVR_EnsureHookInitialized();
     StereoRenderer::Instance().OnSwapBuffers(hdc);
     return real_wglSwapBuffers ? real_wglSwapBuffers(hdc) : SwapBuffers(hdc);
 }
 
 PROC WINAPI OpenGLProxy::Hook_wglGetProcAddress(LPCSTR lpszProc) {
+    RiddickVR_EnsureHookInitialized();
     if (!lpszProc) return nullptr;
 
     PROC realProc = real_wglGetProcAddress ? real_wglGetProcAddress(lpszProc) : nullptr;
@@ -268,6 +272,7 @@ PROC WINAPI OpenGLProxy::Hook_wglGetProcAddress(LPCSTR lpszProc) {
 }
 
 void WINAPI OpenGLProxy::Hook_glViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
+    RiddickVR_EnsureHookInitialized();
     StereoRenderer::Instance().OnViewport(x, y, width, height);
     if (real_glViewport) {
         real_glViewport(x, y, width, height);
@@ -275,12 +280,14 @@ void WINAPI OpenGLProxy::Hook_glViewport(GLint x, GLint y, GLsizei width, GLsize
 }
 
 void WINAPI OpenGLProxy::Hook_glScissor(GLint x, GLint y, GLsizei width, GLsizei height) {
+    RiddickVR_EnsureHookInitialized();
     if (real_glScissor) {
         real_glScissor(x, y, width, height);
     }
 }
 
 void WINAPI OpenGLProxy::Hook_glMatrixMode(GLenum mode) {
+    RiddickVR_EnsureHookInitialized();
     s_currentMatrixMode = mode;
     if (real_glMatrixMode) {
         real_glMatrixMode(mode);
@@ -288,6 +295,7 @@ void WINAPI OpenGLProxy::Hook_glMatrixMode(GLenum mode) {
 }
 
 void WINAPI OpenGLProxy::Hook_glLoadMatrixf(const GLfloat *m) {
+    RiddickVR_EnsureHookInitialized();
     if (!m) return;
 
     if (s_currentMatrixMode == 0x1701 /* GL_PROJECTION */) {
@@ -345,6 +353,7 @@ void WINAPI OpenGLProxy::Hook_glLoadMatrixf(const GLfloat *m) {
 }
 
 void WINAPI OpenGLProxy::Hook_glFrustum(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble zNear, GLdouble zFar) {
+    RiddickVR_EnsureHookInitialized();
     VR_LOG_INFO("glFrustum called: L=%.2f R=%.2f B=%.2f T=%.2f Near=%.2f Far=%.2f", left, right, bottom, top, zNear, zFar);
     if (s_currentMatrixMode == 0x1701 /* GL_PROJECTION */) {
         memset(s_lastProjection, 0, sizeof(s_lastProjection));
@@ -367,6 +376,7 @@ void WINAPI OpenGLProxy::Hook_glFrustum(GLdouble left, GLdouble right, GLdouble 
 }
 
 void WINAPI OpenGLProxy::Hook_glOrtho(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble zNear, GLdouble zFar) {
+    RiddickVR_EnsureHookInitialized();
     if (s_currentMatrixMode == 0x1701 /* GL_PROJECTION */) {
         memset(s_lastProjection, 0, sizeof(s_lastProjection));
         s_lastProjection[0] = static_cast<float>(2.0 / (right - left));
@@ -384,12 +394,14 @@ void WINAPI OpenGLProxy::Hook_glOrtho(GLdouble left, GLdouble right, GLdouble bo
 }
 
 void WINAPI OpenGLProxy::Hook_glClear(GLbitfield mask) {
+    RiddickVR_EnsureHookInitialized();
     if (real_glClear) {
         real_glClear(mask);
     }
 }
 
 void WINAPI OpenGLProxy::Hook_glBindFramebuffer(GLenum target, GLuint framebuffer) {
+    RiddickVR_EnsureHookInitialized();
     if (real_glBindFramebuffer) {
         real_glBindFramebuffer(target, framebuffer);
     }
