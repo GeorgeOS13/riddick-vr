@@ -28,7 +28,10 @@ def clean_artifacts(artifacts_dir: Path):
             f.unlink()
         except Exception:
             pass
-    for f in artifacts_dir.glob("*.png"):
+    # Keep PNGs as run history (ammo analyzer + forensics score them later);
+    # cap retention to the 40 newest so the dir cannot grow unbounded.
+    pngs = sorted(artifacts_dir.glob("*.png"), key=lambda p: p.stat().st_mtime)
+    for f in pngs[:-40]:
         try:
             f.unlink()
         except Exception:
