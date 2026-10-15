@@ -1351,7 +1351,83 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             bool batonThroatThrustStrike = (s_pistolTrapTime > 0 && (now - s_pistolTrapTime < 500) && rVel.z < -1.20f);
 
-            if (batonThroatThrustStrike && (now - s_lastPistolDisarmTime > 1800)) {
+            // Inmate Pit Brawl Fireman's Carry & Deck Body-Spike Slam (ADR 0197)
+            static DWORD s_lastFiremansCarryTime = 0;
+            static DWORD s_firemansLoadTime = 0;
+            bool firemansLowDuck = (s_isPhysicallyCrouched || s_isDeepProne || leftLocal.y < -0.25f);
+            bool firemansUnderhookLoad = (handsDistSledge < 0.25f &&
+                                          vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
+                                          rVel.y > 1.10f && lVel.z > 0.70f);
+            if (firemansLowDuck && firemansUnderhookLoad && (now - s_lastFiremansCarryTime > 2000)) {
+                if (s_firemansLoadTime == 0) {
+                    s_firemansLoadTime = now;
+                    VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL FIREMAN'S CARRY LOADED (Ry: %.2f, Lz: %.2f)", rVel.y, lVel.z);
+                    vrState.leftHapticPulse = 0.90f;  // Heavy shoulder load strain (220 Hz)
+                    vrState.rightHapticPulse = 0.90f;
+                }
+            }
+            bool firemansWhipThrow = (s_firemansLoadTime > 0 && (now - s_firemansLoadTime < 500) &&
+                                      (fabsf(lVel.x) > 1.25f || fabsf(rVel.x) > 1.25f));
+
+            // Security Guard Stun Baton Forward Two-Handed Cross-Chest Block & Arc Thrust Disruption (ADR 0198)
+            static DWORD s_lastCrossThrustTime = 0;
+            static DWORD s_crossBlockHoldStart = 0;
+            bool crossChestGuardStance = (handsDistSledge > 0.20f && handsDistSledge < 0.38f &&
+                                          fabsf(rightLocal.x - leftLocal.x) > 0.22f &&
+                                          rightLocal.y > -0.15f && rightLocal.y < 0.15f &&
+                                          rightLocal.z > -0.30f && rightLocal.z < -0.10f &&
+                                          vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
+                                          vrState.leftController.trigger > 0.65f && vrState.rightController.trigger > 0.65f);
+            bool isCrossThrustReady = false;
+            if (crossChestGuardStance) {
+                if (s_crossBlockHoldStart == 0) s_crossBlockHoldStart = now;
+                if (now - s_crossBlockHoldStart >= 300) {
+                    vrState.leftHapticPulse = 0.65f;  // Electrostatic barrier hum (240 Hz)
+                    vrState.rightHapticPulse = 0.65f;
+                    if (rVel.z < -1.25f && lVel.z < -1.05f) {
+                        isCrossThrustReady = true;
+                    }
+                }
+            } else {
+                s_crossBlockHoldStart = 0;
+            }
+
+            if (isCrossThrustReady && (now - s_lastCrossThrustTime > 2000)) {
+                s_lastCrossThrustTime = now;
+                s_crossBlockHoldStart = 0;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Tactical Melee: STUN BATON CROSS-CHEST BLOCK & ARC THRUST DISRUPTION DISCHARGED");
+                mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
+                SendKey('W', true);
+                SendKey(VK_SPACE, true);
+                SendKey('Q', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('Q', false);
+                SendKey(VK_SPACE, false);
+                SendKey('W', false);
+                mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
+                vrState.rightHapticPulse = 0.98f; // High-voltage arc detonation blast (340 Hz)
+                vrState.leftHapticPulse = 0.98f;
+            } else if (firemansWhipThrow && (now - s_lastFiremansCarryTime > 2000)) {
+                s_lastFiremansCarryTime = now;
+                s_firemansLoadTime = 0;
+                s_lastPunchTime = now;
+                char throwDirKey = (rVel.x > 0.0f || lVel.x > 0.0f) ? 'D' : 'A';
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL FIREMAN'S CARRY SLAM EXECUTED (Dir: %c, ThrowX: %.2f)", throwDirKey, rVel.x);
+                SendKey('W', true);
+                SendKey(throwDirKey, true);
+                SendKey(VK_SPACE, true);
+                SendKey('C', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('C', false);
+                SendKey(VK_SPACE, false);
+                SendKey(throwDirKey, false);
+                SendKey('W', false);
+                vrState.leftHapticPulse = 0.98f;  // Body-spike mat shockwave (45 Hz)
+                vrState.rightHapticPulse = 0.98f;
+            } else if (batonThroatThrustStrike && (now - s_lastPistolDisarmTime > 1800)) {
                 s_lastPistolDisarmTime = now;
                 s_pistolTrapTime = 0;
                 s_lastPunchTime = now;
@@ -3922,6 +3998,41 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 }
             } else {
                 s_slagBurnStartTime = 0;
+            }
+
+            // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Alignment Drift Pin Punch (ADR 0195)
+            static DWORD s_lastDriftPinTime = 0;
+            bool handAtCollar = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
+                                 vrState.leftController.grip > 0.55f);
+            bool handAtPinPunch = (twoHandDist < 0.24f && vrState.rightController.grip > 0.60f);
+            bool driftPinDownwardStrike = (rVel.y < -1.15f);
+            if (handAtCollar && handAtPinPunch && driftPinDownwardStrike && (now - s_lastDriftPinTime > 1800)) {
+                s_lastDriftPinTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA TRUSS HINGE ALIGNED VIA DRIFT PIN MALLET PUNCH (Ry: %.2f)", rVel.y);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap(VK_TAB);
+                SendKeyTap(VK_SPACE);
+                vrState.rightHapticPulse = 0.98f; // Alloy pin punch shockwave (260 Hz)
+                vrState.leftHapticPulse = 0.65f;  // Mechanical lug alignment detent pop (140 Hz)
+            }
+
+            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Primary Air Swirl Vane Lever (ADR 0196)
+            static DWORD s_lastSwirlVaneTime = 0;
+            bool bothAtSwirlVanes = (twoHandDist > 0.20f && twoHandDist < 0.40f &&
+                                     leftLocal.z > -0.42f && leftLocal.z < -0.16f && rightLocal.z > -0.42f && rightLocal.z < -0.16f &&
+                                     leftLocal.y > -0.15f && leftLocal.y < 0.25f && rightLocal.y > -0.15f && rightLocal.y < 0.25f &&
+                                     vrState.leftController.grip > 0.55f && vrState.rightController.grip > 0.55f);
+            bool swirlVaneSweep = (fabsf(lVel.x) > 0.70f && fabsf(rVel.x) > 0.70f);
+            if (bothAtSwirlVanes && swirlVaneSweep && (now - s_lastSwirlVaneTime > 2000)) {
+                s_lastSwirlVaneTime = now;
+                VR_LOG_INFO("Environmental Gesture: HYDROPONICS INCINERATOR AIR SWIRL VANES ADJUSTED (Lx: %.2f, Rx: %.2f)", lVel.x, rVel.x);
+                SendKeyTap('E');
+                SendKeyTap('Q');
+                SendKeyTap(VK_TAB);
+                SendKeyTap(VK_RETURN);
+                vrState.rightHapticPulse = 0.90f; // Detent notch engagement click (240 Hz)
+                vrState.leftHapticPulse = 0.65f;  // Quadrant ratchet friction (150 Hz)
             }
         }
     }
