@@ -5,6 +5,10 @@
 
 namespace RiddickVR {
 
+// GH #33: forward decls (defined below with the input helpers).
+static void EnsureGameHwnd();
+static bool IsGameForeground();
+
 CameraHook& CameraHook::Instance() {
     static CameraHook s_instance;
     return s_instance;
@@ -15,6 +19,7 @@ bool CameraHook::Initialize() {
 
     m_moduleBase = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
     VR_LOG_INFO("Initializing CameraHook. Game module base: 0x%p", (void*)m_moduleBase);
+    EnsureGameHwnd(); // GH #33: cache game HWND for the foreground guard
 
     if (ScanForCameraSignature()) {
         VR_LOG_INFO("Camera structure identified in game memory!");
@@ -32,7 +37,52 @@ bool CameraHook::ScanForCameraSignature() {
 
 static HWND s_gameHwnd = nullptr;
 
+// GH #33: Foreground-focus guard. Input injection only reaches the game when
+// its window is foreground; fail-open while the HWND is still unknown (tests).
+static void EnsureGameHwnd() {
+    if ((!s_gameHwnd || !IsWindow(s_gameHwnd)) && GetForegroundWindow()) {
+        // Only latch once: the hook is injected into the game process, so the
+        // foreground window at init time is the game window.
+        if (!s_gameHwnd) s_gameHwnd = GetForegroundWindow();
+    }
+}
+
+static bool IsGameForeground() {
+    if (!s_gameHwnd || !IsWindow(s_gameHwnd)) return true;
+    return GetForegroundWindow() == s_gameHwnd;
+}
+
+// GH #33: Central SendInput-based mouse helpers (migration target for the
+// legacy mouse_event call sites). Relative moves; foreground-guarded.
+static void SendMouseMove(int dx, int dy) {
+    if ((dx == 0 && dy == 0) || !IsGameForeground()) return;
+    INPUT in = {};
+    in.type = INPUT_MOUSE;
+    in.mi.dx = dx;
+    in.mi.dy = dy;
+    in.mi.dwFlags = MOUSEEVENTF_MOVE;
+    SendInput(1, &in, sizeof(INPUT));
+}
+
+static void SendMouseClick(bool leftButton, bool isDown) {
+    if (!IsGameForeground()) return;
+    INPUT in = {};
+    in.type = INPUT_MOUSE;
+    in.mi.dwFlags = leftButton
+        ? (isDown ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP)
+        : (isDown ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP);
+    SendInput(1, &in, sizeof(INPUT));
+}
+
+// GH #32: Max-merge haptic helper. Concurrent gestures in one frame keep the
+// strongest pulse instead of last-writer-wins clobbering (client WriteState
+// also max-merges; full dispatch-queue conversion is follow-up).
+inline void MergeHaptic(float& slot, float v) {
+    if (v > slot) slot = v;
+}
+
 static void SendKey(WORD vk, bool isDown) {
+    if (!IsGameForeground()) return;
     UINT scan = MapVirtualKeyA(vk, MAPVK_VK_TO_VSC);
 
     // 1. DirectInput 8 Scan Code hardware event
@@ -258,6 +308,9 @@ static bool s_isAimingOrBlocking = false;
 static bool s_isPhysicalADS = false;
 static RiddickVRTrackedPose s_stabilizedAimPose{};
 static bool s_hasStabilizedPose = false;
+// GH #35: single eyeshine source of truth, toggled by all emitters (Button Y,
+// temple tap, EVA visor pull) and published once per frame at the end of Update.
+static bool s_eyeshineActive = false;
 
 void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (!m_initialized || !vrState.vrActive) return;
@@ -284,6 +337,13 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     static uint32_t s_prevButtons = 0;
     static bool s_wasIn3D = false;
 
+    // GH #37: edge-triggered recenter consume. The host emits a single-frame
+    // pulse (edge-detected); calibration blocks below react to the rising edge
+    // only so a held/level flag cannot recalibrate every frame.
+    static bool s_prevRecenterIn = false;
+    bool recenterEdge = vrState.shouldRecenter && !s_prevRecenterIn;
+    s_prevRecenterIn = vrState.shouldRecenter;
+
     bool has3D = OpenGLProxy::Has3DGameplayProjection();
 
     // Auto-transition into Full 3D VR Immersion the moment the game loads its 3D gameplay projection
@@ -296,14 +356,14 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // Completely removed legacy cinema toggle: Button Y NEVER switches POV or introduces black bars.
     if ((btns & RIDDICK_VR_BTN_Y) && !(s_prevButtons & RIDDICK_VR_BTN_Y)) {
         SendKeyTap('Q');
-        vrState.eyeshineActive = !vrState.eyeshineActive;
-        vrState.leftHapticPulse = 0.35f;
+        s_eyeshineActive = !s_eyeshineActive; // GH #35: toggle single source (published once below)
+        MergeHaptic(vrState.leftHapticPulse, 0.35f); // GH #32
         VR_LOG_INFO("Button Y: RIDDICK EYESHINE NIGHT VISION TOGGLED ('Q')");
     }
 
     // Unified Mode Discipline & Invariant Projection (ADR 0405, ADR 0409):
-    // Disable cinemaMode switching permanently: vrState.cinemaMode = false.
-    // Menus are rendered in native 16:9 directly into the eye buffer with zero POV switching, quad switching, or flashing.
+    // GH #18: cinema mode removed permanently (no branches, no POV switching).
+    // Menus render natively into the eye buffer; keep the invariant assignment.
     vrState.cinemaMode = false;
 
     // 0. Singularity-Free Relative Quaternion Head Tracking Look Input (ADR 0409)
@@ -338,7 +398,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             float deltaYaw = 0.0f;
             float deltaPitch = 0.0f;
 
-            if (!s_hasPrevHmdOrientation || vrState.shouldRecenter) {
+            if (!s_hasPrevHmdOrientation || recenterEdge) {
                 s_prevHmdX = qx;
                 s_prevHmdY = qy;
                 s_prevHmdZ = qz;
@@ -365,7 +425,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     dw = -dw;
                 }
 
-                // Small-angle approximation: theta ≈ 2 * sin(theta/2)
+                // Small-angle approximation: theta â‰ˆ 2 * sin(theta/2)
                 deltaYaw = 2.0f * dy;   // Pure local neck yaw around Y
                 deltaPitch = 2.0f * dx; // Pure local head pitch around X
                 // deltaRoll = 2.0f * dz; // Pure local roll around Z (completely decoupled)
@@ -532,8 +592,28 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     mouseDeltaY += -pullPitch * wPull * CONTROLLER_AIM_SENSITIVITY;
                 }
 
+                // GH #23: NaN/Inf guard + clamp (ADR 0409 look deltas). A corrupt
+                // quaternion/velocity must never inject runaway mouse deltas.
+                bool badLook = (mouseDeltaX != mouseDeltaX) || (mouseDeltaY != mouseDeltaY) ||
+                               (fabsf(mouseDeltaX) > 1e6f) || (fabsf(mouseDeltaY) > 1e6f);
+                if (badLook) {
+                    mouseDeltaX = 0.0f;
+                    mouseDeltaY = 0.0f;
+                    s_accumulatedLookX = 0.0f;
+                    s_accumulatedLookY = 0.0f;
+                } else {
+                    if (mouseDeltaX > 500.0f) mouseDeltaX = 500.0f;
+                    if (mouseDeltaX < -500.0f) mouseDeltaX = -500.0f;
+                    if (mouseDeltaY > 500.0f) mouseDeltaY = 500.0f;
+                    if (mouseDeltaY < -500.0f) mouseDeltaY = -500.0f;
+                }
+
                 s_accumulatedLookX += mouseDeltaX;
                 s_accumulatedLookY += mouseDeltaY;
+                if (s_accumulatedLookX > 500.0f) s_accumulatedLookX = 500.0f;
+                if (s_accumulatedLookX < -500.0f) s_accumulatedLookX = -500.0f;
+                if (s_accumulatedLookY > 500.0f) s_accumulatedLookY = 500.0f;
+                if (s_accumulatedLookY < -500.0f) s_accumulatedLookY = -500.0f;
 
                 int moveX = static_cast<int>(s_accumulatedLookX);
                 int moveY = static_cast<int>(s_accumulatedLookY);
@@ -541,7 +621,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 if (moveX != 0 || moveY != 0) {
                     s_accumulatedLookX -= moveX;
                     s_accumulatedLookY -= moveY;
-                    mouse_event(MOUSEEVENTF_MOVE, moveX, moveY, 0, 0);
+                    SendMouseMove(moveX, moveY); // GH #33: SendInput helper
                 }
 
             }
@@ -554,11 +634,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // 1. Adaptive Physical Crouch Detection & Dynamic Height Calibration (ADR 0004 & 0005)
     static bool s_isPhysicallyCrouched = false;
     static bool s_isDeepProne = false;
-    static bool s_eyeshineActive = false;
     static bool s_flashlightActive = false;
 
-    // Reset calibration on recenter request (e.g. via IPC flag)
-    if (vrState.shouldRecenter && vrState.hmdPose.isValid) {
+    // Reset calibration on recenter edge (GH #37, e.g. via IPC flag)
+    if (recenterEdge && vrState.hmdPose.isValid) {
         s_standingEyeHeight = vrState.hmdPose.position.y;
         VR_LOG_INFO("Standing eye height calibrated on recenter: %.2fm", s_standingEyeHeight);
     }
@@ -644,7 +723,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         float hmdX = vrState.hmdPose.position.x;
         float hmdZ = vrState.hmdPose.position.z;
 
-        if (!s_hasTorsoBase || vrState.shouldRecenter) {
+        if (!s_hasTorsoBase || recenterEdge) {
             s_torsoBaseX = hmdX;
             s_torsoBaseZ = hmdZ;
             s_hasTorsoBase = true;
@@ -736,7 +815,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         if (leftLocal.y > 0.32f && (leftLocal.z >= -0.55f && leftLocal.z <= -0.16f) && vrState.leftController.grip > 0.5f && leftTouchEngaged && !s_physicalBlockEngaged) {
             s_leftHoldingRung = true;
             VR_LOG_INFO("Physical Gesture: LADDER RUNG GRABBED (Left hand, Y: %.2fm, Z: %.2fm)", leftLocal.y, leftLocal.z);
-            vrState.leftHapticPulse = 0.35f;
+            MergeHaptic(vrState.leftHapticPulse, 0.35f); // GH #32
             SendKeyTap('E');
         }
     } else {
@@ -750,7 +829,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         if (rightLocal.y > 0.32f && (rightLocal.z >= -0.55f && rightLocal.z <= -0.16f) && vrState.rightController.grip > 0.5f && rightTouchEngaged && !s_physicalBlockEngaged) {
             s_rightHoldingRung = true;
             VR_LOG_INFO("Physical Gesture: LADDER RUNG GRABBED (Right hand, Y: %.2fm, Z: %.2fm)", rightLocal.y, rightLocal.z);
-            vrState.rightHapticPulse = 0.35f;
+            MergeHaptic(vrState.rightHapticPulse, 0.35f); // GH #32
             SendKeyTap('E');
         }
     } else {
@@ -770,8 +849,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         s_lastMantleTime = now;
         VR_LOG_INFO("Physical Gesture: TWO-HANDED MANTLE / LEDGE PULL executed");
         SendKeyTap(VK_SPACE);
-        vrState.leftHapticPulse = 0.60f;
-        vrState.rightHapticPulse = 0.60f;
+        MergeHaptic(vrState.leftHapticPulse, 0.60f); // GH #32
+        MergeHaptic(vrState.rightHapticPulse, 0.60f); // GH #32
     }
 
     // Inmate Bunk Overhead Pipe Chin-Up & Ledge Pull Stance (ADR 0090)
@@ -868,8 +947,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         s_nanoMedPalmActive = true;
         // Continuous restorative nanite injection haptic cadence (120 Hz pulse oscillation)
         float pulseAmp = 0.35f + 0.15f * sinf(static_cast<float>(now) * 0.015f);
-        if (leftScannerContact) vrState.leftHapticPulse = pulseAmp;
-        if (rightScannerContact) vrState.rightHapticPulse = pulseAmp;
+        if (leftScannerContact) MergeHaptic(vrState.leftHapticPulse, pulseAmp); // GH #32: NanoMED
+        if (rightScannerContact) MergeHaptic(vrState.rightHapticPulse, pulseAmp); // GH #32: NanoMED
     } else {
         s_nanoMedPalmActive = false;
     }
@@ -892,7 +971,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         float dirX = stickLX / moveMag;
         float dirY = stickLY / moveMag;
 
-        // Apply angular deadband around forward/backward axis (±25 degrees, sin(25°) ≈ 0.42)
+        // Apply angular deadband around forward/backward axis (Â±25 degrees, sin(25Â°) â‰ˆ 0.42)
         // This prevents unintentional sideways strafing drift when walking forward/backward
         constexpr float FORWARD_THRESHOLD = 0.35f;
         constexpr float STRAFE_THRESHOLD = 0.42f;
@@ -962,7 +1041,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
     // 4. Thumbstick Snap vs Smooth Turning Ergonomics & Input Hysteresis (ADR 0371)
     enum VRTurnMode {
-        VR_TURN_SNAP = 0,    // Discrete 45° snap turns with zero pre-snap crawl
+        VR_TURN_SNAP = 0,    // Discrete 45Â° snap turns with zero pre-snap crawl
         VR_TURN_SMOOTH = 1   // Continuous rotation with cubic acceleration curve
     };
     static VRTurnMode s_turnMode = VR_TURN_SNAP;
@@ -982,7 +1061,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     float stickX = vrState.rightController.thumbstickX;
 
     if (s_turnMode == VR_TURN_SNAP) {
-        // Pure Snap Turn: require deflection > 0.70f, trigger clean single 45° mouse delta
+        // Pure Snap Turn: require deflection > 0.70f, trigger clean single 45Â° mouse delta
         // CRITICAL: Absolutely no smooth mouse move during ramp-up or return to center!
         constexpr float SNAP_THRESHOLD = 0.70f;
         constexpr float RESET_THRESHOLD = 0.30f;
@@ -991,8 +1070,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (s_snapTurnArmed) {
                 s_snapTurnArmed = false;
                 int snapDelta = (stickX > 0.0f) ? 350 : -350;
-                mouse_event(MOUSEEVENTF_MOVE, snapDelta, 0, 0, 0);
-                vrState.rightHapticPulse = 0.25f; // Crisp tactile click on snap
+                SendMouseMove(snapDelta, 0); // GH #33: SendInput helper
+                MergeHaptic(vrState.rightHapticPulse, 0.25f); // GH #32: crisp tactile click on snap
             }
         } else if (fabsf(stickX) < RESET_THRESHOLD) {
             s_snapTurnArmed = true;
@@ -1005,45 +1084,68 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         if (fabsf(stickX) > SMOOTH_DEADZONE) {
             float norm = (fabsf(stickX) - SMOOTH_DEADZONE) / (1.0f - SMOOTH_DEADZONE);
             float curvedSpeed = norm * norm * 20.0f; // Smooth progressive velocity
+            // GH #23: guard corrupt stick input before accumulation.
+            if (curvedSpeed != curvedSpeed || fabsf(curvedSpeed) > 1e6f) {
+                curvedSpeed = 0.0f;
+                s_accumulatedSmoothTurnX = 0.0f;
+            }
             s_accumulatedSmoothTurnX += std::copysign(curvedSpeed, stickX);
+            if (s_accumulatedSmoothTurnX > 500.0f) s_accumulatedSmoothTurnX = 500.0f;
+            if (s_accumulatedSmoothTurnX < -500.0f) s_accumulatedSmoothTurnX = -500.0f;
             int deltaX = static_cast<int>(s_accumulatedSmoothTurnX);
             if (deltaX != 0) {
                 s_accumulatedSmoothTurnX -= deltaX;
-                mouse_event(MOUSEEVENTF_MOVE, deltaX, 0, 0, 0);
+                SendMouseMove(deltaX, 0); // GH #33: SendInput helper
             }
         } else {
             s_accumulatedSmoothTurnX = 0.0f;
         }
     }
 
-    // 4b. Dialogue & Menu Selection Navigation via Right Thumbstick Y (ADR 0410)
+    // 4b. Dialogue & Menu Selection Navigation via Thumbstick Y (ADR 0410, GH #39)
     // In VR, vertical right-stick deflection is unused for camera pitch (head pitch is 1:1 physically tracked).
-    // Mapping right stick Y deflection to VK_UP / VK_DOWN provides intuitive dialogue choice selection
+    // Mapping stick Y deflection to VK_UP / VK_DOWN provides intuitive dialogue choice selection
     // and inventory navigation without interfering with locomotion or camera look.
+    // GH #39: gated behind menu/dialogue state (no 3D gameplay projection OR
+    // OS cursor visible) so right-stick Y never leaks arrows during gameplay;
+    // left-stick Y restored as an OR source for menu navigation.
     {
         static bool s_stickYUpArmed = true, s_stickYDownArmed = true;
+        bool menuMode = !has3D || cursorShowing;
         float stickRY = vrState.rightController.thumbstickY;
+        float stickLY = vrState.leftController.thumbstickY;
+        float navY = (fabsf(stickLY) > fabsf(stickRY)) ? stickLY : stickRY;
         constexpr float MENU_STICK_THRESHOLD = 0.50f;
 
-        if (stickRY > MENU_STICK_THRESHOLD) {
+        if (!menuMode) {
+            s_stickYUpArmed = true;
+            s_stickYDownArmed = true;
+        } else if (navY > MENU_STICK_THRESHOLD) {
             if (s_stickYUpArmed) {
                 s_stickYUpArmed = false;
                 SendKeyTap(VK_UP);
                 vrState.rightHapticPulse = 0.20f;
             }
-        } else if (stickRY < -MENU_STICK_THRESHOLD) {
+        } else if (navY < -MENU_STICK_THRESHOLD) {
             if (s_stickYDownArmed) {
                 s_stickYDownArmed = false;
                 SendKeyTap(VK_DOWN);
                 vrState.rightHapticPulse = 0.20f;
             }
-        } else if (fabsf(stickRY) < 0.25f) {
+        } else if (fabsf(navY) < 0.25f) {
             s_stickYUpArmed = true;
             s_stickYDownArmed = true;
         }
     }
 
     static DWORD s_lastPunchTime = 0;
+    // GH #31: namespaced finisher cooldown. Choreographed finisher dispatches
+    // stamp this instead of s_lastPunchTime so they no longer extend the
+    // reactive melee gate / guard recovery window (cross-talk).
+    static DWORD s_lastFinisherTime = 0;
+    // GH #31: per-frame arbitration snapshots (set before melee, read after).
+    DWORD punchAtEntry = s_lastPunchTime;
+    DWORD finisherAtEntry = s_lastFinisherTime;
     static DWORD s_guardPoseHoldTimer = 0;
     static DWORD s_guardPoseReleaseTimer = 0;
     static bool s_currentBlockEngaged = false;
@@ -1266,6 +1368,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             bool dartCounterJabStrike = (s_dartExtractedTime > 0 && (now - s_dartExtractedTime < 800) &&
                                         rVel.z < -1.15f && rightLocal.y > -0.10f && rightLocal.y < 0.22f);
+            if (s_dartExtractedTime != 0 && (now - s_dartExtractedTime >= 800)) s_dartExtractedTime = 0; // GH #25: timeout reset
 
             // Inmate Pit Brawl Double-Ear Concussive Clap Strike (ADR 0128)
             static DWORD s_lastDoubleEarClapTime = 0;
@@ -1302,6 +1405,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 }
             }
             bool blindRiposteStrike = (s_eyeRubWipeTime > 0 && (now - s_eyeRubWipeTime < 600) && rVel.z < -1.15f);
+            if (s_eyeRubWipeTime != 0 && (now - s_eyeRubWipeTime >= 600)) s_eyeRubWipeTime = 0; // GH #25: timeout reset
 
             // Inmate Pit Brawl Shin Kick & Knee Stomp Hyper-Extension (ADR 0141)
             static DWORD s_lastKneeStompTime = 0;
@@ -1343,6 +1447,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 }
             }
             bool sternumElbowSmash = (s_liverHookTime > 0 && (now - s_liverHookTime < 500) && rVel.y < -1.20f);
+            if (s_liverHookTime != 0 && (now - s_liverHookTime >= 500)) s_liverHookTime = 0; // GH #25: timeout reset
 
             // Security Guard Stun Baton Charged Underarm Spear Thrust (ADR 0146)
             static DWORD s_lastSpearThrustTime = 0;
@@ -1428,6 +1533,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 }
             }
             bool cervicalSnapWhip = (s_palmChinStrikeTime > 0 && (now - s_palmChinStrikeTime < 500) && fabsf(lVel.x) > 1.10f);
+            if (s_palmChinStrikeTime != 0 && (now - s_palmChinStrikeTime >= 500)) s_palmChinStrikeTime = 0; // GH #25: timeout reset
 
             // Security Guard Stun Baton Dual-Hand Ground Discharge Kinetic Shockwave (ADR 0162)
             static DWORD s_lastBatonGroundShockTime = 0;
@@ -1450,6 +1556,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 }
             }
             bool guillotineWrapStrike = (s_snapdownStartTime > 0 && (now - s_snapdownStartTime < 500) && rVel.y > 1.05f && rVel.z < -0.75f);
+            if (s_snapdownStartTime != 0 && (now - s_snapdownStartTime >= 500)) s_snapdownStartTime = 0; // GH #25: timeout reset
 
             // Security Guard Stun Baton Charged High-Arc Downward Skull Breaker (ADR 0166)
             static DWORD s_lastSkullBreakerTime = 0;
@@ -1476,6 +1583,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 }
             }
             bool hammerfistStrike = (s_shinTrapTime > 0 && (now - s_shinTrapTime < 500) && rVel.y < -1.30f);
+            if (s_shinTrapTime != 0 && (now - s_shinTrapTime >= 500)) s_shinTrapTime = 0; // GH #25: timeout reset
 
             // Inmate Pit Brawl Underhook Suplex & Spine Slam (ADR 0173)
             static DWORD s_lastSuplexSlamTime = 0;
@@ -1491,6 +1599,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 }
             }
             bool suplexSpineSlam = (s_suplexHoistTime > 0 && (now - s_suplexHoistTime < 500) && lVel.y < -1.20f && rVel.y < -1.20f);
+            if (s_suplexHoistTime != 0 && (now - s_suplexHoistTime >= 500)) s_suplexHoistTime = 0; // GH #25: timeout reset
 
             // Security Guard Stun Baton Dual-Hand Cross-Block Reactive Arc Burst (ADR 0174)
             static DWORD s_lastCrossArcBurstTime = 0;
@@ -1590,6 +1699,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             bool batonTripSweep = (s_batonJabTime > 0 && (now - s_batonJabTime < 500) &&
                                    rVel.y < -1.10f && fabsf(rVel.x) > 0.80f);
+            if (s_batonJabTime != 0 && (now - s_batonJabTime >= 500)) s_batonJabTime = 0; // GH #25: timeout reset
 
             // Inmate Pit Brawl Double-Leg Takedown & High-Amplitude Mat Slam (ADR 0193)
             static DWORD s_lastDoubleLegSlamTime = 0;
@@ -1608,6 +1718,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             bool doubleLegSpikeSlam = (s_doubleLegLiftTime > 0 && (now - s_doubleLegLiftTime < 500) &&
                                        lVel.y < -1.30f && rVel.y < -1.30f);
+            if (s_doubleLegLiftTime != 0 && (now - s_doubleLegLiftTime >= 500)) s_doubleLegLiftTime = 0; // GH #25: timeout reset
 
             // Security Guard Stun Baton Forward Two-Handed Cross-Pistol Disarm & Neck Strike (ADR 0194)
             static DWORD s_lastPistolDisarmTime = 0;
@@ -1626,6 +1737,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 }
             }
             bool batonThroatThrustStrike = (s_pistolTrapTime > 0 && (now - s_pistolTrapTime < 500) && rVel.z < -1.20f);
+            if (s_pistolTrapTime != 0 && (now - s_pistolTrapTime >= 500)) s_pistolTrapTime = 0; // GH #25: timeout reset
 
             // Inmate Pit Brawl Fireman's Carry & Deck Body-Spike Slam (ADR 0197)
             static DWORD s_lastFiremansCarryTime = 0;
@@ -1644,6 +1756,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             bool firemansWhipThrow = (s_firemansLoadTime > 0 && (now - s_firemansLoadTime < 500) &&
                                       (fabsf(lVel.x) > 1.25f || fabsf(rVel.x) > 1.25f));
+            if (s_firemansLoadTime != 0 && (now - s_firemansLoadTime >= 500)) s_firemansLoadTime = 0; // GH #25: timeout reset
 
             // Inmate Pit Brawl Standing Front Headlock & Guillotine Neck Crack (ADR 0205)
             static DWORD s_lastFrontHeadlockTime = 0;
@@ -1670,6 +1783,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 }
             }
             bool crossParryRiposte = (s_crossParryDeflectTime > 0 && (now - s_crossParryDeflectTime < 500) && rVel.z < -1.25f);
+            if (s_crossParryDeflectTime != 0 && (now - s_crossParryDeflectTime >= 500)) s_crossParryDeflectTime = 0; // GH #25: timeout reset
 
             // Inmate Pit Brawl Suloev Stretch Hamstring Submission Lock (ADR 0201)
             static DWORD s_lastSuloevTime = 0;
@@ -2550,6 +2664,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 }
             }
             bool outsideLegKneeDrop = (s_outsideLegSweepHookTime > 0 && (now - s_outsideLegSweepHookTime < 500) && rVel.y < -1.25f);
+            if (s_outsideLegSweepHookTime != 0 && (now - s_outsideLegSweepHookTime >= 500)) s_outsideLegSweepHookTime = 0; // GH #25: timeout reset
 
             // Security Guard Stun Baton Forward Two-Handed Cross-Chest Block & Arc Thrust Disruption (ADR 0198 & 0210)
             static DWORD s_lastCrossThrustTime = 0;
@@ -2584,7 +2699,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
             if (plasmaUniversalSingularityPlunge && (now - s_lastPlasmaUniversalSingularityTime > 2000)) {
                 s_lastPlasmaUniversalSingularityTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM UNIVERSAL SINGULARITY OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -2703,7 +2818,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
             if (cranialFulcrumZygomaticPinPlunge && (now - s_lastCranialFulcrumZygomaticPinTime > 2000)) {
                 s_lastCranialFulcrumZygomaticPinTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST FULCRUM ZYGOMATIC PIN EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialFulcrumZygomaticPinDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
                 SendKey(s_cranialFulcrumZygomaticPinDirKey, true);
@@ -2750,7 +2865,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
             if (plasmaMacrocosmSingularityPlunge && (now - s_lastPlasmaMacrocosmSingularityTime > 2000)) {
                 s_lastPlasmaMacrocosmSingularityTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM MACROCOSM SINGULARITY OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -2865,7 +2980,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
             if (cranialFulcrumMandiblePinPlunge && (now - s_lastCranialFulcrumMandiblePinTime > 2000)) {
                 s_lastCranialFulcrumMandiblePinTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST FULCRUM MANDIBLE PIN EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialFulcrumMandiblePinDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
                 SendKey(s_cranialFulcrumMandiblePinDirKey, true);
@@ -2910,7 +3025,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
             if (plasmaTransCosmicSingularityPlunge && (now - s_lastPlasmaTransCosmicSingularityTime > 2000)) {
                 s_lastPlasmaTransCosmicSingularityTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM TRANS-COSMIC SINGULARITY OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -3021,7 +3136,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
             if (cranialFulcrumSternumPinPlunge && (now - s_lastCranialFulcrumSternumPinTime > 2000)) {
                 s_lastCranialFulcrumSternumPinTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST FULCRUM STERNUM PIN EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialFulcrumSternumPinDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
                 SendKey(s_cranialFulcrumSternumPinDirKey, true);
@@ -3064,7 +3179,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
             if (plasmaOmniverseSingularityPlunge && (now - s_lastPlasmaOmniverseSingularityTime > 2000)) {
                 s_lastPlasmaOmniverseSingularityTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM OMNIVERSE SINGULARITY OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -3168,7 +3283,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (cranialFulcrumScapulaPinPlunge && (now - s_lastCranialFulcrumScapulaPinTime > 2000)) {
                 s_lastCranialFulcrumScapulaPinTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST FULCRUM SCAPULA PIN EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialFulcrumScapulaPinDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
                 SendKey(s_cranialFulcrumScapulaPinDirKey, true);
@@ -3209,7 +3324,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
             if (plasmaMultiverseSingularityPlunge && (now - s_lastPlasmaMultiverseSingularityTime > 2000)) {
                 s_lastPlasmaMultiverseSingularityTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM MULTIVERSE SINGULARITY OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -3305,7 +3420,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (cranialFulcrumClaviclePinPlunge && (now - s_lastCranialFulcrumClaviclePinTime > 2000)) {
                 s_lastCranialFulcrumClaviclePinTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST FULCRUM CLAVICLE PIN EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialFulcrumClaviclePinDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
                 SendKey(s_cranialFulcrumClaviclePinDirKey, true);
@@ -3344,7 +3459,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
             if (plasmaContinuumSingularityPlunge && (now - s_lastPlasmaContinuumSingularityTime > 2000)) {
                 s_lastPlasmaContinuumSingularityTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM CONTINUUM SINGULARITY OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -3432,7 +3547,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (cranialFulcrumRibSlamPlunge && (now - s_lastCranialFulcrumRibSlamTime > 2000)) {
                 s_lastCranialFulcrumRibSlamTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST FULCRUM RIBCAGE SLAM EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialFulcrumRibSlamDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
                 SendKey(s_cranialFulcrumRibSlamDirKey, true);
@@ -3469,7 +3584,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
             if (plasmaInterdimensionalPlunge && (now - s_lastPlasmaInterdimensionalTime > 2000)) {
                 s_lastPlasmaInterdimensionalTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM INTERDIMENSIONAL OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -3551,7 +3666,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (cranialFulcrumKneePlunge && (now - s_lastCranialFulcrumKneeTime > 2000)) {
                 s_lastCranialFulcrumKneeTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST FULCRUM KNEE EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialFulcrumKneeDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
                 SendKey(s_cranialFulcrumKneeDirKey, true);
@@ -3588,7 +3703,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
             if (plasmaTransdimensionalPlunge && (now - s_lastPlasmaTransdimensionalTime > 2000)) {
                 s_lastPlasmaTransdimensionalTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM TRANSDIMENSIONAL OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -3666,7 +3781,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (cranialFulcrumArmbarPlunge && (now - s_lastCranialFulcrumArmbarTime > 2000)) {
                 s_lastCranialFulcrumArmbarTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST FULCRUM ARMBAR EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialFulcrumArmbarDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
                 SendKey(s_cranialFulcrumArmbarDirKey, true);
@@ -3701,7 +3816,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
             if (plasmaHyperdimensionalPlunge && (now - s_lastPlasmaHyperdimensionalTime > 2000)) {
                 s_lastPlasmaHyperdimensionalTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM HYPERDIMENSIONAL OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -3775,7 +3890,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (cranialFulcrumChokePlunge && (now - s_lastCranialFulcrumChokeTime > 2000)) {
                 s_lastCranialFulcrumChokeTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST FULCRUM CHOKE EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialFulcrumChokeDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
                 SendKey(s_cranialFulcrumChokeDirKey, true);
@@ -3808,7 +3923,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
             if (plasmaMetaversePlunge && (now - s_lastPlasmaMetaverseTime > 2000)) {
                 s_lastPlasmaMetaverseTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM METAVERSE OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -3874,7 +3989,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (cranialLeverPinPlunge && (now - s_lastCranialLeverPinTime > 2000)) {
                 s_lastCranialLeverPinTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST LEVER PIN EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialLeverPinDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
                 SendKey(s_cranialLeverPinDirKey, true);
@@ -3905,7 +4020,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
             if (plasmaOmniversePlunge && (now - s_lastPlasmaOmniverseTime > 2000)) {
                 s_lastPlasmaOmniverseTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM OMNIVERSE OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -3971,7 +4086,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (cranialPivotSlamPlunge && (now - s_lastCranialPivotSlamTime > 2000)) {
                 s_lastCranialPivotSlamTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST PIVOT SLAM EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialPivotSlamDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
                 SendKey(s_cranialPivotSlamDirKey, true);
@@ -3999,7 +4114,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (plasmaSuperclusterPlunge && (now - s_lastPlasmaSuperclusterTime > 2000)) {
                 s_lastPlasmaSuperclusterTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM SUPERCLUSTER OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -4061,7 +4176,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (cranialPivotTwistPlunge && (now - s_lastCranialPivotTwistTime > 2000)) {
                 s_lastCranialPivotTwistTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST PIVOT TWIST EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialPivotTwistDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
                 SendKey(s_cranialPivotTwistDirKey, true);
@@ -4085,7 +4200,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (plasmaCosmicDawnPlunge && (now - s_lastPlasmaCosmicDawnTime > 2000)) {
                 s_lastPlasmaCosmicDawnTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM COSMIC DAWN OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -4145,7 +4260,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (cranialDoubleStrikePlunge && (now - s_lastCranialDoubleStrikeTime > 2000)) {
                 s_lastCranialDoubleStrikeTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST DOUBLE STRIKE EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialDoubleStrikeDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
                 SendKey(s_cranialDoubleStrikeDirKey, true);
@@ -4167,7 +4282,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (plasmaBigBangPlunge && (now - s_lastPlasmaBigBangTime > 2000)) {
                 s_lastPlasmaBigBangTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM BIG BANG OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -4223,7 +4338,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (cranialStompPlunge && (now - s_lastCranialStompTime > 2000)) {
                 s_lastCranialStompTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL DECK STOMP EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialStompDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
                 SendKey(s_cranialStompDirKey, true);
@@ -4243,7 +4358,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (plasmaGenesisPlunge && (now - s_lastPlasmaGenesisTime > 2000)) {
                 s_lastPlasmaGenesisTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM GENESIS OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -4295,7 +4410,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (cranialPostImpactPlunge && (now - s_lastCranialPostImpactTime > 2000)) {
                 s_lastCranialPostImpactTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST IMPACT SLAM EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialPostImpactDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
                 SendKey(s_cranialPostImpactDirKey, true);
@@ -4313,7 +4428,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (plasmaSingularityOverdrivePlunge && (now - s_lastPlasmaSingularityOverdriveTime > 2000)) {
                 s_lastPlasmaSingularityOverdriveTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM SINGULARITY OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -4363,7 +4478,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (cranialGrindPlunge && (now - s_lastCranialGrindTime > 2000)) {
                 s_lastCranialGrindTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL GRATING GRIND EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialGrindDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
                 SendKey(s_cranialGrindDirKey, true);
@@ -4381,7 +4496,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (plasmaHypernovaPlunge && (now - s_lastPlasmaHypernovaTime > 2000)) {
                 s_lastPlasmaHypernovaTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM HYPERNOVA EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -4429,7 +4544,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (cervicalDeckPinPlunge && (now - s_lastCervicalDeckPinTime > 2000)) {
                 s_lastCervicalDeckPinTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CERVICAL DECK PIN SPIKE EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cervicalDeckPinDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
                 SendKey(s_cervicalDeckPinDirKey, true);
@@ -4447,7 +4562,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (plasmaSupernovaPlunge && (now - s_lastPlasmaSupernovaTime > 2000)) {
                 s_lastPlasmaSupernovaTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM SUPERNOVA EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -4493,7 +4608,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (sternumKneeSpikePlunge && (now - s_lastSternumKneeSpikeTime > 2000)) {
                 s_lastSternumKneeSpikeTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER STERNUM KNEE SPIKE EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_sternumKneeSpikeDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
                 SendKey(s_sternumKneeSpikeDirKey, true);
@@ -4511,7 +4626,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (plasmaSingularityPlunge && (now - s_lastPlasmaSingularityTime > 2000)) {
                 s_lastPlasmaSingularityTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM SINGULARITY EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -4553,7 +4668,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (cranialDeckDriverPlunge && (now - s_lastCranialDeckDriverTime > 2000)) {
                 s_lastCranialDeckDriverTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL DECK DRIVER EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialDeckDriverDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
                 SendKey(s_cranialDeckDriverDirKey, true);
@@ -4571,7 +4686,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (plasmaCataclysmOverdrivePlunge && (now - s_lastPlasmaCataclysmOverdriveTime > 2000)) {
                 s_lastPlasmaCataclysmOverdriveTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -4609,7 +4724,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (sternumElbowDropPlunge && (now - s_lastSternumElbowDropTime > 2000)) {
                 s_lastSternumElbowDropTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER STERNUM ELBOW DROP EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_sternumElbowDropDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
                 SendKey(s_sternumElbowDropDirKey, true);
@@ -4627,7 +4742,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (plasmaCataclysmPlunge && (now - s_lastPlasmaCataclysmTime > 2000)) {
                 s_lastPlasmaCataclysmTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -4661,7 +4776,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (thoracicPinLockThrow && (now - s_lastThoracicPinLockTime > 2000)) {
                 s_lastThoracicPinLockTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER THORACIC PIN LOCK EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_thoracicPinLockDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
                 SendKey(s_thoracicPinLockDirKey, true);
@@ -4679,7 +4794,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (plasmaSeismOverdrivePlunge && (now - s_lastPlasmaSeismOverdriveTime > 2000)) {
                 s_lastPlasmaSeismOverdriveTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT SEISM OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -4711,7 +4826,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (thoracicMatSlamThrow && (now - s_lastThoracicMatSlamTime > 2000)) {
                 s_lastThoracicMatSlamTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER THORACIC MAT SLAM EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_thoracicMatSlamDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
                 SendKey(s_thoracicMatSlamDirKey, true);
@@ -4729,7 +4844,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (plasmaResonantSeismPlunge && (now - s_lastPlasmaResonantSeismTime > 2000)) {
                 s_lastPlasmaResonantSeismTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT SEISM EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -4759,7 +4874,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (thoracicDislocationThrow && (now - s_lastThoracicDislocationTime > 2000)) {
                 s_lastThoracicDislocationTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER THORACIC DISLOCATION EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_thoracicDislocationDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
                 SendKey(s_thoracicDislocationDirKey, true);
@@ -4777,7 +4892,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (plasmaHarmonicQuakePlunge && (now - s_lastPlasmaHarmonicQuakeTime > 2000)) {
                 s_lastPlasmaHarmonicQuakeTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA HARMONIC DECK QUAKE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -4805,7 +4920,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (hyperextensionFinisherThrow && (now - s_lastHyperextensionFinisherTime > 2000)) {
                 s_lastHyperextensionFinisherTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER HYPEREXTENSION FINISHER EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_hyperextensionFinisherDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
                 SendKey(s_hyperextensionFinisherDirKey, true);
@@ -4823,7 +4938,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (plasmaResonantWavePlunge && (now - s_lastPlasmaResonantWaveTime > 2000)) {
                 s_lastPlasmaResonantWaveTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT DETONATION EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -4849,7 +4964,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (cervicalGratingSlamThrow && (now - s_lastCervicalGratingSlamTime > 2000)) {
                 s_lastCervicalGratingSlamTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CERVICAL GRATING SLAM EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cervicalGratingSlamDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
                 SendKey(s_cervicalGratingSlamDirKey, true);
@@ -4867,7 +4982,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (plasmaOverloadWavePlunge && (now - s_lastPlasmaOverloadWaveTime > 2000)) {
                 s_lastPlasmaOverloadWaveTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA OVERLOAD WAVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -4891,7 +5006,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (sternumGratingSlamThrow && (now - s_lastSternumGratingSlamTime > 2000)) {
                 s_lastSternumGratingSlamTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER STERNUM GRATING SLAM EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_sternumGratingSlamDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
                 SendKey(s_sternumGratingSlamDirKey, true);
@@ -4909,7 +5024,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (plasmaCleaveWavePlunge && (now - s_lastPlasmaCleaveWaveTime > 2000)) {
                 s_lastPlasmaCleaveWaveTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA CLEAVE WAVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -4931,7 +5046,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (sternumFractureSpikeThrow && (now - s_lastSternumFractureSpikeTime > 2000)) {
                 s_lastSternumFractureSpikeTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER STERNUM FRACTURE SPIKE EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_sternumFractureSpikeDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
                 SendKey(s_sternumFractureSpikeDirKey, true);
@@ -4949,7 +5064,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (kineticPulseWavePlunge && (now - s_lastKineticPulseWaveTime > 2000)) {
                 s_lastKineticPulseWaveTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL KINETIC PULSE WAVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -4969,7 +5084,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (sternumKneeDropThrow && (now - s_lastSternumKneeDropTime > 2000)) {
                 s_lastSternumKneeDropTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER STERNUM KNEE DROP EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_sternumKneeDropDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
                 SendKey(s_sternumKneeDropDirKey, true);
@@ -4987,7 +5102,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (omnidirectionalPulsePlunge && (now - s_lastOmnidirectionalPulseTime > 2000)) {
                 s_lastOmnidirectionalPulseTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL DECK ARC PULSE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -5007,7 +5122,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (whizzerGroundDislocationThrow && (now - s_lastWhizzerGroundDislocationTime > 2000)) {
                 s_lastWhizzerGroundDislocationTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER GROUND DISLOCATION EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_whizzerGroundDislocationDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
                 SendKey(s_whizzerGroundDislocationDirKey, true);
@@ -5025,7 +5140,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (omnidirectionalArcPlunge && (now - s_lastOmnidirectionalArcTime > 2000)) {
                 s_lastOmnidirectionalArcTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL DECK ARC EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -5043,7 +5158,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (whizzerGroundFinisherThrow && (now - s_lastWhizzerGroundFinisherTime > 2000)) {
                 s_lastWhizzerGroundFinisherTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER GROUND FINISHER EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_whizzerGroundFinisherDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
                 SendKey(s_whizzerGroundFinisherDirKey, true);
@@ -5061,7 +5176,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (deckImpactPlunge && (now - s_lastDeckImpactTime > 2000)) {
                 s_lastDeckImpactTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON VAULT CONCUSSIVE DECK IMPACT EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -5079,7 +5194,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (hyperextensionSpikeThrow && (now - s_lastHyperextensionSpikeTime > 2000)) {
                 s_lastHyperextensionSpikeTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL HYPEREXTENSION MAT SPIKE EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_hyperextensionSpikeDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
                 SendKey(s_hyperextensionSpikeDirKey, true);
@@ -5097,7 +5212,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (vaultKineticCleavePlunge && (now - s_lastVaultKineticCleaveTime > 2000)) {
                 s_lastVaultKineticCleaveTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON VAULT KINETIC CLEAVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -5115,7 +5230,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (thoracicSlamThrow && (now - s_lastThoracicSlamTime > 2000)) {
                 s_lastThoracicSlamTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL THORACIC GRATING SLAM EXECUTED (Dir: %c, Ry: %.2f, Lx: %.2f)", s_thoracicSlamDirKey, rVel.y, lVel.x);
                 SendKey('W', true);
                 SendKey(s_thoracicSlamDirKey, true);
@@ -5133,7 +5248,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (vaultGroundArcPlunge && (now - s_lastVaultGroundArcTime > 2000)) {
                 s_lastVaultGroundArcTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON VAULT JUMP GROUND ARC EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -5151,7 +5266,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (cervicalSpikeThrow && (now - s_lastCervicalSpikeTime > 2000)) {
                 s_lastCervicalSpikeTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL CERVICAL MAT SPIKE EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cervicalSpikeDirKey, rVel.y, lVel.y);
                 SendKey('W', true);
                 SendKey(s_cervicalSpikeDirKey, true);
@@ -5169,7 +5284,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (cleaveArcBlastStrike && (now - s_lastCleaveArcBlastTime > 2000)) {
                 s_lastCleaveArcBlastTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON TWO-HANDED CLEAVE & ARC BLAST EXECUTED (Ry: %.2f, Rz: %.2f)", rVel.y, rVel.z);
                 SendKey('S', true);
                 SendKey('W', true);
@@ -5187,7 +5302,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (whizzerCounterThrow && (now - s_lastWhizzerCounterTime > 2000)) {
                 s_lastWhizzerCounterTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER COUNTER-THROW EXECUTED (Dir: %c, Ry: %.2f, Lx: %.2f)", s_whizzerCounterDirKey, rVel.y, lVel.x);
                 SendKey('W', true);
                 SendKey(s_whizzerCounterDirKey, true);
@@ -5205,7 +5320,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (kineticCleaveSwing && (now - s_lastKineticCleaveTime > 2000)) {
                 s_lastKineticCleaveTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON KINETIC CLEAVE & SHOCKWAVE STUN STRUCK (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey('S', true);
                 SendKey('W', true);
@@ -5221,7 +5336,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (lateralSuplexThrow && (now - s_lastLateralSuplexTime > 2000)) {
                 s_lastLateralSuplexTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL LATERAL SUPLEX EXECUTED (Dir: %c, Ry: %.2f, Rx: %.2f)", s_lateralSuplexDirKey, rVel.y, rVel.x);
                 SendKey('W', true);
                 SendKey(s_lateralSuplexDirKey, true);
@@ -5239,7 +5354,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (groundingThrustLunge && (now - s_lastGroundingThrustTime > 2000)) {
                 s_lastGroundingThrustTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON GROUNDING THRUST & ARC RING EXECUTED (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
                 SendKey('C', true);
                 SendKey('W', true);
@@ -5257,7 +5372,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (thaiPlumElbowPlunge && (now - s_lastThaiPlumElbowTime > 2000)) {
                 s_lastThaiPlumElbowTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL THAI PLUM ELBOW SPIKE STRUCK (Dir: %c, Ry: %.2f)", s_thaiPlumElbowDirKey, rVel.y);
                 SendKey('W', true);
                 SendKey(s_thaiPlumElbowDirKey, true);
@@ -5273,7 +5388,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (batonShieldBashThrust && (now - s_lastBatonBashTime > 2000)) {
                 s_lastBatonBashTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON KINETIC SHIELD BASH & ARC BURST EXECUTED (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -5289,7 +5404,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (hipTossRotation && (now - s_lastHipTossTime > 2000)) {
                 s_lastHipTossTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL DOUBLE UNDERHOOK HIP TOSS EXECUTED (Dir: %c, DeltaVx: %.2f)", s_hipTossDirKey, rVel.x - lVel.x);
                 SendKey('W', true);
                 SendKey(s_hipTossDirKey, true);
@@ -5307,7 +5422,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (batonHammerfistPlunge && (now - s_lastHammerfistTime > 2000)) {
                 s_lastHammerfistTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON KINETIC HAMMERFIST DECK STRIKE EXECUTED (Ry: %.2f, Rz: %.2f)", rVel.y, rVel.z);
                 SendKey('S', true);
                 SendKey('W', true);
@@ -5323,7 +5438,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (whizzerDownWhip && (now - s_lastWhizzerTime > 2000)) {
                 s_lastWhizzerTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER TAKEDOWN EXECUTED (Dir: %c, Ry: %.2f)", s_whizzerDirKey, rVel.y);
                 SendKey('W', true);
                 SendKey(s_whizzerDirKey, true);
@@ -5341,7 +5456,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (javelinVaultStrike && (now - s_lastJavelinVaultTime > 2000)) {
                 s_lastJavelinVaultTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON JAVELIN VAULT LEAP THRUST EXECUTED (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -5358,7 +5473,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (thaiPlumKneeDrive && (now - s_lastThaiPlumTime > 2000)) {
                 s_lastThaiPlumTime = now;
                 s_thaiPlumClinchTime = 0;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL THAI PLUM LIVER KNEE STRUCK (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
                 SendKey('W', true);
                 SendKey('C', true);
@@ -5375,7 +5490,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (radialDisarmThrust && (now - s_lastRadialDisarmTime > 2000)) {
                 s_lastRadialDisarmTime = now;
                 s_radialDisarmTwistTime = 0;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON RADIAL DISARM PENETRATIVE THRUST DISCHARGED (Rz: %.2f)", rVel.z);
                 mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
                 SendKey(s_radialDisarmDirKey, true);
@@ -5394,7 +5509,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (backSuplexHoistSlam && (now - s_lastBackSuplexTime > 2000)) {
                 s_lastBackSuplexTime = now;
                 s_backSuplexClinchTime = 0;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL BELLY-TO-BACK SUPLEX SLAM EXECUTED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
                 SendKey('S', true);
                 SendKey('W', true);
@@ -5413,7 +5528,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (isCrossThrustOvercharged && (now - s_lastCrossThrustTime > 2000)) {
                 s_lastCrossThrustTime = now;
                 s_crossBlockHoldStart = 0;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON CROSS-CHEST OVERCHARGE DETONATION DISCHARGED");
                 mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
                 SendKey('W', true);
@@ -5434,7 +5549,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (outsideLegKneeDrop && (now - s_lastOutsideLegSweepTime > 2000)) {
                 s_lastOutsideLegSweepTime = now;
                 s_outsideLegSweepHookTime = 0;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL KNEE DROP FINISHER EXECUTED (Ry: %.2f)", rVel.y);
                 SendKey(s_outsideLegSweepDirKey, true);
                 SendKey('C', true);
@@ -5453,7 +5568,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (crossParryRiposte && (now - s_lastCrossParryTime > 2000)) {
                 s_lastCrossParryTime = now;
                 s_crossParryDeflectTime = 0;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON CROSS-PARRY RIPOSTE DISCHARGED (Dir: %c, Rz: %.2f)", s_crossParryDirKey, rVel.z);
                 mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
                 SendKey(s_crossParryDirKey, true);
@@ -5471,7 +5586,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (frontHeadlockWrap && frontHeadlockArchTorque && (now - s_lastFrontHeadlockTime > 2000)) {
                 s_lastFrontHeadlockTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL FRONT HEADLOCK GUILLOTINE CRACK (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
                 SendKey('W', true);
                 SendKey('S', true);
@@ -5489,7 +5604,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (isLookingDownward && batonOverheadVault && batonVaultPlunge && (now - s_lastVaultDropTime > 2000)) {
                 s_lastVaultDropTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON HIGH-ARC OVERHEAD VAULT DROP STRIKE EXECUTED (Ry: %.2f)", rVel.y);
                 SendKey(VK_SPACE, true);
                 SendKey('S', true);
@@ -5505,7 +5620,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (suloevLowCrouch && suloevHookHold && suloevArchPull && (now - s_lastSuloevTime > 2000)) {
                 s_lastSuloevTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL SULOEV STRETCH SUBMISSION EXECUTED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
                 SendKey('C', true);
                 SendKey('S', true);
@@ -5522,7 +5637,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (isCrossThrustReady && (now - s_lastCrossThrustTime > 2000)) {
                 s_lastCrossThrustTime = now;
                 s_crossBlockHoldStart = 0;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON CROSS-CHEST BLOCK & ARC THRUST DISRUPTION DISCHARGED");
                 mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
                 SendKey('W', true);
@@ -5541,7 +5656,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (firemansWhipThrow && (now - s_lastFiremansCarryTime > 2000)) {
                 s_lastFiremansCarryTime = now;
                 s_firemansLoadTime = 0;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 char throwDirKey = (rVel.x > 0.0f || lVel.x > 0.0f) ? 'D' : 'A';
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL FIREMAN'S CARRY SLAM EXECUTED (Dir: %c, ThrowX: %.2f)", throwDirKey, rVel.x);
                 SendKey('W', true);
@@ -5561,7 +5676,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (batonThroatThrustStrike && (now - s_lastPistolDisarmTime > 1800)) {
                 s_lastPistolDisarmTime = now;
                 s_pistolTrapTime = 0;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON CROSS-PISTOL DISARM & THROAT THRUST EXECUTED (Rz: %.2f)", rVel.z);
                 SendKey('W', true);
                 mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
@@ -5578,7 +5693,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (doubleLegSpikeSlam && (now - s_lastDoubleLegSlamTime > 2000)) {
                 s_lastDoubleLegSlamTime = now;
                 s_doubleLegLiftTime = 0;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL DOUBLE-LEG MAT SLAM EXECUTED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
                 SendKey('C', true);
                 SendKey('W', true);
@@ -5597,7 +5712,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (batonTripSweep && (now - s_lastBatonJabTripTime > 1800)) {
                 s_lastBatonJabTripTime = now;
                 s_batonJabTime = 0;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON JAB-TO-TASER-TRIP TAKEDOWN EXECUTED (Ry: %.2f, Rx: %.2f)", rVel.y, rVel.x);
                 SendKey('W', true);
                 SendKey('S', true);
@@ -5613,7 +5728,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (isSingleLegTakedown && (now - s_lastSingleLegTakedownTime > 1800)) {
                 s_lastSingleLegTakedownTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL SINGLE-LEG ANKLE PICK TAKEDOWN EXECUTED (Ly: %.2f, Rz: %.2f)", lVel.y, rVel.z);
                 SendKey('C', true);
                 SendKey('W', true);
@@ -5629,7 +5744,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (isBatonDiagonalParry && (now - s_lastDiagonalParryTime > 1800)) {
                 s_lastDiagonalParryTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON UPWARD DIAGONAL CROSS-PARRY & DISCHARGE EXECUTED (Ry: %.2f, Rx: %.2f)", rVel.y, rVel.x);
                 mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
                 SendKey('W', true);
@@ -5646,7 +5761,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (isArmTriangleReady) {
                 s_lastArmTriangleTime = now;
                 s_armTriangleStartTime = 0;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL STANDING ARM-TRIANGLE CHOKE LOCKED & EXECUTED");
                 SendKey('W', true);
                 SendKey('C', true);
@@ -5662,7 +5777,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (isBatonRadialSweep && (now - s_lastRadialSweepTime > 2000)) {
                 s_lastRadialSweepTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 char dirKey = (rVel.x > 0.0f) ? 'D' : 'A';
                 VR_LOG_INFO("Tactical Melee: STUN BATON RADIAL KINETIC SWEEP & STUN RING EXECUTED (Dir: %c, Rx: %.2f)", dirKey, rVel.x);
                 SendKey(dirKey, true);
@@ -5679,7 +5794,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (isKimuraFracture && (now - s_lastKimuraTime > 2000)) {
                 s_lastKimuraTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL KIMURA SHOULDER LOCK & FRACTURE EXECUTED (Ry: %.2f, Rx: %.2f)", rVel.y, rVel.x);
                 SendKey('S', true);
                 SendKey('A', true);
@@ -5695,7 +5810,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (isBatonJavelinThrust && (now - s_lastBatonJavelinTime > 1800)) {
                 s_lastBatonJavelinTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON FORWARD TWO-HANDED JAVELIN THRUST EXECUTED (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
                 SendKey('W', true);
                 SendKey(VK_SPACE, true);
@@ -5711,7 +5826,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (isOutsideTripMount && (now - s_lastOutsideTripTime > 1800)) {
                 s_lastOutsideTripTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL OUTSIDE TRIP & MOUNT POUND EXECUTED (Lx: %.2f, Rz: %.2f)", lVel.x, rVel.z);
                 SendKey('W', true);
                 SendKey('C', true);
@@ -5726,7 +5841,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (isCrossArcBurstReady && (now - s_lastCrossArcBurstTime > 1800)) {
                 s_lastCrossArcBurstTime = now;
                 s_crossArcStartTime = 0;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON DUAL-HAND CROSS-BLOCK REACTIVE ARC BURST DISCHARGED");
                 mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
                 SendKey(VK_SPACE, true);
@@ -5741,7 +5856,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (suplexSpineSlam && (now - s_lastSuplexSlamTime > 1800)) {
                 s_lastSuplexSlamTime = now;
                 s_suplexHoistTime = 0;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL UNDERHOOK SUPLEX SPINE SLAM EXECUTED");
                 SendKey('S', true);
                 SendKey(VK_SPACE, true);
@@ -5757,7 +5872,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (isBatonLateralDisarm && (now - s_lastBatonDisarmTime > 1500)) {
                 s_lastBatonDisarmTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 char dirKey = (rVel.x < 0) ? 'A' : 'D';
                 VR_LOG_INFO("Tactical Melee: STUN BATON LATERAL CROSS-SWEEP DEFLECTION & DISARM (Rx: %.2f)", rVel.x);
                 SendKey(dirKey, true);
@@ -5773,7 +5888,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (hammerfistStrike && (now - s_lastShinTrapTime > 1500)) {
                 s_lastShinTrapTime = now;
                 s_shinTrapTime = 0;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: OVERHAND HAMMERFIST COMPLETED COMBO (Ry: %.2f)", rVel.y);
                 SendKey('S', true);
                 SendKey(VK_SPACE, true);
@@ -5787,7 +5902,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (isBatonSkullBreaker && (now - s_lastSkullBreakerTime > 1500)) {
                 s_lastSkullBreakerTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON CHARGED HIGH-ARC DOWNWARD SKULL BREAKER CLEAVED (Ry: %.2f)", rVel.y);
                 SendKey('W', true);
                 SendKey('S', true);
@@ -5802,7 +5917,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (guillotineWrapStrike && (now - s_lastSnapdownChokeTime > 1500)) {
                 s_lastSnapdownChokeTime = now;
                 s_snapdownStartTime = 0;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: GUILLOTINE CHOKE LOCKED (Ry: %.2f, Rz: %.2f)", rVel.y, rVel.z);
                 SendKey('S', true);
                 SendKey('C', true);
@@ -5816,7 +5931,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (isBatonGroundDischarge && (now - s_lastBatonGroundShockTime > 2000)) {
                 s_lastBatonGroundShockTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON DUAL-HAND GROUND DISCHARGE KINETIC SHOCKWAVE DETONATED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey('S', true);
                 SendKey(VK_SPACE, true);
@@ -5833,7 +5948,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (cervicalSnapWhip && (now - s_lastPalmChinComboTime > 1500)) {
                 s_lastPalmChinComboTime = now;
                 s_palmChinStrikeTime = 0;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: CERVICAL SNAP COMPLETED COMBO (Lx: %.2f)", lVel.x);
                 SendKey('W', true);
                 SendKey(VK_SPACE, true);
@@ -5889,7 +6004,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (isBatonGroundPin && (now - s_lastBatonGroundPinTime > 1500)) {
                 s_lastBatonGroundPinTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON GROUND PIN & TASER KNEEL (Ry: %.2f)", rVel.y);
                 SendKey('C', true);
                 SendKey('S', true);
@@ -5905,7 +6020,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (isClinchHeadbutt && (now - s_lastHeadbuttTime > 1500)) {
                 s_lastHeadbuttTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL COLLAR TIE CLINCH & HEADBUTT STUN (Lz: %.2f, Rz: %.2f)", lVel.z, rVel.z);
                 SendKey('W', true);
                 SendKey(VK_SPACE, true);
@@ -5920,7 +6035,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (sternumElbowSmash && (now - s_lastLiverElbowComboTime > 1500)) {
                 s_lastLiverElbowComboTime = now;
                 s_liverHookTime = 0;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: STERNUM ELBOW SMASH COMPLETED COMBO (Ry: %.2f)", rVel.y);
                 SendKey('W', true);
                 SendKey('A', true);
@@ -5933,7 +6048,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (isBatonChargedSpear && (now - s_lastSpearThrustTime > 1500)) {
                 s_lastSpearThrustTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON CHARGED UNDERARM SPEAR THRUST (Rz: %.2f)", rVel.z);
                 SendKey('W', true);
                 SendKey('S', true);
@@ -5947,7 +6062,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (isKneeStomp && (now - s_lastKneeStompTime > 1500)) {
                 s_lastKneeStompTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL SHIN KICK & KNEE HYPER-EXTENSION (Ry: %.2f, Lz: %.2f)", rVel.y, lVel.z);
                 SendKey('C', true);
                 SendKey('S', true);
@@ -5961,7 +6076,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (isLeadKneeThrust && (now - s_lastLeadKneeTime > 1500)) {
                 s_lastLeadKneeTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL LEAD KNEE THRUST (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey('W', true);
                 SendKey('C', true);
@@ -5975,7 +6090,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (isDuckUnderKidneyCounter && (now - s_lastKidneyCounterTime > 1500)) {
                 s_lastKidneyCounterTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL DUCK-UNDER KIDNEY COUNTER-JAB (Rx: %.2f, Rz: %.2f)", rVel.x, rVel.z);
                 SendKey('C', true);
                 SendKey('D', true);
@@ -5989,7 +6104,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (blindRiposteStrike && (now - s_lastEyeRubRiposteTime > 1500)) {
                 s_lastEyeRubRiposteTime = now;
                 s_eyeRubWipeTime = 0;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: DIRT/ASH BLIND RECOVERY RIPOSTE DISPATCHED (Rz: %.2f)", rVel.z);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
@@ -6002,7 +6117,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (isParrySnap && (now - s_lastParrySnapTime > 1500)) {
                 s_lastParrySnapTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE SHIV FOREARM DEFENSIVE PARRY-AND-SNAP (Lx: %.2f, Ry: %.2f)", lVel.x, rVel.y);
                 SendKey('W', true);
                 SendKey('E', true);
@@ -6016,7 +6131,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (isBatonRibJab && (now - s_lastBatonRibJabTime > 1500)) {
                 s_lastBatonRibJabTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON RIB-JAB & GROUND TAKEDOWN (Ry: %.2f, Rz: %.2f)", rVel.y, rVel.z);
                 SendKey('S', true);
                 SendKey(VK_SPACE, true);
@@ -6029,7 +6144,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (isDoubleEarClap && (now - s_lastDoubleEarClapTime > 1500)) {
                 s_lastDoubleEarClapTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL DOUBLE-EAR CONCUSSIVE CLAP (Lx: %.2f, Rx: %.2f)", lVel.x, rVel.x);
                 SendKey('W', true);
                 SendKey(VK_SPACE, true);
@@ -6044,7 +6159,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (dartCounterJabStrike && (now - s_lastDartCounterJabTime > 1500)) {
                 s_lastDartCounterJabTime = now;
                 s_dartExtractedTime = 0;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: STUN DART COUNTER-JAB DISPATCHED (Rz: %.2f)", rVel.z);
                 SendKey('E', true);
                 SendKey('3', true);
@@ -6057,7 +6172,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (isRibUnderhook && (now - s_lastRibUnderhookTime > 1500)) {
                 s_lastRibUnderhookTime = now;
-                s_lastPunchTime = now;
+                s_lastFinisherTime = now;
                 VR_LOG_INFO("Physical Combat: INMATE SHIV RIB-CAGE UNDERHOOK PUNCTURE & LIFT (Ry: %.2f, Rz: %.2f)", rVel.y, rVel.z);
                 SendKey('W', true);
                 SendKey(VK_SPACE, true);
@@ -6237,8 +6352,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     SendKey('W', false);
 
                     float pulse = isBatonArcJab ? 0.95f : 0.90f;
-                    if (rSpeed > lSpeed) vrState.rightHapticPulse = pulse;
-                    else vrState.leftHapticPulse = pulse;
+                    if (rSpeed > lSpeed) MergeHaptic(vrState.rightHapticPulse, pulse); // GH #32: finisher
+                    else MergeHaptic(vrState.leftHapticPulse, pulse); // GH #32: finisher
                     goto combat_gesture_done;
                 }
                 // Uppercut: upward vertical speed dominates forward & lateral
@@ -6273,6 +6388,12 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         }
     }
 
+    // GH #31: single dispatch per frame (priority: melee first). Any melee
+    // dispatch above (reactive chain, finisher, generic classifier) suppresses
+    // lower-priority env tap/click dispatches below so one gesture fires once.
+    bool meleeFiredThisFrame =
+        (s_lastPunchTime != punchAtEntry) || (s_lastFinisherTime != finisherAtEntry);
+
     // 5b. Physical Boxer Guard Pose Detection ("holding both fists up in front of the VR")
     // Criteria (ADR 0400):
     // - Both controllers raised in front of chest/chin/face level relative to HMD (y in -0.36 to +0.25)
@@ -6287,7 +6408,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                          (rightLocal.z >= -0.65f && rightLocal.z <= -0.06f);
     bool handsClose = fabsf(leftLocal.x - rightLocal.x) < 0.54f;
     bool handsSteady = (rSpeed < 1.4f && lSpeed < 1.4f);
-    bool notPunching = (now - s_lastPunchTime > 120);
+    bool notPunching = (now - s_lastPunchTime > 120) && (now - s_lastFinisherTime > 120); // GH #31
 
     bool guardPoseDetected = !isClimbingActive && chinLevel && inFrontOfFace && handsClose && handsSteady && notPunching;
 
@@ -6344,15 +6465,15 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             s_lastReloadGestureTime = now;
             VR_LOG_INFO("Tactical Weapon: POWER CELL HOT-SWAP EJECTED (Vy: %.2f m/s, Dist: %.2fm)", lVel.y, reloadHandDist);
             SendKeyTap('R');
-            vrState.leftHapticPulse = 0.75f; // Magnetic cell disconnect snap (140 Hz)
-            vrState.rightHapticPulse = 0.50f;
+            MergeHaptic(vrState.leftHapticPulse, 0.75f); // GH #32: magnetic cell disconnect snap (140 Hz)
+            MergeHaptic(vrState.rightHapticPulse, 0.50f);
         } else if (offHandMagInsert || offHandWaistPouch) {
             s_lastReloadGestureTime = now;
             VR_LOG_INFO("Tactical Gesture: MANUAL WEAPON RELOAD triggered (%s, HandDist: %.2fm, LeftY: %.2f)",
                 offHandMagInsert ? "Weapon Receiver / Mag-Well" : "Waist Ammo Pouch", reloadHandDist, leftLocal.y);
             SendKeyTap('R');
-            vrState.leftHapticPulse = 0.55f;
-            vrState.rightHapticPulse = 0.75f;
+            MergeHaptic(vrState.leftHapticPulse, 0.55f); // GH #32
+            MergeHaptic(vrState.rightHapticPulse, 0.75f);
         }
     }
 
@@ -6420,7 +6541,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     bool strikerAtCap = (reloadHandDist < 0.16f) && (vrState.rightController.grip > 0.55f);
     float shearVelY = fabsf(lVel.y - rVel.y);
     float shearVelX = fabsf(lVel.x - rVel.x);
-    if (flareInOffHand && strikerAtCap && (shearVelY > 0.80f || shearVelX > 0.80f) && !s_physicalBlockEngaged && (now - s_lastFlareIgniteTime > 1800)) {
+    if (flareInOffHand && strikerAtCap && (shearVelY > 0.80f || shearVelX > 0.80f) && !s_physicalBlockEngaged && !meleeFiredThisFrame && (now - s_lastFlareIgniteTime > 1800)) { // GH #31
         s_lastFlareIgniteTime = now;
         VR_LOG_INFO("Tactical Decoy: THERMAL MAGNESIUM FLARE IGNITED (ShearVelY: %.2f, ShearVelX: %.2f)", shearVelY, shearVelX);
         SendKeyTap('4'); // Equip flare / throwable slot
@@ -6579,7 +6700,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         } else {
             // ADR 0373 & ADR 0402: Speed-Adaptive One-Euro Filter for One-Handed Weapon Aim Stabilization
             // When firing or aiming one-handed, natural physiological hand tremor (3-8 Hz) causes sight jitter.
-            // When holding steady in physical ADS corridor, apply high damping (alpha ≈ 0.15) to lock sight rock-steady.
+            // When holding steady in physical ADS corridor, apply high damping (alpha â‰ˆ 0.15) to lock sight rock-steady.
             // As movement speed increases, ramp alpha up to 0.90 for zero-latency target acquisition.
             static RiddickVRTrackedPose s_oneHandedPose{};
             static bool s_hasOneHandedPose = false;
@@ -6667,7 +6788,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     bool pointBlankLock = (rightLocal.z > -0.38f && rightLocal.z < -0.16f) && (fabsf(rightLocal.y) < 0.15f);
     bool breachForwardThrust = (rVel.z < -1.20f && lVel.z < -1.20f);
     bool triggerBreachPull = (vrState.rightController.trigger > 0.80f);
-    if (s_twoHandedStabilizationActive && pointBlankLock && breachForwardThrust && triggerBreachPull && (now - s_lastShotgunBreachTime > 1800)) {
+    if (s_twoHandedStabilizationActive && pointBlankLock && breachForwardThrust && triggerBreachPull && !meleeFiredThisFrame && (now - s_lastShotgunBreachTime > 1800)) { // GH #31
         s_lastShotgunBreachTime = now;
         VR_LOG_INFO("Physical Gunplay: SHOTGUN BREACHING BLAST & DOOR KICK (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
         mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
@@ -6699,7 +6820,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                           (leftLocal.y > -0.45f && leftLocal.y < -0.05f && rightLocal.y > -0.45f && rightLocal.y < -0.05f) &&
                           (vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f);
     bool violentDownwardChiselPlunge = (lVel.y < -1.15f && rVel.y < -1.15f);
-    if (dualHandleGrip && violentDownwardChiselPlunge && (now - s_lastGroundChiselTime > 2000)) {
+    if (dualHandleGrip && violentDownwardChiselPlunge && !meleeFiredThisFrame && (now - s_lastGroundChiselTime > 2000)) { // GH #31
         s_lastGroundChiselTime = now;
         VR_LOG_INFO("Environmental Gesture: MINING PNEUMATIC JACKHAMMER GROUND CHISEL PLUNGE (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
         SendKeyTap('S');
@@ -6788,7 +6909,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             powf(leftLocal.z - rightLocal.z, 2)
         );
 
-        if (!s_grenadePrimed && handProximity < 0.16f && vrState.leftController.grip > 0.50f && (now - s_lastPinPullTime > 1200)) {
+        if (!s_grenadePrimed && handProximity < 0.16f && vrState.leftController.grip > 0.50f && !meleeFiredThisFrame && (now - s_lastPinPullTime > 1200)) { // GH #31
             s_lastPinPullTime = now;
             s_grenadePrimed = true;
             VR_LOG_INFO("Tactical Gesture: GRENADE PIN PULLED / PRIMED (Hand Proximity: %.2fm)", handProximity);
@@ -7278,7 +7399,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             bool rightBolterRamming = (twoHandDist > 0.18f && twoHandDist < 0.40f) &&
                                       (vrState.rightController.grip > 0.60f && vrState.rightController.trigger > 0.65f) &&
                                       (rVel.z < -1.05f);
-            if (leftHoldingGuideSleeve && rightBolterRamming && (now - s_lastRockBolterTime > 2000)) {
+            if (leftHoldingGuideSleeve && rightBolterRamming && !meleeFiredThisFrame && (now - s_lastRockBolterTime > 2000)) { // GH #31
                 s_lastRockBolterTime = now;
                 VR_LOG_INFO("Environmental Gesture: MINING CORE PNEUMATIC ROCK BOLTER SUNK & LOCKED (Rz: %.2f m/s)", rVel.z);
                 SendKeyTap('E');
@@ -8018,7 +8139,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                      rightLocal.z > -0.42f && rightLocal.z < -0.16f && rightLocal.y > -0.25f && rightLocal.y < 0.15f &&
                                      vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f);
             bool spudBarLinearThrust = (rVel.z < -1.15f || lVel.z < -1.15f);
-            if (twoHandAtSpudBar && spudBarLinearThrust && (now - s_lastSpudBarTime > 1500)) {
+            if (twoHandAtSpudBar && spudBarLinearThrust && !meleeFiredThisFrame && (now - s_lastSpudBarTime > 1500)) { // GH #31
                 s_lastSpudBarTime = now;
                 VR_LOG_INFO("Environmental Gesture: INCINERATOR SLAG DISLODGED VIA SPUD BAR THRUST (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
                 SendKeyTap('E');
@@ -8121,7 +8242,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                         vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f &&
                                         vrState.rightController.trigger > 0.65f);
             bool purgeLanceThrust = (rVel.z < -0.90f || lVel.z < -0.90f);
-            if (twoHandAtPurgeLance && purgeLanceThrust && (now - s_lastPurgeLanceTime > 1800)) {
+            if (twoHandAtPurgeLance && purgeLanceThrust && !meleeFiredThisFrame && (now - s_lastPurgeLanceTime > 1800)) { // GH #31
                 s_lastPurgeLanceTime = now;
                 VR_LOG_INFO("Environmental Gesture: HYDROPONICS PURGE STEAM LANCE BLASTED (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
                 SendKeyTap('E');
@@ -8138,7 +8259,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             bool handAtTrussWedge = (rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > 0.10f && rightLocal.y < 0.42f &&
                                      vrState.rightController.grip > 0.60f);
             bool wedgeDownwardHammer = (rVel.y < -1.20f);
-            if (handAtTrussWedge && wedgeDownwardHammer && (now - s_lastWedgeStrikeTime > 1500)) {
+            if (handAtTrussWedge && wedgeDownwardHammer && !meleeFiredThisFrame && (now - s_lastWedgeStrikeTime > 1500)) { // GH #31
                 s_lastWedgeStrikeTime = now;
                 VR_LOG_INFO("Environmental Gesture: EVA SOLAR TRUSS LOCK WEDGE STRUCK & SEATED (Ry: %.2f)", rVel.y);
                 SendKeyTap('E');
@@ -8199,7 +8320,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 VR_LOG_INFO("Environmental Gesture: HYDROPONICS SOOT BLOWER LANCE STROKE #%d (Rz: %.2f, Lz: %.2f)", s_sootBlowerStrokeCount, rVel.z, lVel.z);
                 vrState.rightHapticPulse = 0.55f; // Tube scraping rasp (220 Hz)
                 vrState.leftHapticPulse = 0.40f;
-                if (s_sootBlowerStrokeCount >= 3) {
+                if (s_sootBlowerStrokeCount >= 3 && !meleeFiredThisFrame) { // GH #31
                     s_sootBlowerStrokeCount = 0;
                     VR_LOG_INFO("Environmental Gesture: ECONOMIZER TUBE BANK CLEARED VIA HIGH-PRESSURE STEAM SOOT BLOW");
                     SendKeyTap('E');
@@ -8243,7 +8364,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 float burnRamp = (burnTime < 400) ? (burnTime / 400.0f) : 1.0f;
                 vrState.rightHapticPulse = 0.50f + 0.45f * burnRamp; // Sizzle to breakout rumble (260 -> 70 Hz)
                 vrState.leftHapticPulse = 0.35f + 0.40f * burnRamp;
-                if (burnTime >= 400 && (now - s_lastSlagBurnTime > 2500)) {
+                if (burnTime >= 400 && !meleeFiredThisFrame && (now - s_lastSlagBurnTime > 2500)) { // GH #31
                     s_lastSlagBurnTime = now;
                     s_slagBurnStartTime = 0;
                     VR_LOG_INFO("Environmental Gesture: HYDROPONICS SLAG TAP HOLE BREACHED VIA OXYGEN LANCE BURN");
@@ -9961,6 +10082,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
         if (visorPullDown && (now - s_lastSolarVisorTime > 1200)) {
             s_lastSolarVisorTime = now;
+            s_eyeshineActive = !s_eyeshineActive; // GH #35: visor toggles the single source
             VR_LOG_INFO("Orbital EVA Gesture: POLARIZED SOLAR RADIATION VISOR PULLED DOWN");
             SendKeyTap('Q'); // Toggle optical tint filter
             if (rightAtBrow) vrState.rightHapticPulse = 0.65f; // Solid mechanical visor latch click (150 Hz)
@@ -9978,9 +10100,17 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     static bool s_leftGripDown = false, s_rightGripDown = false;
 
     // Right Trigger -> Fire / Primary Attack / UI Select Click
-    bool wantRightTrigger = vrState.rightController.trigger > 0.5f;
+    // GH #24: press > 0.65 / release < 0.45 hysteresis so hover/gesture
+    // jitter cannot desync the held fire state; suppressed while reloading,
+    // guarding, or climbing (gesture volumes own the trigger there).
+    float trigVal = vrState.rightController.trigger;
+    bool wantRightTrigger = s_rightTriggerDown ? (trigVal >= 0.45f) : (trigVal > 0.65f);
+    bool reloadActive = (now - s_lastReloadGestureTime <= 1100);
+    if (wantRightTrigger && (reloadActive || s_physicalBlockEngaged || isClimbingActive)) {
+        wantRightTrigger = false;
+    }
     if (wantRightTrigger != s_rightTriggerDown) {
-        mouse_event(wantRightTrigger ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+        SendMouseClick(true, wantRightTrigger); // GH #33: SendInput helper
         s_rightTriggerDown = wantRightTrigger;
         if (wantRightTrigger) {
             // ADR 0376: Weapon Slot Recoil & Haptic Profile Calibration
@@ -10074,7 +10204,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     s_isAimingOrBlocking = wantBlock;
     if (wantBlock != s_currentBlockEngaged) {
         if (wantBlock) {
-            if (now - s_lastPunchTime > 200) {
+            // GH #31: punch recovery covers reactive strikes and finishers.
+            if ((now - s_lastPunchTime > 200) && (now - s_lastFinisherTime > 200)) {
                 mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
                 s_currentBlockEngaged = true;
                 if (s_physicalBlockEngaged) {
@@ -10101,7 +10232,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             // Evaluated at moment of release (ADR 0382: Forward Trajectory Vector Gating):
             // Forward throwing motion requires positive forward velocity (lVel.z < -0.65 m/s) and speed > 1.10 m/s
             // Arm retraction or sideways swings gently drop the object at feet rather than hurling it forward
-            if (lVel.z < -0.65f && lSpeed > 1.10f) {
+            if (lVel.z < -0.65f && lSpeed > 1.10f && !meleeFiredThisFrame) { // GH #31: melee has priority
                 VR_LOG_INFO("Physical Gesture: OBJECT THROW / PROPULSION executed (Speed: %.2f m/s, Vel: [%.2f, %.2f, %.2f])",
                     lSpeed, lVel.x, lVel.y, lVel.z);
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
@@ -10145,7 +10276,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     bool ashThrowFlick = (s_isPhysicallyCrouched || s_isDeepProne) &&
                          (vrState.rightController.grip < 0.40f && vrState.rightController.trigger < 0.40f) &&
                          (rVel.y > 0.80f && rVel.z < -0.80f);
-    if (ashThrowFlick && (now - s_lastAshThrowTime > 1200)) {
+    if (ashThrowFlick && !meleeFiredThisFrame && (now - s_lastAshThrowTime > 1200)) { // GH #31
         s_lastAshThrowTime = now;
         VR_LOG_INFO("Combat Dirty Tactic: DIRT / ASH THROWN INTO ENEMY EYES (Vy: %.2f, Vz: %.2f)", rVel.y, rVel.z);
         SendKeyTap('E');
@@ -10160,7 +10291,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                             (leftLocal.y < -0.40f && rightLocal.y < -0.40f) &&
                             (vrState.leftController.grip < 0.45f && vrState.rightController.grip < 0.45f);
     bool fanScatterOutward = (lVel.x < -0.80f && rVel.x > 0.80f) && (lVel.y > 0.40f || rVel.y > 0.40f);
-    if (bothHandsLowSand && fanScatterOutward && (now - s_lastFanScatterTime > 1400)) {
+    if (bothHandsLowSand && fanScatterOutward && !meleeFiredThisFrame && (now - s_lastFanScatterTime > 1400)) { // GH #31
         s_lastFanScatterTime = now;
         VR_LOG_INFO("Combat Dirty Tactic: DUAL-HANDED SAND / ASH FAN SCATTER (Lx: %.2f, Rx: %.2f)", lVel.x, rVel.x);
         SendKeyTap('E');
@@ -10196,7 +10327,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         // Evaluate burst if fists were clenched together recently
         if (now - s_fanClenchStartTime < 800) {
             bool explosiveFanOutward = (lVel.x < -1.10f && rVel.x > 1.10f);
-            if (explosiveFanOutward && (now - s_lastFanClenchBurstTime > 2000)) {
+            if (explosiveFanOutward && !meleeFiredThisFrame && (now - s_lastFanClenchBurstTime > 2000)) { // GH #31
                 s_lastFanClenchBurstTime = now;
                 VR_LOG_INFO("Combat Dirty Tactic: DIRT/ASH TWO-HANDED FAN CLENCH & BURST (Lx: %.2f, Rx: %.2f)", lVel.x, rVel.x);
                 SendKeyTap('E');
@@ -10301,7 +10432,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             vrState.leftHapticPulse = 0.40f;
         }
         // Cervical Twist Finisher: rapid lateral jerk of right hand (|rVel.x| > 0.80 m/s)
-        if (fabsf(rVel.x) > 0.80f || fabsf(rVel.y) > 0.80f) {
+        if ((fabsf(rVel.x) > 0.80f || fabsf(rVel.y) > 0.80f) && !meleeFiredThisFrame) { // GH #31: melee has priority
             s_isChokeholding = false;
             VR_LOG_INFO("Stealth Takedown: SILENT CERVICAL NECK SNAP FINISHER executed (Vx: %.2f m/s)", rVel.x);
             mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
@@ -10386,6 +10517,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     }
 
     // Dual Thumbstick Click -> Emergency Ejection / Drone Neural Disconnect (ADR 0031)
+    // GH #20: single edge-triggered Menu handler (computed once here); a Menu
+    // edge in the same frame suppresses the dual-stick ESC so VK_ESCAPE fires once.
+    bool menuEdge = ((btns & RIDDICK_VR_BTN_MENU) != 0) && ((s_prevButtons & RIDDICK_VR_BTN_MENU) == 0);
     bool stickLeft = (btns & RIDDICK_VR_BTN_STICK_LEFT) != 0;
     bool stickRight = (btns & RIDDICK_VR_BTN_STICK_RIGHT) != 0;
     bool prevStickLeft = (s_prevButtons & RIDDICK_VR_BTN_STICK_LEFT) != 0;
@@ -10394,7 +10528,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     bool dualStick = stickLeft && stickRight;
     bool prevDualStick = prevStickLeft && prevStickRight;
 
-    if (dualStick && !prevDualStick) {
+    if (dualStick && !prevDualStick && !menuEdge) {
         bool dualGrip = (vrState.leftController.grip > 0.55f && vrState.rightController.grip > 0.55f);
         if (dualGrip) {
             // Emergency Mech Cockpit Purge / Canopy Blow (ADR 0049)
@@ -10415,7 +10549,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         // Left Thumbstick Click -> Sprint Toggle is handled in locomotion section.
         // Crouch toggle is mapped to Button X and physical crouch stance.
 
-        // Right Thumbstick Click -> Recenter HMD & Cinema Screen & Reset Standing Eye Height
+        // Right Thumbstick Click -> Recenter HMD & Reset Standing Eye Height (GH #18: no cinema)
         // Gated by !leftGripHeld so toggling snap/smooth turn mode does not unintentionally reset view
         if (stickRight && !prevStickRight && !leftGripHeld) {
             vrState.shouldRecenter = true;
@@ -10429,11 +10563,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     }
 
     // Left Controller Menu Button -> Clean Pause / Resume Menu Toggle (Escape)
-    bool btnMenu = (btns & RIDDICK_VR_BTN_MENU) != 0;
-    bool prevBtnMenu = (s_prevButtons & RIDDICK_VR_BTN_MENU) != 0;
-    if (btnMenu && !prevBtnMenu) {
+    // GH #18/#20: the single Menu handler (edge-triggered, logs once).
+    if (menuEdge) {
         SendKeyTap(VK_ESCAPE);
-        vrState.leftHapticPulse = 0.40f;
+        MergeHaptic(vrState.leftHapticPulse, 0.40f); // GH #32
         VR_LOG_INFO("Menu Button tapped (VK_ESCAPE)");
     }
 
