@@ -514,28 +514,6 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
             GLint dstW = m_eyeWidth;
             GLint dstH = m_eyeHeight;
 
-            if (m_sharedState.cinemaMode) {
-                // In Cinema Mode (Menus / Cutscenes), letterbox to 16:9 for the floating cinema quad
-                constexpr float TARGET_CINEMA_ASPECT = 16.0f / 9.0f;
-                dstW = m_eyeWidth;
-                dstH = static_cast<GLint>(dstW / TARGET_CINEMA_ASPECT);
-                if (dstH > static_cast<GLint>(m_eyeHeight)) {
-                    dstH = m_eyeHeight;
-                    dstW = static_cast<GLint>(dstH * TARGET_CINEMA_ASPECT);
-                }
-                dstX = (m_eyeWidth - dstW) / 2;
-                dstY = (m_eyeHeight - dstH) / 2;
-
-                // Clear destination eye framebuffers to solid opaque black before blit
-                if (OpenGLProxy::glClearColor && OpenGLProxy::real_glClearFunc) {
-                    OpenGLProxy::glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-                    OpenGLProxy::real_glBindFramebuffer(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, m_leftFbo);
-                    OpenGLProxy::real_glClearFunc(GL_COLOR_BUFFER_BIT);
-                    OpenGLProxy::real_glBindFramebuffer(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, m_rightFbo);
-                    OpenGLProxy::real_glClearFunc(GL_COLOR_BUFFER_BIT);
-                }
-            }
-
 
             // Read from default backbuffer 0
             OpenGLProxy::real_glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */, 0);

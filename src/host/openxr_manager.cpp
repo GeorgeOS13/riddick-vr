@@ -1175,12 +1175,10 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
                 projViews[eye].subImage.imageRect.extent = { (int32_t)m_swapchains[eye].width, (int32_t)m_swapchains[eye].height };
             }
 
-            // Unified Single-POV Architecture (ADR 0405):
+            // Unified Single-POV Architecture (ADR 0405, ADR 0409):
             // Completely eliminated dual-POV switching between Quad and Projection layers.
             // OpenXR strictly renders XrCompositionLayerProjection at all times.
-            // Menus are rendered by stereo_renderer.cpp with black bars into the projection swapchain.
-            // In-game action renders edge-to-edge full VR coverage with zero black bars.
-            // Eliminates all POV switching, portal expansions, and menu flashing.
+            // Invariant full VR projection fills physical lenses with zero POV switching, portal expansions, or menu flashing.
             layer.layerFlags = 0;
             layer.space = m_appSpace;
             layer.viewCount = 2;

@@ -300,17 +300,17 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         VR_LOG_INFO("Menu Button tapped (VK_ESCAPE)");
     }
 
-    // Unified Mode Discipline (ADR 0405):
-    // In boot sequence & initial main menus: cinemaMode = true (16:9 letterbox with black bars).
-    // Once 3D gameplay begins: cinemaMode = false (100% full VR FOV edge-to-edge).
-    // Zero cursor flickering, zero POV switching.
-    vrState.cinemaMode = !has3D;
+    // Unified Mode Discipline & Invariant Projection (ADR 0405, ADR 0409):
+    // Disable cinemaMode switching permanently: vrState.cinemaMode = false.
+    // Menus are rendered in native 16:9 directly into the eye buffer with zero POV switching, quad switching, or flashing.
+    vrState.cinemaMode = false;
 
-    // 0. Decoupled Motion Controller Aim Steering & Head Tracking Look Input (ADR 0008)
-    // Only apply in-game look when not in cinema menu mode
+    // 0. Singularity-Free Relative Quaternion Head Tracking Look Input (ADR 0409)
     static bool s_hasPrevHmdOrientation = false;
-    static float s_prevHmdYaw = 0.0f;
-    static float s_prevHmdPitch = 0.0f;
+    static float s_prevHmdX = 0.0f;
+    static float s_prevHmdY = 0.0f;
+    static float s_prevHmdZ = 0.0f;
+    static float s_prevHmdW = 1.0f;
     static bool s_hasPrevCtrlAim = false;
     static float s_prevCtrlYaw = 0.0f;
     static float s_prevCtrlPitch = 0.0f;
@@ -334,37 +334,45 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             qz /= norm;
             qw /= norm;
 
-            // Yaw (rotation around Y axis: left/right)
-            float currentYaw = atan2f(2.0f * (qw * qy + qz * qx), 1.0f - 2.0f * (qx * qx + qy * qy));
-            s_lastHmdYaw = currentYaw;
-
-            // Pitch (rotation around X axis: up/down)
-            float sinPitch = 2.0f * (qw * qx - qy * qz);
-            float currentPitch = 0.0f;
-            if (fabsf(sinPitch) >= 1.0f) {
-                currentPitch = copysignf(1.5707963f, sinPitch);
-            } else {
-                currentPitch = asinf(sinPitch);
-            }
-            s_lastHmdPitch = currentPitch;
+            float deltaYaw = 0.0f;
+            float deltaPitch = 0.0f;
 
             if (!s_hasPrevHmdOrientation || vrState.shouldRecenter) {
-                s_prevHmdYaw = currentYaw;
-                s_prevHmdPitch = currentPitch;
+                s_prevHmdX = qx;
+                s_prevHmdY = qy;
+                s_prevHmdZ = qz;
+                s_prevHmdW = qw;
                 s_hasPrevCtrlAim = false;
                 s_accumulatedLookX = 0.0f;
                 s_accumulatedLookY = 0.0f;
                 s_hasPrevHmdOrientation = true;
             } else {
-                float deltaYaw = currentYaw - s_prevHmdYaw;
-                // Handle wrap-around across -pi / +pi boundary
-                while (deltaYaw > 3.14159265f) deltaYaw -= 6.2831853f;
-                while (deltaYaw < -3.14159265f) deltaYaw += 6.2831853f;
+                // ADR 0409: Compute relative rotation in head-local space: Delta Q = Q_prev^-1 * Q_curr
+                // Eliminates all gimbal lock singularities, division-by-zero, and runaway pitch divergence
+                float w1 = s_prevHmdW, x1 = s_prevHmdX, y1 = s_prevHmdY, z1 = s_prevHmdZ;
+                float w2 = qw, x2 = qx, y2 = qy, z2 = qz;
 
-                float deltaPitch = currentPitch - s_prevHmdPitch;
+                float dw = w1 * w2 + x1 * x2 + y1 * y2 + z1 * z2;
+                float dx = w1 * x2 - x1 * w2 - y1 * z2 + z1 * y2;
+                float dy = w1 * y2 + x1 * z2 - y1 * w2 - z1 * x2;
+                float dz = w1 * z2 - x1 * y2 + y1 * x2 - z1 * w2;
 
-                s_prevHmdYaw = currentYaw;
-                s_prevHmdPitch = currentPitch;
+                if (dw < 0.0f) {
+                    dx = -dx;
+                    dy = -dy;
+                    dz = -dz;
+                    dw = -dw;
+                }
+
+                // Small-angle approximation: theta ≈ 2 * sin(theta/2)
+                deltaYaw = 2.0f * dy;   // Pure local neck yaw around Y
+                deltaPitch = 2.0f * dx; // Pure local head pitch around X
+                // deltaRoll = 2.0f * dz; // Pure local roll around Z (completely decoupled)
+
+                s_prevHmdX = qx;
+                s_prevHmdY = qy;
+                s_prevHmdZ = qz;
+                s_prevHmdW = qw;
                 s_lastHmdDeltaYaw = deltaYaw;
 
                 // Decoupled Motion Controller Aim Steering:
@@ -504,18 +512,23 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     s_hasPrevCtrlAim = false;
                 }
 
-                // ADR 0408: Decoupled Head Tracking Look & Controller Aim Deflection
-                // Head orientation is rendered directly in 6DOF by OpenXR view matrices via StabilizeViewMatrix.
-                // NEVER inject HMD deltaYaw or deltaPitch into mouse_event, which creates double rotation
-                // and runaway spinning. mouse_event is reserved strictly for thumbstick turning and subtle
-                // controller aim deflection during active ADS/aiming.
-                float mouseDeltaX = 0.0f;
-                float mouseDeltaY = 0.0f;
+                // ADR 0409: Singularity-Free Relative Quaternion Head Tracking Look & Controller Aim Deflection
+                // 1:1 Head tracking orientation in head-local space drives in-game heading and pitch smoothly
+                // without Euler gimbal lock or runaway spinning.
+                constexpr float HMD_LOOK_DEADZONE = 0.0004f; // ~0.02 deg deadband filter
+                float cleanDeltaYaw = (fabsf(deltaYaw) > HMD_LOOK_DEADZONE) ? deltaYaw : 0.0f;
+                float cleanDeltaPitch = (fabsf(deltaPitch) > HMD_LOOK_DEADZONE) ? deltaPitch : 0.0f;
+
+                constexpr float SENSITIVITY_YAW = 445.6f;
+                constexpr float SENSITIVITY_PITCH = 445.6f;
+
+                float mouseDeltaX = -cleanDeltaYaw * SENSITIVITY_YAW;
+                float mouseDeltaY = -cleanDeltaPitch * SENSITIVITY_PITCH;
 
                 if (isActivelyAiming && fabsf(wPull) > 0.001f) {
                     constexpr float CONTROLLER_AIM_SENSITIVITY = 120.0f;
-                    mouseDeltaX = -pullYaw * wPull * CONTROLLER_AIM_SENSITIVITY;
-                    mouseDeltaY = -pullPitch * wPull * CONTROLLER_AIM_SENSITIVITY;
+                    mouseDeltaX += -pullYaw * wPull * CONTROLLER_AIM_SENSITIVITY;
+                    mouseDeltaY += -pullPitch * wPull * CONTROLLER_AIM_SENSITIVITY;
                 }
 
                 s_accumulatedLookX += mouseDeltaX;
