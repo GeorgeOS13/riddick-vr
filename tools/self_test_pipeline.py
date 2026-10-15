@@ -110,8 +110,35 @@ def run_pipeline(max_frames=120, dump_interval=15, timeout=25, artifacts_dir=DEF
     print("  RIDDICK VR: AUTONOMOUS SELF-PLAY TESTING PIPELINE")
     print("=" * 60)
 
+    # Single-instance guard: the game enforces one instance and IPC names are
+    # global, so overlapping runs (e.g. 15-min worker vs manual soak) connect
+    # to the wrong peer and report WAITING forever. Refuse instead of lying.
+    lock_path = artifacts_dir.parent / ".pipeline.lock"
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(lock_fd, str(os.getpid()).encode())
+    except FileExistsError:
+        print(f"[Pipeline] REFUSED: another run holds {lock_path} (overlap guard).")
+        return None
+    try:
+        return _run_pipeline_inner(max_frames, dump_interval, timeout, artifacts_dir)
+    finally:
+        try:
+            os.close(lock_fd)
+            os.unlink(lock_path)
+        except Exception:
+            pass
+
+
+def _run_pipeline_inner(max_frames=120, dump_interval=15, timeout=25, artifacts_dir=DEFAULT_ARTIFACTS_DIR):
     clean_artifacts(artifacts_dir)
     print(f"[Pipeline] Output artifacts directory: {artifacts_dir}")
+
+    # Snapshot hook log position so marker checks only consider FRESH output
+    # from this run (stale logs previously caused false HITs).
+    log_mark = LOG_FILE.stat().st_size if LOG_FILE.exists() else 0
+    print(f"[Pipeline] Hook log mark: {LOG_FILE} @ byte {log_mark}")
 
     # 1. Start mock OpenXR companion host
     host_cmd = [
@@ -194,7 +221,8 @@ def run_pipeline(max_frames=120, dump_interval=15, timeout=25, artifacts_dir=DEF
     if not bmp_files:
         print("[Pipeline] ERROR: No test frames captured! Checking logs...")
         if LOG_FILE.exists():
-            print(f"[Pipeline] riddick_vr.log tail:\n" + LOG_FILE.read_text()[-1000:])
+            fresh = LOG_FILE.read_bytes()[log_mark:]
+            print(f"[Pipeline] riddick_vr.log FRESH tail (bytes since mark {log_mark}):\n" + fresh.decode(errors="ignore")[-1000:])
         return False
 
     all_passed = True
@@ -238,4 +266,6 @@ if __name__ == "__main__":
         dump_interval=args.interval,
         timeout=args.timeout,
     )
-    sys.exit(0 if success else 1)
+    if success is None:
+        print("SKIP (lock held by another run)")
+    sys.exit(0 if success is not False else 1)

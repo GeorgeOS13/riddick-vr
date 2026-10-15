@@ -21,10 +21,11 @@ MARKERS = [
     "Diegetic Interaction",
 ]
 
-def check_log():
+def check_log(since_byte=0):
     if not LOG_FILE.exists():
         return {}, ""
-    text = LOG_FILE.read_text(errors="ignore")[-20000:]
+    raw = LOG_FILE.read_bytes()[since_byte:]
+    text = raw.decode(errors="ignore")[-20000:]
     found = {m: (m in text) for m in MARKERS}
     return found, text[-2000:]
 
@@ -34,9 +35,13 @@ if __name__ == "__main__":
     ap.add_argument("--interval", type=int, default=15)
     ap.add_argument("--timeout", type=int, default=120)
     a = ap.parse_args()
+    log_mark = LOG_FILE.stat().st_size if LOG_FILE.exists() else 0
     ok = run_pipeline(max_frames=a.frames, dump_interval=a.interval, timeout=a.timeout, artifacts_dir=DEFAULT_ARTIFACTS_DIR)
-    found, tail = check_log()
-    print("\n=== SEMI-PLAY GESTURE MARKERS (riddick_vr.log tail) ===")
+    if ok is None:
+        print("Pipeline result: SKIP (another run holds the lock)")
+        sys.exit(0)
+    found, tail = check_log(since_byte=log_mark)
+    print("\n=== SEMI-PLAY GESTURE MARKERS (fresh riddick_vr.log output only) ===")
     for k, v in found.items():
         print(f"  {'HIT' if v else 'miss'}: {k}")
     hits = sum(1 for v in found.values() if v)
