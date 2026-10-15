@@ -85,7 +85,15 @@ static uint32_t s_projMatrixCount = 0;
 static uint32_t s_modelviewMatrixCount = 0;
 
 static void RawProxyLog(const char* msg) {
-    HANDLE hFile = CreateFileA("C:\\Users\\GigelCastel\\riddick-vr\\hook_debug.txt", FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    // GH #26: %TEMP% instead of a hardcoded developer path.
+    char path[MAX_PATH];
+    DWORD len = GetTempPathA(MAX_PATH, path);
+    if (len == 0 || len >= MAX_PATH) {
+        strcpy_s(path, "hook_debug.txt");
+    } else {
+        strcat_s(path, "riddick_vr_hook_debug.txt");
+    }
+    HANDLE hFile = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile != INVALID_HANDLE_VALUE) {
         DWORD written = 0;
         WriteFile(hFile, msg, (DWORD)strlen(msg), &written, NULL);
@@ -203,6 +211,8 @@ void OpenGLProxy::QueryContextExtensions() {
 }
 
 HGLRC WINAPI OpenGLProxy::Hook_wglCreateContext(HDC hdc) {
+    // GH #27: run deferred hook init here (app thread, outside loader lock).
+    RiddickVR_EnsureHookInitialized();
     if (!s_initialized) Initialize();
     HGLRC result = real_wglCreateContext ? real_wglCreateContext(hdc) : nullptr;
     VR_LOG_INFO("wglCreateContext called (HDC: %p -> HGLRC: %p)", hdc, result);

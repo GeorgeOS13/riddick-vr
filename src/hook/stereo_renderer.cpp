@@ -3,6 +3,7 @@
 #include "vr_hand_renderer.h"
 #include "logging.h"
 #include <tlhelp32.h>
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -28,8 +29,8 @@ static bool IsHostRunning() {
 }
 
 static bool SpawnHostProcess() {
-    static DWORD s_lastSpawnAttempt = 0;
-    DWORD now = GetTickCount();
+    static ULONGLONG s_lastSpawnAttempt = 0;
+    ULONGLONG now = GetTickCount64();
     if (now - s_lastSpawnAttempt < 5000) {
         return false;
     }
@@ -40,26 +41,53 @@ static bool SpawnHostProcess() {
         return true;
     }
 
-    char modulePath[MAX_PATH] = { 0 };
-    GetModuleFileNameA(NULL, modulePath, MAX_PATH);
-    std::string dir = modulePath;
-    size_t lastSlash = dir.find_last_of("\\/");
-    if (lastSlash != std::string::npos) {
-        dir = dir.substr(0, lastSlash);
+    // GH #26: never hardcode a developer machine path. Resolution order:
+    // 1. RIDDICKVR_HOST env override, 2. hook DLL directory, 3. game EXE dir.
+    std::string chosenHost = "";
+    char envHost[MAX_PATH] = { 0 };
+    if (GetEnvironmentVariableA("RIDDICKVR_HOST", envHost, MAX_PATH) > 0 &&
+        GetFileAttributesA(envHost) != INVALID_FILE_ATTRIBUTES) {
+        chosenHost = envHost;
     }
 
-    std::string hostCandidate1 = dir + "\\riddickvr-host.exe";
-    std::string hostCandidate2 = "C:\\Users\\GigelCastel\\riddick-vr\\dist\\riddickvr-host.exe";
+    auto DirOf = [](const char* path) {
+        std::string dir = path;
+        size_t lastSlash = dir.find_last_of("\\/");
+        if (lastSlash != std::string::npos) {
+            dir = dir.substr(0, lastSlash);
+        }
+        return dir;
+    };
 
-    std::string chosenHost = "";
-    if (GetFileAttributesA(hostCandidate1.c_str()) != INVALID_FILE_ATTRIBUTES) {
-        chosenHost = hostCandidate1;
-    } else if (GetFileAttributesA(hostCandidate2.c_str()) != INVALID_FILE_ATTRIBUTES) {
-        chosenHost = hostCandidate2;
+    if (chosenHost.empty()) {
+        // Hook DLL directory (this code runs inside opengl32.dll).
+        HMODULE hSelf = nullptr;
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCSTR>(&SpawnHostProcess), &hSelf) && hSelf) {
+            char dllPath[MAX_PATH] = { 0 };
+            if (GetModuleFileNameA(hSelf, dllPath, MAX_PATH) > 0) {
+                std::string candidate = DirOf(dllPath) + "\\riddickvr-host.exe";
+                if (GetFileAttributesA(candidate.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                    chosenHost = candidate;
+                }
+            }
+        }
+    }
+
+    std::string gameDir = "";
+    if (chosenHost.empty()) {
+        char modulePath[MAX_PATH] = { 0 };
+        GetModuleFileNameA(NULL, modulePath, MAX_PATH);
+        gameDir = DirOf(modulePath);
+        std::string candidate = gameDir + "\\riddickvr-host.exe";
+        if (GetFileAttributesA(candidate.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            chosenHost = candidate;
+        }
     }
 
     if (chosenHost.empty()) {
-        VR_LOG_WARN("Could not locate riddickvr-host.exe in %s or dist directory.", dir.c_str());
+        VR_LOG_WARN("Could not locate riddickvr-host.exe next to the hook DLL or game EXE (RIDDICKVR_HOST override also unset).");
         return false;
     }
 
@@ -75,13 +103,14 @@ static bool SpawnHostProcess() {
     std::vector<char> cmdLineBuf(cmdLine.begin(), cmdLine.end());
     cmdLineBuf.push_back('\0');
 
+    // GH #26: CREATE_NO_WINDOW — never pop a console over the game.
     BOOL success = CreateProcessA(
         nullptr,
         cmdLineBuf.data(),
         nullptr,
         nullptr,
         FALSE,
-        CREATE_NEW_CONSOLE,
+        CREATE_NO_WINDOW,
         nullptr,
         hostWorkingDir.c_str(),
         &si,
@@ -109,17 +138,15 @@ bool StereoRenderer::Initialize(HDC hdc, HGLRC hglrc) {
 
     VR_LOG_INFO("Initializing StereoRenderer for OpenGL context %p...", hglrc);
 
-    // Attempt connecting to the 64-bit OpenXR Host
+    // GH #29: bounded ~200ms sync budget on the render thread. One quick
+    // connect attempt; on failure, fire-and-forget an async host spawn
+    // (SpawnHostProcess is internally 5s-throttled) plus a single retry, then
+    // fall back to Mono standby. The old 25x100ms loop blocked ~2.5s.
+    // Late connection is retried from OnSwapBuffers without blocking.
     if (!m_ipcClient.Connect(100)) {
         VR_LOG_INFO("RiddickVRHost not detected. Attempting auto-spawn...");
-        if (SpawnHostProcess()) {
-            for (int retry = 0; retry < 25; ++retry) {
-                Sleep(100);
-                if (m_ipcClient.Connect(100)) {
-                    break;
-                }
-            }
-        }
+        SpawnHostProcess();
+        m_ipcClient.Connect(100); // single retry; Mono standby on failure
     }
 
     if (m_ipcClient.IsConnected()) {
@@ -139,7 +166,13 @@ bool StereoRenderer::Initialize(HDC hdc, HGLRC hglrc) {
         m_currentPass = StereoPass::Mono;
     }
 
-    CreateEyeBuffers(m_eyeWidth, m_eyeHeight);
+    // GH #30: propagate eye-FBO failure — stay Mono instead of presenting
+    // half-built stereo buffers.
+    if (!CreateEyeBuffers(m_eyeWidth, m_eyeHeight)) {
+        VR_LOG_ERROR("Eye framebuffer setup failed; staying in Mono standby.");
+        m_vrActive = false;
+        m_currentPass = StereoPass::Mono;
+    }
 
     m_initialized = true;
     return true;
@@ -213,6 +246,16 @@ bool StereoRenderer::CreateEyeBuffers(uint32_t width, uint32_t height) {
     // Unbind back to default framebuffer
     OpenGLProxy::glBindFramebuffer(0x8D40, 0);
     OpenGLProxy::glBindTexture(GL_TEXTURE_2D, 0);
+
+    // GH #30: require COMPLETE on both eyes; a half-built stereo pair must
+    // fail closed (caller drops to Mono) rather than present garbage.
+    if (leftStatus != 0x8CD5 /* GL_FRAMEBUFFER_COMPLETE */ ||
+        rightStatus != 0x8CD5) {
+        VR_LOG_ERROR("Eye FBO setup failed (left=0x%X right=0x%X); discarding buffers.",
+            leftStatus, rightStatus);
+        DestroyEyeBuffers();
+        return false;
+    }
 
     // Initialize hardware texture sharing if supported
     InitD3D11Interop(width, height);
@@ -436,13 +479,13 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
     if (!m_initialized) return;
 
     static uint32_t s_swapCount = 0;
-    static DWORD s_lastFpsTime = 0;
+    static ULONGLONG s_lastFpsTime = 0;
     static uint32_t s_fpsFrameCount = 0;
 
     s_swapCount++;
     s_fpsFrameCount++;
 
-    DWORD now = GetTickCount();
+    ULONGLONG now = GetTickCount64();
     if (now - s_lastFpsTime >= 5000) {
         float fps = s_fpsFrameCount / ((now - s_lastFpsTime) / 1000.0f);
         VR_LOG_INFO("OnSwapBuffers: Frame %u (%.1f FPS, HDC: %p)", s_swapCount, fps, hdc);
@@ -465,7 +508,7 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
 
     // Retry connecting to host if not yet connected
     if (!m_ipcClient.IsConnected()) {
-        static DWORD s_lastRetry = 0;
+        static ULONGLONG s_lastRetry = 0;
         if (now - s_lastRetry > 3000) {
             s_lastRetry = now;
             if (m_ipcClient.Connect(100)) {
@@ -514,6 +557,18 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
             GLint dstW = m_eyeWidth;
             GLint dstH = m_eyeHeight;
 
+            // GH #12: monoscopic capture has no IPD parallax (both eyes blit
+            // the same backbuffer). Apply a small half-IPD horizontal shift per
+            // eye as a convergence cue. This does NOT synthesize true parallax
+            // (occlusion/disparity need an engine-level dual-view render).
+            // TODO: picks/crosshair at vrActive depth via CameraHook-projected
+            // dual frustum blits once the engine exposes per-eye viewports.
+            // Desktop mirror is untouched: only eye-FBO source rects shift.
+            GLint halfIpdPx = (std::max)(1, srcW / 240);
+            GLint leftSrcX0 = srcX - halfIpdPx;
+            GLint leftSrcX1 = srcX + srcW - halfIpdPx;
+            GLint rightSrcX0 = srcX + halfIpdPx;
+            GLint rightSrcX1 = srcX + srcW + halfIpdPx;
 
             // Read from default backbuffer 0
             OpenGLProxy::real_glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */, 0);
@@ -527,7 +582,7 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
             // this fills the entire buffer with 100% immersion and ZERO black bars.
             OpenGLProxy::real_glBindFramebuffer(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, m_leftFbo);
             OpenGLProxy::glBlitFramebuffer(
-                srcX, srcY + srcH, srcX + srcW, srcY,
+                leftSrcX0, srcY + srcH, leftSrcX1, srcY,
                 dstX, dstY, dstX + dstW, dstY + dstH,
                 GL_COLOR_BUFFER_BIT, GL_LINEAR
             );
@@ -538,7 +593,7 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
             // Blit into Right Eye FBO (vertically flipped: srcY goes from srcH down to 0)
             OpenGLProxy::real_glBindFramebuffer(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, m_rightFbo);
             OpenGLProxy::glBlitFramebuffer(
-                srcX, srcY + srcH, srcX + srcW, srcY,
+                rightSrcX0, srcY + srcH, rightSrcX1, srcY,
                 dstX, dstY, dstX + dstW, dstY + dstH,
                 GL_COLOR_BUFFER_BIT, GL_LINEAR
             );

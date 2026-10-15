@@ -178,10 +178,23 @@ void VRHandRenderer::RenderHands(const RiddickVRSharedState& state, bool isLeftE
     s_gl.glPushAttrib(GL_ENABLE_BIT | GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT |
                       GL_LIGHTING_BIT | GL_POLYGON_BIT | GL_VIEWPORT_BIT);
 
+    // GH #22: save every extra piece of state we mutate below (program,
+    // buffer bindings, active matrix mode) so the game render state is
+    // bit-identical after RenderHands returns.
+    GLint prevMatrixMode = GL_MODELVIEW;
+    if (s_gl.glGetIntegerv) {
+        s_gl.glGetIntegerv(0x0BA0 /* GL_MATRIX_MODE */, &prevMatrixMode);
+    }
     // Save previous GLSL program and unbind to allow clean fixed-function tactical glove rendering
     GLint prevProgram = 0;
     if (s_gl.glGetIntegerv) {
         s_gl.glGetIntegerv(0x8B8D /* GL_CURRENT_PROGRAM */, &prevProgram);
+    }
+    GLint prevArrayBuffer = 0;
+    GLint prevElementArrayBuffer = 0;
+    if (s_gl.glGetIntegerv) {
+        s_gl.glGetIntegerv(0x8894 /* GL_ARRAY_BUFFER_BINDING */, &prevArrayBuffer);
+        s_gl.glGetIntegerv(0x8895 /* GL_ELEMENT_ARRAY_BUFFER_BINDING */, &prevElementArrayBuffer);
     }
     if (s_gl.glUseProgram) {
         s_gl.glUseProgram(0);
@@ -330,16 +343,30 @@ void VRHandRenderer::RenderHands(const RiddickVRSharedState& state, bool isLeftE
         s_gl.glPopMatrix();
     }
 
-    // 8. Restore matrices and OpenGL state
+    // 8. Restore matrices and OpenGL state (GH #22: explicit restores for
+    // everything RenderHands mutated; glPopAttrib alone does not cover
+    // program/binding/matrix-mode state).
     s_gl.glMatrixMode(GL_MODELVIEW);
     s_gl.glPopMatrix();
 
     s_gl.glMatrixMode(GL_PROJECTION);
     s_gl.glPopMatrix();
 
-    if (s_gl.glUseProgram && prevProgram != 0) {
-        s_gl.glUseProgram(prevProgram);
+    // Explicitly undo enable/disable changes (mirrors section 5 setup).
+    s_gl.glDisable(GL_LIGHT0);
+    s_gl.glDisable(GL_LIGHTING);
+    s_gl.glDisable(GL_COLOR_MATERIAL);
+    s_gl.glDisable(0x0BA7 /* GL_NORMALIZE */);
+    s_gl.glDisable(GL_CULL_FACE);
+
+    if (s_gl.glUseProgram) {
+        s_gl.glUseProgram((GLuint)prevProgram);
     }
+    if (s_gl.glBindBuffer) {
+        s_gl.glBindBuffer(0x8892 /* GL_ARRAY_BUFFER */, (GLuint)prevArrayBuffer);
+        s_gl.glBindBuffer(0x8893 /* GL_ELEMENT_ARRAY_BUFFER */, (GLuint)prevElementArrayBuffer);
+    }
+    s_gl.glMatrixMode(prevMatrixMode);
 
     s_gl.glPopAttrib();
 }

@@ -164,7 +164,8 @@ def run_pipeline(max_frames=120, dump_interval=15, timeout=25, artifacts_dir=DEF
         if line:
             line_str = line.strip()
             host_logs.append(line_str)
-            if "Heartbeat" in line_str or "Captured test frame" in line_str or "Bound GPU" in line_str:
+            # GH #21/#38: surface hook->host haptic publish evidence in test output.
+            if "Heartbeat" in line_str or "Captured test frame" in line_str or "Bound GPU" in line_str or "aptic" in line_str:
                 print(f"  [Host Log] {line_str}")
 
         time.sleep(0.05)
