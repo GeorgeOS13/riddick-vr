@@ -493,6 +493,47 @@ def decode_bonedeform(b: bytes, off: int,
                       matrix_bones, consumed, exact), consumed
 
 
+# CLUSTER/MISCELLANEOUS (the per-cluster header that precedes VERTEXFRAMES).
+# 44 bytes on every shipped model: u32 model version (0x102, the same value the
+# BONEDEFORM reader branches on), u32 flags, u32 surface_index, u32 reserved,
+# then 24 opaque bytes. Recovered from the on-disk bytes + an aggregate check
+# over all 631 models: surface_index is always < the SURFACES count and the
+# number of distinct values equals that count in every model; flags == 0 exactly
+# when the cluster carries a non-empty TVERTEXFRAMES UV set (2099/2099 textured,
+# 2563/2563 untextured). See docs/adr/0420-native-hand-mesh-asset.md.
+MISC_RECORD_LEN = 44
+
+
+class ClusterInfo:
+    """Decoded ``CLUSTER``/``MISCELLANEOUS`` header (one per cluster)."""
+
+    __slots__ = ("version", "flags", "surface_index", "reserved", "payload")
+
+    def __init__(self, version, flags, surface_index, reserved, payload):
+        self.version = version
+        self.flags = flags
+        self.surface_index = surface_index
+        self.reserved = reserved
+        self.payload = payload          # the trailing opaque bytes
+
+    def as_dict(self):
+        return {
+            "version": self.version,
+            "flags": self.flags,
+            "surface_index": self.surface_index,
+            "reserved": self.reserved,
+        }
+
+
+def decode_cluster_info(b: bytes, off: int, size: int) -> ClusterInfo:
+    if size < 16:
+        raise GeometryError(f"MISCELLANEOUS size {size} < 16")
+    version, flags, surface_index, reserved = struct.unpack_from("<IIII", b, off)
+    return ClusterInfo(version, flags, surface_index, reserved,
+                       b[off + 16:off + size])
+
+
+
 # SKELETON/NODES (recovered from MXR.dll: the skeleton reader FUN_100219d0,
 # writer FUN_1001f7a0, and the node record reader FUN_1001fc30 / writer
 # FUN_1001eec0, which agree byte for byte; finalizer FUN_1001ff60 caps the two
@@ -839,6 +880,8 @@ class Xmd:
             "triangle_count_matches_header": None,
             "surface_count": surf.count if surf else 0,
             "surfaces": self.surface_names() if surf else [],
+            "distinct_cluster_surfaces": len(
+                {i.surface_index for i in self.cluster_infos()}),
             "skeleton_node_count": nodes.count if nodes else 0,
             "bone_deform_vertices": None,   # filled from decoded skin below
             "has_skinning": bool(boned and nodes),
@@ -989,7 +1032,8 @@ class Xmd:
         # vertex count agreement, and every referenced bone inside the skeleton.
         nodes_chunk = self.chunk("NODES")
         bone_total = nodes_chunk.count if nodes_chunk else 0
-        for c in self.cluster_meshes():
+        meshes = self.cluster_meshes()
+        for c in meshes:
             if c.get("error_kind") == "corrupt":
                 problems.append(f"cluster {c['index']}: {c['error']}")
             elif c["index_in_range"] is False:
@@ -1009,6 +1053,35 @@ class Xmd:
                 problems.append(
                     f"cluster {c['index']}: bone index {c['max_bone']} "
                     f">= skeleton node count {bone_total}")
+
+        # Cluster MISCELLANEOUS cross-check (GH #55): each cluster's
+        # surface_index must resolve inside SURFACES, the used indices must
+        # cover every surface, and the flags field must agree with whether the
+        # cluster actually carries a UV set. All three hold on all 631 shipped
+        # models (see docs/adr/0420-native-hand-mesh-asset.md).
+        surf_chunk = self.chunk("SURFACES")
+        surface_total = surf_chunk.count if surf_chunk else 0
+        infos = self.cluster_infos()
+        if len(infos) not in (0, len(meshes)):
+            problems.append(
+                f"cluster MISCELLANEOUS count {len(infos)} != cluster count "
+                f"{len(meshes)}")
+        else:
+            used_surfaces = set()
+            for c, info in zip(meshes, infos):
+                used_surfaces.add(info.surface_index)
+                if surface_total and info.surface_index >= surface_total:
+                    problems.append(
+                        f"cluster {c['index']}: surface index "
+                        f"{info.surface_index} >= SURFACES count {surface_total}")
+                if (info.flags == 0) != (c["uv_count"] is not None):
+                    problems.append(
+                        f"cluster {c['index']}: MISCELLANEOUS flags "
+                        f"{info.flags} disagrees with UV presence")
+            if surface_total and meshes and len(used_surfaces) != surface_total:
+                problems.append(
+                    f"cluster surface indices cover {len(used_surfaces)} of "
+                    f"{surface_total} surfaces")
 
         # Skeleton cross-check (GH #55): NODES must tile exactly, use version
         # 0x100, keep the padding/slot invariants, form an acyclic tree with a
@@ -1213,6 +1286,27 @@ class Xmd:
                 owner.setdefault(last_vf.offset, n)
         return owner
 
+    def cluster_infos(self) -> list[ClusterInfo]:
+        """Decode each ``CLUSTER``'s ``MISCELLANEOUS`` header, traversal order.
+
+        Index-aligned with :meth:`cluster_meshes`: the i-th ``CLUSTER`` node owns
+        the i-th ``VERTEXFRAMES`` chunk. Empty when the model has no clusters."""
+        infos: list[ClusterInfo] = []
+        for n in self.walk_linked():
+            if n.name != "CLUSTER":
+                continue
+            child = n.first_child
+            seen: set[int] = set()
+            while child and child in self.by_offset and child not in seen:
+                seen.add(child)
+                k = self.by_offset[child]
+                if k.name == "MISCELLANEOUS":
+                    infos.append(decode_cluster_info(
+                        self.data, k.data_offset, k.data_size))
+                    break
+                child = k.next_sibling
+        return infos
+
     def cluster_meshes(self) -> list[dict]:
         """Pair ``VERTEXFRAMES``/``TVERTEXFRAMES``/``TRIANGLES`` chunks in order.
 
@@ -1225,11 +1319,15 @@ class Xmd:
         tv_nodes = [n for n in order if n.name == "TVERTEXFRAMES"]
         tri_nodes = [n for n in order if n.name == "TRIANGLES"]
         skin_owner = self._skin_owner_map()
+        infos = self.cluster_infos()
+        aligned = len(infos) == len(vf_nodes)
         clusters = []
         for i, vn in enumerate(vf_nodes):
             entry: dict = {
                 "index": i,
                 "vertex_chunk": vn.as_dict(),
+                "surface_index": infos[i].surface_index if aligned else None,
+                "cluster_flags": infos[i].flags if aligned else None,
                 "frames": [],
                 "uv_chunk": None,
                 "uv_count": None,
@@ -1402,6 +1500,7 @@ def report_file(path: str, want_json: bool, with_strings: bool,
               f"{len(x.nodes)} nodes, data@0x{x.data_start:X})")
         g = rec["geometry"]
         print(f"   surfaces({g['surface_count']}): {g['surfaces']}")
+        print(f"   cluster_surface_indices_used={g['distinct_cluster_surfaces']}")
         print(f"   triangles={g['triangle_count']} "
               f"(header-match={g['triangle_count_matches_header']})  "
               f"skeleton_nodes={g['skeleton_node_count']}  "
@@ -1441,6 +1540,7 @@ def report_file(path: str, want_json: bool, with_strings: bool,
                       f"tris={c['triangle_count']} max_index={c['max_index']} "
                       f"in_range={c['index_in_range']} "
                       f"uvs={c['uv_count']} uv_match={c['uv_matches']} "
+                      f"surface={c['surface_index']} flags={c['cluster_flags']} "
                       f"skin={c['skin'] and c['skin']['influence_count']} "
                       f"skin_match={c['skin_matches']} max_bone={c['max_bone']}"
                       + (f"  ERR {c['error']}" if c["error"] else ""))

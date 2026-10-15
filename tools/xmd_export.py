@@ -251,6 +251,11 @@ def cluster_skin_dict(mesh: ClusterMesh) -> dict | None:
 
 def manifest(x: Xmd, meshes) -> dict:
     """Compact, committable summary (no bulk vertex data)."""
+    try:
+        infos = x.cluster_infos()
+    except GeometryError:
+        infos = []
+    surface_of = {i: info.surface_index for i, info in enumerate(infos)}
     clusters = []
     for m in meshes:
         bones = m.bones_used()
@@ -262,6 +267,7 @@ def manifest(x: Xmd, meshes) -> dict:
             "vertex_frames": m.frames,
             "bounds_min": list(m.bounds_min),
             "bounds_max": list(m.bounds_max),
+            "surface_index": surface_of.get(m.index),
             "skinned": m.skin is not None,
             "influences": m.skin.influence_count if m.skin else 0,
             "bones_used": bones,

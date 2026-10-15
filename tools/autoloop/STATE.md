@@ -2,6 +2,55 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 10 — 2026-10-16 00:31 (scheduled loop)
+- **Unit:** GH #55 → #46 — bake the decoded arm/hand geometry into a native,
+  compile-in C++ asset, and pin the `.xmd` **cluster→surface** mapping that
+  ADR-0419 left open.
+- Finding (real evidence, read-only): every `CLUSTER` node has a 44-byte
+  `MISCELLANEOUS` child = `{u32 version=0x102; u32 flags; u32 surface_index;
+  u32 reserved; 24 opaque bytes}`. Over **all 631** shipped models /
+  **4662** clusters: `surface_index < SURFACES.count` (**0** violations), the
+  number of **distinct** surface values equals `SURFACES.count` in every model
+  (**0** mismatches), and `flags == 0` **iff** the cluster carries a non-empty
+  `TVERTEXFRAMES` (2099 textured all `flags==0`; 2563 untextured `{1:839,
+  3:1724}` — the 2099 matches ADR-0416 exactly). So `Riddick_B05`: cluster 1
+  (left arm) = surface **1** `RIDDICK_B03_D`, cluster 2 (right arm) = surface
+  **2** `RIDDICK_ARMSCAR_D`, clusters 0/3/6 = surface 0 `PA1_INMATE_P17`
+  (the base-name grouping is an inference — only the numeric index is proven).
+- Change:
+  - `tools/xmd_bake.py` (new): bakes clusters to a C++ header
+    (`--set`/`--model`/`--cluster`, `--cpp`, `--manifest`, `--verify`,
+    `--json`); dependency-free, read-only, built on `mos_xmd`/`xmd_export`.
+  - `src/hook/native_hand_mesh_data.h` (generated): 4 meshes / 1548 verts /
+    2610 tris (`Riddick_LeftArm` 526v, `Riddick_RightArm` 344v, `Pa2_Hand` 138v,
+    `Pa2_Hand_Detail` 540v) as `inline constexpr` arrays.
+  - `src/hook/native_hand_mesh.h` (new, header-only): struct + count/at/find
+    accessors.
+  - `tests/native_hand_mesh_tests.cpp` + CMake target `native_hand_mesh_asset`:
+    index range/coverage, unit normals, declared-vs-computed AABB, frozen
+    vertex/index/surface counts (drift guard), LOD bounds, lookup.
+  - `tools/mos_xmd.py`: `ClusterInfo`/`decode_cluster_info`/`cluster_infos()`;
+    `cluster_meshes()` carries `surface_index`/`cluster_flags`; `validate()` adds
+    the 3 surface/flag invariants; summary + `--mesh` print the surface.
+  - `tools/xmd_export.py`: manifests now record `surface_index`.
+  - `tools/test_xmd_bake.py` (new, 6 tests), `tools/test_mos_xmd.py` (+4
+    cluster-info tests), `.github/workflows/vr-worker.yml` (+bake test step),
+    `docs/adr/0420-native-hand-mesh-asset.md`,
+    `docs/rea/reference/native_hand_mesh.json`.
+- Evidence: `mos_xmd.py --inventory <game>\Content\Models --check` → **631/631
+  `ok`, 0 failures** (with the new invariants). `xmd_bake --verify` → **OK**
+  (`Riddick_B05.xmd` sha256 `e6841e19…`, `Pa2_Hand_01.xmd` `bdd0dbd1…` recorded
+  in the header). `build-all.ps1 -Config Release` OK (x64 + x86); CTest **4/4 on
+  x64 and x86** (`native_hand_mesh_asset` passes both). `test_mos_xmd.py`,
+  `test_xmd_export.py`, `test_xmd_bake.py`, `validate_addresses.py`,
+  `verify_hook_init.py`, `verify_reported_fixes.py`, `scenario_tests.py --check`
+  all PASS.
+- Blocker: none. Next: wire the native draw path in `VRHandRenderer` behind a
+  config flag (rigid bind-pose first, then skinned once `KEYS` bone rotations are
+  decoded), procedural overlay retained as fallback; the `SURFACES` base-name
+  grouping and the `MISCELLANEOUS` +0x10 bounds-like block remain open.
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 9 — 2026-10-16 00:17 (scheduled loop)
 - **Unit:** GH #55 → #46 — emit the decoded mesh/skin data: new
   `tools/xmd_export.py` (+ `tools/test_xmd_export.py`) exports any `.xmd`'s

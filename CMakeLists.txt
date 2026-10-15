@@ -102,4 +102,11 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
     )
     add_test(NAME dialogue_navigation_deadzone COMMAND riddick_vr_dialogue_navigation_tests)
+
+    # GH #55 -> GH #46: baked native hand mesh asset (generated header + loader).
+    add_executable(riddick_vr_native_hand_mesh_tests tests/native_hand_mesh_tests.cpp)
+    target_include_directories(riddick_vr_native_hand_mesh_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
+    )
+    add_test(NAME native_hand_mesh_asset COMMAND riddick_vr_native_hand_mesh_tests)
 endif()

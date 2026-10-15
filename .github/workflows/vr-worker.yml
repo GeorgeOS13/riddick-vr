@@ -45,6 +45,8 @@ jobs:
         run: python tools/test_mos_xmd.py
       - name: MOS .xmd mesh/skin export round-trip tests (GH #55)
         run: python tools/test_xmd_export.py
+      - name: MOS .xmd-native hand mesh bake tests (GH #55 -> #46)
+        run: python tools/test_xmd_bake.py
       - name: Hook-init regression test (GH #42)
         run: python tools/verify_hook_init.py
       - name: Scenario manifest validation (GH #48)

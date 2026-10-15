@@ -713,6 +713,105 @@ def test_skeleton_detects_parent_table_mismatch(tmp_dir):
         os.remove(path)
 
 
+def _misc_payload(version=0x102, flags=0, surface_index=0, reserved=0,
+                  tail=b"\x00" * 28) -> bytes:
+    out = struct.pack("<4I", version, flags, surface_index, reserved) + tail
+    assert len(out) == mos_xmd.MISC_RECORD_LEN, len(out)
+    return out
+
+
+def _cluster_info_container(misc, vf_payload, uv_payload, surf_payload,
+                            surf_count) -> bytes:
+    """One CLUSTER (MISCELLANEOUS + VERTEXFRAMES + TVERTEXFRAMES) + SURFACES."""
+    stride = mos_xmd.NODE_RECORD_LEN
+
+    def at(i):
+        return stride * (i + 1)
+
+    nodes = [
+        ("EXTENDEDMODEL", 0, at(1), 0, 0, 0),
+        ("CLUSTERS", at(4), at(2), 0, 0, 0),
+        ("CLUSTER", 0, at(3), 0, 0, 0),
+        ("MISCELLANEOUS", at(5), 0, len(misc), 0, 0),
+        ("SURFACES", 0, 0, len(surf_payload), surf_count, 0),
+        ("VERTEXFRAMES", at(6), 0, len(vf_payload), 1, 0),
+        ("TVERTEXFRAMES", 0, 0, len(uv_payload), 1, 0x201),
+    ]
+    return build_container(nodes, [b"", b"", b"", misc, surf_payload,
+                                   vf_payload, uv_payload])
+
+
+def test_cluster_info_roundtrip(tmp_dir):
+    verts = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)]
+    normals = [(0, 0, 0)] * 4
+    blob = _cluster_info_container(_misc_payload(flags=3, surface_index=0),
+                                   _vf204_frame(verts, normals), b"",
+                                   b"PA1_INMATE_P17", 1)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        infos = x.cluster_infos()
+        assert len(infos) == 1, infos
+        assert infos[0].version == 0x102 and infos[0].flags == 3, infos[0]
+        assert infos[0].surface_index == 0 and infos[0].reserved == 0
+        assert len(infos[0].payload) == 28, len(infos[0].payload)
+        c = x.cluster_meshes()[0]
+        assert c["surface_index"] == 0 and c["cluster_flags"] == 3, c
+        assert x.validate() == [], x.validate()
+        assert x.geometry_summary()["distinct_cluster_surfaces"] == 1
+    finally:
+        os.remove(path)
+
+
+def test_cluster_info_flags_match_uv(tmp_dir):
+    verts = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)]
+    normals = [(0, 0, 0)] * 4
+    uvs = [(0, 0), (65535, 0), (0, 65535), (65535, 65535)]
+    blob = _cluster_info_container(_misc_payload(flags=0, surface_index=0),
+                                   _vf204_frame(verts, normals),
+                                   _tv200_frame(uvs), b"PA1_INMATE_P17", 1)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        c = x.cluster_meshes()[0]
+        assert c["uv_count"] == 4 and c["cluster_flags"] == 0, c
+        assert x.validate() == [], x.validate()
+    finally:
+        os.remove(path)
+
+
+def test_cluster_info_detects_flags_uv_mismatch(tmp_dir):
+    verts = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)]
+    normals = [(0, 0, 0)] * 4
+    # flags == 0 claims a textured cluster, but there is no UV payload
+    blob = _cluster_info_container(_misc_payload(flags=0, surface_index=0),
+                                   _vf204_frame(verts, normals), b"",
+                                   b"PA1_INMATE_P17", 1)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        problems = x.validate()
+        assert any("disagrees with UV presence" in p for p in problems), problems
+    finally:
+        os.remove(path)
+
+
+def test_cluster_info_detects_surface_index_out_of_range(tmp_dir):
+    verts = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)]
+    normals = [(0, 0, 0)] * 4
+    blob = _cluster_info_container(_misc_payload(flags=3, surface_index=2),
+                                   _vf204_frame(verts, normals), b"",
+                                   b"PA1_INMATE_P17", 1)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        problems = x.validate()
+        assert any("surface index 2 >= SURFACES count 1" in p
+                   for p in problems), problems
+    finally:
+        os.remove(path)
+
+
 def main() -> int:
     tests = (test_roundtrip, test_rejects_bad_magic,
              test_geometry_roundtrip, test_geometry_detects_index_out_of_range,
@@ -731,7 +830,11 @@ def main() -> int:
              test_skeleton_detects_bad_version, test_skeleton_absent_is_ok,
              test_skeleton_child_table,
              test_skeleton_detects_child_range_overrun,
-             test_skeleton_detects_parent_table_mismatch)
+             test_skeleton_detects_parent_table_mismatch,
+             test_cluster_info_roundtrip,
+             test_cluster_info_flags_match_uv,
+             test_cluster_info_detects_flags_uv_mismatch,
+             test_cluster_info_detects_surface_index_out_of_range)
     with tempfile.TemporaryDirectory() as d:
         for t in tests:
             t(d)
