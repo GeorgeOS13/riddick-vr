@@ -320,12 +320,185 @@ def test_uv_empty_chunk_is_ok(tmp_dir):
         os.remove(path)
 
 
+def _bonedeform(vertices, influences, matrix_map_id=None, matrix_bones=()):
+    """Build a BONEDEFORM payload: vertex records, influence pool, matrix map.
+
+    ``vertices`` is a list of ``(flags, influence_count, influence_start)`` and
+    ``influences`` a list of ``(bone, weight_q)`` (weight = q / 255)."""
+    out = bytearray(struct.pack("<I", len(vertices)))
+    for (flags, cnt, start) in vertices:
+        out += struct.pack("<BBH", flags, cnt, start)
+    out += struct.pack("<I", len(influences))
+    for (bone, wq) in influences:
+        out += struct.pack("<BB", bone, wq)
+    if matrix_map_id is not None:
+        out += struct.pack("<i", matrix_map_id)
+        out += struct.pack("<I", len(matrix_bones))
+        out += bytes(matrix_bones)
+    return bytes(out)
+
+
+def _skin_container(vf_payload, bd_payload, bones):
+    """VERTEXFRAMES + BONEDEFORM (+ NODES carrying ``bones`` skeleton nodes)."""
+    stride = mos_xmd.NODE_RECORD_LEN
+    nodes_payload = b"\x00" * (34 * bones)
+    nodes = [
+        ("VERTEXFRAMES", stride * 2, 0, len(vf_payload), 1, 0),
+        ("BONEDEFORM", stride * 3, 0, len(bd_payload), 0, 0),
+        ("NODES", 0, 0, len(nodes_payload), bones, 0),
+    ]
+    return build_container(nodes, [vf_payload, bd_payload, nodes_payload])
+
+
+def test_skin_roundtrip(tmp_dir):
+    verts = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)]
+    normals = [(0, 0, 0)] * 4
+    vrecs = [(0, 2, 0), (0, 1, 2), (0, 3, 3), (0, 1, 6)]
+    infl = [(0, 255), (1, 128), (2, 255), (0, 64), (3, 64), (5, 128),
+            (7, 255)]
+    bd = _bonedeform(vrecs, infl, matrix_map_id=-1, matrix_bones=())
+    blob = _skin_container(_vf204_frame(verts, normals), bd, bones=8)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        sk = x.bone_deform()
+        assert sk.vertex_count == 4 and sk.influence_count == 7, sk.as_dict()
+        assert sk.vertices[0].influence_count == 2
+        assert sk.influences[1] == (1, 128 / 255.0), sk.influences[1]
+        assert sk.max_bone() == 7
+        assert sk.max_influences() == 3
+        assert sk.matrix_map_id == -1 and sk.matrix_bones == []
+        assert sk.exact is True and sk.size == len(bd), (sk.size, len(bd))
+        assert x.validate() == [], x.validate()
+        c = x.cluster_meshes()[0]
+        assert c["skin_matches"] is True and c["max_bone"] == 7, c
+        st = x.geometry_stats()
+        assert st["skinned_clusters"] == 1, st
+        assert st["decoded_influences"] == 7, st
+        assert st["max_influences_per_vertex"] == 3, st
+    finally:
+        os.remove(path)
+
+
+def test_skin_matrix_map_and_influences_of(tmp_dir):
+    verts = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+    normals = [(0, 0, 0)] * 3
+    vrecs = [(0, 1, 0), (0, 2, 1), (0, 1, 3)]
+    infl = [(4, 200), (6, 55), (9, 255), (2, 100)]
+    bd = _bonedeform(vrecs, infl, matrix_map_id=3, matrix_bones=b"\x01\x02\x09")
+    blob = _skin_container(_vf204_frame(verts, normals), bd, bones=16)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        sk = x.bone_deform()
+        assert sk.matrix_map_id == 3, sk.matrix_map_id
+        assert sk.matrix_bones == [1, 2, 9], sk.matrix_bones
+        assert sk.influences_of(1) == [(6, 55 / 255.0), (9, 1.0)], \
+            sk.influences_of(1)
+        assert x.validate() == [], x.validate()
+    finally:
+        os.remove(path)
+
+
+def test_skin_detects_prefix_sum_mismatch(tmp_dir):
+    verts = [(0, 0, 0), (1, 0, 0)]
+    normals = [(0, 0, 0)] * 2
+    # second vertex must start at 1 but claims 0
+    vrecs = [(0, 1, 0), (0, 1, 0)]
+    infl = [(0, 255), (1, 255)]
+    bd = _bonedeform(vrecs, infl, matrix_map_id=-1)
+    blob = _skin_container(_vf204_frame(verts, normals), bd, bones=4)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        problems = x.validate()
+        assert any("influence_start" in p for p in problems), problems
+    finally:
+        os.remove(path)
+
+
+def test_skin_detects_vertex_count_mismatch(tmp_dir):
+    verts = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+    normals = [(0, 0, 0)] * 3
+    # only 2 vertex records for 3 mesh vertices
+    vrecs = [(0, 1, 0), (0, 1, 1)]
+    infl = [(0, 255), (1, 255)]
+    bd = _bonedeform(vrecs, infl, matrix_map_id=-1)
+    blob = _skin_container(_vf204_frame(verts, normals), bd, bones=4)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        problems = x.validate()
+        assert any("skin vertex count 2 != vertex count" in p for p in problems), \
+            problems
+    finally:
+        os.remove(path)
+
+
+def test_skin_detects_bone_out_of_range(tmp_dir):
+    verts = [(0, 0, 0), (1, 0, 0)]
+    normals = [(0, 0, 0)] * 2
+    vrecs = [(0, 1, 0), (0, 1, 1)]
+    infl = [(0, 255), (5, 255)]     # bone 5 with only 4 skeleton nodes
+    bd = _bonedeform(vrecs, infl, matrix_map_id=-1)
+    blob = _skin_container(_vf204_frame(verts, normals), bd, bones=4)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        problems = x.validate()
+        assert any("bone index 5 >= skeleton node count 4" in p
+                   for p in problems), problems
+    finally:
+        os.remove(path)
+
+
+def test_skin_bad_matrix_map_tiling(tmp_dir):
+    verts = [(0, 0, 0), (1, 0, 0)]
+    normals = [(0, 0, 0)] * 2
+    vrecs = [(0, 1, 0), (0, 1, 1)]
+    infl = [(0, 255), (1, 255)]
+    good = bytearray(_bonedeform(vrecs, infl, matrix_map_id=0,
+                                 matrix_bones=b"\x01\x02"))
+    struct.pack_into("<I", good, len(good) - 6, 5)   # claim 5 bones, supply 2
+    blob = _skin_container(_vf204_frame(verts, normals), bytes(good), bones=4)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        problems = x.validate()
+        assert any("matrix-map size" in p for p in problems), problems
+    finally:
+        os.remove(path)
+
+
+def test_skin_absent_is_ok(tmp_dir):
+    verts = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+    normals = [(0, 0, 0)] * 3
+    # geometry-only container: no BONEDEFORM node
+    blob = _geometry_container(_vf204_frame(verts, normals),
+                               _triangles([0, 1, 2]), 1)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        assert x.bone_deform() is None
+        assert x.validate() == [], x.validate()
+        c = x.cluster_meshes()[0]
+        assert c["skin"] is None and c["skin_matches"] is None, c
+        assert x.geometry_stats()["skinned_clusters"] == 0
+    finally:
+        os.remove(path)
+
+
 def main() -> int:
     tests = (test_roundtrip, test_rejects_bad_magic,
              test_geometry_roundtrip, test_geometry_detects_index_out_of_range,
              test_geometry_detects_size_mismatch,
              test_uv_roundtrip, test_uv_detects_count_mismatch,
-             test_uv_detects_bad_tiling, test_uv_empty_chunk_is_ok)
+             test_uv_detects_bad_tiling, test_uv_empty_chunk_is_ok,
+             test_skin_roundtrip, test_skin_matrix_map_and_influences_of,
+             test_skin_detects_prefix_sum_mismatch,
+             test_skin_detects_vertex_count_mismatch,
+             test_skin_detects_bone_out_of_range,
+             test_skin_bad_matrix_map_tiling, test_skin_absent_is_ok)
     with tempfile.TemporaryDirectory() as d:
         for t in tests:
             t(d)

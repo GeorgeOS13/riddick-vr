@@ -82,6 +82,25 @@ Geometry (recovered from MXR.dll ``CTriangleMeshCore::Read`` +
                  exactly ``20 + 4n``. A cluster with **no** UVs stores an empty
                  (``data_size == 0``) ``TVERTEXFRAMES`` node.
 
+  BONEDEFORM   : per-vertex skinning, recovered from MXR.dll
+                 ``FUN_1007d260`` (the embedded form selected whenever the
+                 model version is > 0x100). Layout::
+
+                     u32  vertex_count    N
+                     N * { u8 flags; u8 influence_count; u16 influence_start }
+                     u32  influence_count M
+                     M * { u8 bone; u8 weight_q }        (weight = q / 255)
+                     u32  matrix_map_id   (s32; 0xFFFFFFFF = none)
+                     u32  matrix_bone_count B
+                     B * u8               (bone matrix-map palette indices)
+
+                 ``influence_start`` is the running prefix sum of
+                 ``influence_count`` (the reader repairs it in place), so a
+                 vertex's influences are ``influences[start:start+count]``.
+                 A cluster with **no** skinning omits the ``BONEDEFORM`` node.
+                 The trailing matrix-map block is present for every shipped
+                 asset (model version 0x302); it is validated by ``--check``.
+
   Clusters     : one ``VERTEXFRAMES``/``TVERTEXFRAMES``/``TRIANGLES`` triple per
                  submesh, in traversal order; every index must be < the paired
                  frame's vertex count and a non-empty UV frame's count must
@@ -295,6 +314,153 @@ def _u32(b: bytes, off: int) -> int:
     return struct.unpack_from("<I", b, off)[0]
 
 
+def _i32(b: bytes, off: int) -> int:
+    return struct.unpack_from("<i", b, off)[0]
+
+
+# BONEDEFORM (embedded skinning) constants, recovered from MXR.dll FUN_1007d260
+# + FUN_1007c150 (version 0x200 branch). Weights are stored as u8 and scaled by
+# 1/255; influence indices are u8 (so at most 256 bones).
+BONE_DEFORM_VERSION = 0x200
+_BONE_WEIGHT_SCALE = 1.0 / 255.0
+# The trailing matrix-map id is a signed word; this is the "no matrix map" value.
+BONE_MATRIX_MAP_NONE = -1
+
+
+class BoneVertex:
+    """One per-vertex ``BONEDEFORM`` record: ``{u8 flags; u8 n; u16 start}``."""
+
+    __slots__ = ("flags", "influence_count", "influence_start")
+
+    def __init__(self, flags, influence_count, influence_start):
+        self.flags = flags
+        self.influence_count = influence_count
+        self.influence_start = influence_start
+
+    def as_dict(self):
+        return {
+            "flags": self.flags,
+            "influence_count": self.influence_count,
+            "influence_start": self.influence_start,
+        }
+
+
+class BoneDeform:
+    """Decoded ``BONEDEFORM`` payload: per-vertex bone influences + matrix map."""
+
+    __slots__ = ("vertex_count", "vertices", "influence_count", "influences",
+                 "matrix_map_id", "matrix_bones", "size", "exact")
+
+    def __init__(self, vertex_count, vertices, influence_count, influences,
+                 matrix_map_id, matrix_bones, size, exact):
+        self.vertex_count = vertex_count
+        self.vertices = vertices                # list of BoneVertex
+        self.influence_count = influence_count
+        self.influences = influences            # list of (bone, weight)
+        self.matrix_map_id = matrix_map_id      # signed, or None when absent
+        self.matrix_bones = matrix_bones        # list of u8 palette indices
+        self.size = size
+        self.exact = exact
+
+    def influences_of(self, vertex_index: int):
+        """Return ``[(bone, weight), ...]`` for one vertex (weights sum to ~1)."""
+        v = self.vertices[vertex_index]
+        s = v.influence_start
+        return self.influences[s:s + v.influence_count]
+
+    def max_bone(self) -> int:
+        return max((bone for bone, _w in self.influences), default=-1)
+
+    def max_influences(self) -> int:
+        return max((v.influence_count for v in self.vertices), default=0)
+
+    def as_dict(self, with_skin=False):
+        d = {
+            "vertex_count": self.vertex_count,
+            "influence_count": self.influence_count,
+            "max_bone": self.max_bone(),
+            "max_influences": self.max_influences(),
+            "matrix_map_id": self.matrix_map_id,
+            "matrix_bone_count": len(self.matrix_bones),
+            "size": self.size,
+            "exact": self.exact,
+        }
+        if with_skin:
+            d["vertices"] = [v.as_dict() for v in self.vertices]
+            d["influences"] = [[bone, w] for bone, w in self.influences]
+            d["matrix_bones"] = list(self.matrix_bones)
+        return d
+
+
+def decode_bonedeform(b: bytes, off: int,
+                      size: int | None = None) -> tuple[BoneDeform, int]:
+    """Decode a ``BONEDEFORM`` payload at ``off``.
+
+    Mirrors ``FUN_1007d260`` in MXR.dll: a vertex-record array, a shared
+    influence pool addressed by prefix-sum starts, and a trailing bone
+    matrix-map block. When ``size`` is given, the payload must tile exactly
+    (``exact=True``). Returns ``(BoneDeform, consumed_size)``. Raises
+    ``GeometryError`` when a structural invariant is violated."""
+
+    def need(p: int, n: int, what: str):
+        if p + n > len(b):
+            raise GeometryError(f"BONEDEFORM {what} at 0x{p:X} runs past EOF")
+        if size is not None and p + n > off + size:
+            raise GeometryError(f"BONEDEFORM {what} at 0x{p:X} runs past chunk")
+
+    need(off, 4, "vertex count")
+    n = _u32(b, off)
+    p = off + 4
+    need(p, n * 4, "vertex records")
+    vertices = []
+    for i in range(n):
+        flags, cnt, start = struct.unpack_from("<BBH", b, p + i * 4)
+        vertices.append(BoneVertex(flags, cnt, start))
+    p += n * 4
+
+    need(p, 4, "influence count")
+    m = _u32(b, p)
+    p += 4
+    need(p, m * 2, "influences")
+    influences = []
+    for i in range(m):
+        bone = b[p + i * 2]
+        weight = b[p + i * 2 + 1] * _BONE_WEIGHT_SCALE
+        influences.append((bone, weight))
+    p += m * 2
+
+    # The vertex records must address the influence pool as a running prefix
+    # sum, and together cover it exactly (the loader relies on this).
+    running = 0
+    for i, v in enumerate(vertices):
+        if v.influence_start != running:
+            raise GeometryError(
+                f"BONEDEFORM vertex {i} influence_start {v.influence_start} "
+                f"!= running {running}")
+        running += v.influence_count
+    if running != m:
+        raise GeometryError(
+            f"BONEDEFORM influences covered {running} != declared {m}")
+
+    matrix_map_id = None
+    matrix_bones: list[int] = []
+    if size is not None:
+        remain = off + size - p
+        if remain:
+            need(p, 8, "matrix-map header")
+            matrix_map_id = _i32(b, p)
+            count = _u32(b, p + 4)
+            if 8 + count != remain:
+                raise GeometryError(
+                    f"BONEDEFORM matrix-map size {remain} != 8 + {count}")
+            matrix_bones = list(b[p + 8:p + 8 + count])
+            p += 8 + count
+    consumed = p - off
+    exact = size is None or consumed == size
+    return BoneDeform(n, vertices, m, influences, matrix_map_id,
+                      matrix_bones, consumed, exact), consumed
+
+
 class Node:
     __slots__ = ("offset", "name", "next_sibling", "first_child",
                  "data_offset", "data_size", "count", "flags", "raw")
@@ -395,7 +561,7 @@ class Xmd:
             "surface_count": surf.count if surf else 0,
             "surfaces": self.surface_names() if surf else [],
             "skeleton_node_count": nodes.count if nodes else 0,
-            "bone_deform_vertices": boned.count if boned else 0,
+            "bone_deform_vertices": None,   # filled from decoded skin below
             "has_skinning": bool(boned and nodes),
             "vertex_frame_bytes": verts.data_size if verts else 0,
         }
@@ -409,6 +575,10 @@ class Xmd:
         summary["decoded_triangles"] = dec["decoded_triangles"]
         summary["uv_clusters"] = dec["uv_clusters"]
         summary["decoded_uvs"] = dec["decoded_uvs"]
+        summary["skinned_clusters"] = dec["skinned_clusters"]
+        summary["bone_deform_vertices"] = dec["skinned_vertices"]
+        summary["decoded_influences"] = dec["decoded_influences"]
+        summary["max_influences_per_vertex"] = dec["max_influences_per_vertex"]
         summary["bad_clusters"] = dec["bad_clusters"]
         return summary
 
@@ -518,8 +688,11 @@ class Xmd:
                 f"payloads end at 0x{prev:X}, file is 0x{len(self.data):X}")
 
         # Geometry cross-check (GH #55): each decoded VERTEXFRAMES/
-        # TVERTEXFRAMES/TRIANGLES cluster triple must agree - triangle indices
-        # inside the vertex range, UV count equal to the position count.
+        # TVERTEXFRAMES/TRIANGLES/BONEDEFORM cluster must agree - triangle
+        # indices inside the vertex range, UV/vertex count agreement, skinning
+        # vertex count agreement, and every referenced bone inside the skeleton.
+        nodes_chunk = self.chunk("NODES")
+        bone_total = nodes_chunk.count if nodes_chunk else 0
         for c in self.cluster_meshes():
             if c.get("error_kind") == "corrupt":
                 problems.append(f"cluster {c['index']}: {c['error']}")
@@ -531,6 +704,15 @@ class Xmd:
                 problems.append(
                     f"cluster {c['index']}: UV count {c['uv_count']} != vertex "
                     f"count")
+            elif c.get("skin_matches") is False:
+                problems.append(
+                    f"cluster {c['index']}: skin vertex count "
+                    f"{c['skin_vertices']} != vertex count")
+            elif (c.get("max_bone") is not None and bone_total
+                    and c["max_bone"] >= bone_total):
+                problems.append(
+                    f"cluster {c['index']}: bone index {c['max_bone']} "
+                    f">= skeleton node count {bone_total}")
         return problems
 
     # -- geometry ---------------------------------------------------------
@@ -595,6 +777,34 @@ class Xmd:
                 f"chunk ends at 0x{end:X}")
         return frames
 
+    def bone_deform(self, node: Node | None = None) -> BoneDeform | None:
+        """Decode a ``BONEDEFORM`` chunk (see :func:`decode_bonedeform`).
+
+        Returns ``None`` when the model/cluster carries no ``BONEDEFORM`` node
+        (an unskinned, rigidly-bound cluster)."""
+        if node is None:
+            node = self.chunk("BONEDEFORM")
+        if node is None:
+            return None
+        return decode_bonedeform(self.data, node.data_offset,
+                                 node.data_size)[0]
+
+    def _skin_owner_map(self) -> dict[int, Node]:
+        """Map each ``VERTEXFRAMES`` node offset to its sibling ``BONEDEFORM``.
+
+        In ``CTriangleMeshCore::Read`` a cluster's chunks are read as siblings
+        (``VERTEXFRAMES`` -> ``TVERTEXFRAMES`` -> ``BONEDEFORM`` -> ...), so the
+        ``BONEDEFORM`` that follows a ``VERTEXFRAMES`` in traversal order belongs
+        to it. Clusters without skinning simply have no ``BONEDEFORM``."""
+        owner: dict[int, Node] = {}
+        last_vf: Node | None = None
+        for n in self.walk_linked():
+            if n.name == "VERTEXFRAMES":
+                last_vf = n
+            elif n.name == "BONEDEFORM" and last_vf is not None:
+                owner.setdefault(last_vf.offset, n)
+        return owner
+
     def cluster_meshes(self) -> list[dict]:
         """Pair ``VERTEXFRAMES``/``TVERTEXFRAMES``/``TRIANGLES`` chunks in order.
 
@@ -606,6 +816,7 @@ class Xmd:
         vf_nodes = [n for n in order if n.name == "VERTEXFRAMES"]
         tv_nodes = [n for n in order if n.name == "TVERTEXFRAMES"]
         tri_nodes = [n for n in order if n.name == "TRIANGLES"]
+        skin_owner = self._skin_owner_map()
         clusters = []
         for i, vn in enumerate(vf_nodes):
             entry: dict = {
@@ -615,6 +826,11 @@ class Xmd:
                 "uv_chunk": None,
                 "uv_count": None,
                 "uv_matches": None,
+                "skin_chunk": None,
+                "skin": None,
+                "skin_vertices": None,
+                "skin_matches": None,
+                "max_bone": None,
                 "triangle_chunk": None,
                 "triangle_count": None,
                 "max_index": None,
@@ -643,6 +859,20 @@ class Xmd:
                 except GeometryError as e:
                     entry["error"] = (entry["error"] or "") + f"; {e}"
                     entry["error_kind"] = "corrupt"
+            bdn = skin_owner.get(vn.offset)
+            if bdn is not None:
+                entry["skin_chunk"] = bdn.as_dict()
+                try:
+                    skin = self.bone_deform(bdn)
+                    entry["skin"] = skin.as_dict()
+                    entry["skin_vertices"] = skin.vertex_count
+                    entry["max_bone"] = skin.max_bone()
+                    if frames:
+                        entry["skin_matches"] = (
+                            skin.vertex_count == frames[-1].count)
+                except GeometryError as e:
+                    entry["error"] = (entry["error"] or "") + f"; {e}"
+                    entry["error_kind"] = "corrupt"
             if i < len(tri_nodes):
                 tn = tri_nodes[i]
                 entry["triangle_chunk"] = tn.as_dict()
@@ -667,7 +897,11 @@ class Xmd:
         total_verts = 0
         total_tris = 0
         total_uvs = 0
+        total_infl = 0
+        total_skin_verts = 0
         uv_clusters = 0
+        skinned = 0
+        max_infl = 0
         bad = 0
         for c in clusters:
             if c["frames"]:
@@ -677,8 +911,14 @@ class Xmd:
             if c["uv_count"] is not None:
                 total_uvs += c["uv_count"]
                 uv_clusters += 1
+            if c.get("skin") is not None:
+                skinned += 1
+                total_infl += c["skin"]["influence_count"]
+                total_skin_verts += c["skin_vertices"]
+                max_infl = max(max_infl, c["skin"]["max_influences"])
             if (c["error"] or c["index_in_range"] is False
-                    or c.get("uv_matches") is False):
+                    or c.get("uv_matches") is False
+                    or c.get("skin_matches") is False):
                 bad += 1
         return {
             "cluster_count": len(clusters),
@@ -686,6 +926,10 @@ class Xmd:
             "decoded_triangles": total_tris,
             "uv_clusters": uv_clusters,
             "decoded_uvs": total_uvs,
+            "skinned_clusters": skinned,
+            "skinned_vertices": total_skin_verts,
+            "decoded_influences": total_infl,
+            "max_influences_per_vertex": max_infl,
             "bad_clusters": bad,
         }
 
@@ -736,6 +980,10 @@ def report_file(path: str, want_json: bool, with_strings: bool,
             rec["uv_detail"] = [
                 f.as_dict(with_geometry=True)
                 for f in x.tvertex_frames(tv_nodes[cluster])]
+        owner = x._skin_owner_map()
+        if vf_nodes[cluster].offset in owner:
+            sk = x.bone_deform(owner[vf_nodes[cluster].offset])
+            rec["skin_detail"] = [sk.as_dict(with_skin=True)]
     if not want_json:
         print(f"== {os.path.basename(path)}  ({len(x.data)} bytes, "
               f"{len(x.nodes)} nodes, data@0x{x.data_start:X})")
@@ -748,8 +996,11 @@ def report_file(path: str, want_json: bool, with_strings: bool,
               f"skinning={g['has_skinning']}")
         print(f"   clusters={g['clusters']}  decoded_verts={g['decoded_vertices']}"
               f"  decoded_tris={g['decoded_triangles']}"
-              f"  uv_clusters={g['uv_clusters']}  decoded_uvs={g['decoded_uvs']}"
-              f"  bad_clusters={g['bad_clusters']}")
+              f"  uv_clusters={g['uv_clusters']}  decoded_uvs={g['decoded_uvs']}")
+        print(f"   skinned_clusters={g['skinned_clusters']}  "
+              f"decoded_influences={g['decoded_influences']}  "
+              f"max_influences_per_vertex={g['max_influences_per_vertex']}  "
+              f"bad_clusters={g['bad_clusters']}")
         if with_mesh:
             for c in rec.get("clusters", []):
                 fr = c["frames"][-1] if c["frames"] else {}
@@ -757,7 +1008,9 @@ def report_file(path: str, want_json: bool, with_strings: bool,
                       f"ver={fr.get('version') and hex(fr['version'])} "
                       f"tris={c['triangle_count']} max_index={c['max_index']} "
                       f"in_range={c['index_in_range']} "
-                      f"uvs={c['uv_count']} uv_match={c['uv_matches']}"
+                      f"uvs={c['uv_count']} uv_match={c['uv_matches']} "
+                      f"skin={c['skin'] and c['skin']['influence_count']} "
+                      f"skin_match={c['skin_matches']} max_bone={c['max_bone']}"
                       + (f"  ERR {c['error']}" if c["error"] else ""))
         if cluster is not None:
             for d in rec["cluster_detail"]:
@@ -772,6 +1025,18 @@ def report_file(path: str, want_json: bool, with_strings: bool,
                       f"{u['bounds_max']})")
                 for uv in u["uvs"][:8]:
                     print("      uv  %8.4f %8.4f" % tuple(uv))
+            for sk in rec.get("skin_detail", []):
+                print(f"   cluster {cluster} skin verts={sk['vertex_count']} "
+                      f"influences={sk['influence_count']} "
+                      f"max_bone={sk['max_bone']} "
+                      f"matrix_map_id={sk['matrix_map_id']} "
+                      f"matrix_bones={sk['matrix_bone_count']}")
+                for i, v in enumerate(sk["vertices"][:4]):
+                    inf = sk["influences"][v["influence_start"]:
+                                           v["influence_start"]
+                                           + v["influence_count"]]
+                    print("      v%-4d bones=%s" % (
+                        i, ", ".join("%d:%.3f" % (b, w) for b, w in inf)))
         if with_tree:
             for line in x.tree_lines():
                 print("   " + line)
@@ -795,6 +1060,7 @@ def inventory(root: str) -> list[dict]:
                             "triangles": g["triangle_count"],
                             "skeleton_nodes": g["skeleton_node_count"],
                             "skinned_verts": g["bone_deform_vertices"],
+                            "skinned_clusters": g["skinned_clusters"],
                             "surfaces": g["surfaces"]})
             except XmdError as e:
                 out.append({"path": p, "error": str(e)})

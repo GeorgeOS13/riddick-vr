@@ -2,6 +2,60 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 6 — 2026-10-15 23:08 (scheduled loop)
+- **Unit:** GH #55 → #46 — decode the `.xmd` `BONEDEFORM` skinning payloads from
+  the shipped `MXR.dll` loader.
+- Observation (real evidence, read-only; Ghidra 12.1.4 via `rea`):
+  `CTriangleMeshCore::Read` (`FUN_10080f50`) selects the **embedded**
+  `BONEDEFORM` form when the model version is > `0x100` (shipped models report
+  `0x102`, read from the first `MISCELLANEOUS` u32) and calls **`FUN_1007d260`**.
+  That reader: `u32 n` + `n * 4`-byte vertex records (`{u8 flags; u8
+  influence_count; u16 influence_start}`), then `u32 m` + the influence pool read
+  by `FUN_1007c150(stream, 0x200, dst, m)` (version-0x200 branch: **2 bytes per
+  influence**, `u8 bone` + `u8 weight` scaled by `0.003921569 == 1/255`), then a
+  trailing matrix-map block. `influence_start` is the running prefix sum of
+  `influence_count`; the loader repairs the last weight to `1 - sum(previous)`.
+- Recovered (embedded `BONEDEFORM`, model version `0x102`): payload =
+  `u32 n; n*{u8 flags; u8 count; u16 start}; u32 m; m*{u8 bone; u8 wq};
+  u32 matrix_map_id (s32, 0xFFFFFFFF = none); u32 b; b*u8`, size
+  `4 + 4n + 4 + 2m + 8 + b`. No shipped model uses the separate
+  `BONEVERTEXINFO`/`BONEINFLUENCE`/`BONEMATRIXMAP` chunks.
+- Change:
+  - `tools/mos_xmd.py`: added `BoneVertex`, `BoneDeform` (`influences_of`,
+    `max_bone`, `max_influences`), `decode_bonedeform`; `Xmd.bone_deform()`,
+    `Xmd._skin_owner_map()` (pairs each `VERTEXFRAMES` with its sibling
+    `BONEDEFORM`); `cluster_meshes()` records `skin_chunk`/`skin`/
+    `skin_vertices`/`skin_matches`/`max_bone`; `validate()` cross-checks skin/
+    vertex counts, prefix-sum starts (in `decode_bonedeform`), exact tiling, and
+    bone index < `NODES.count`; `geometry_stats()`/`geometry_summary()` report
+    `skinned_clusters`/`skinned_vertices`/`decoded_influences`/
+    `max_influences_per_vertex`; `--mesh`/`--cluster N` print skin.
+  - `tools/test_mos_xmd.py`: +6 headless synthetic-container skin tests
+    (round-trip + weight scale + `influences_of`, matrix-map decode, prefix-sum
+    mismatch, skin/vertex count mismatch, out-of-range bone, bad matrix-map
+    tiling, no-`BONEDEFORM` case).
+  - `docs/adr/0417-xmd-bonedeform-skinning.md` (new); ADR-0415/0416 follow-ups
+    marked done.
+- Evidence: `mos_xmd.py --inventory <game>\Content\Models --check` → **631/631
+  `ok`, 0 failures** (with skinning cross-checks). Aggregate decode → **4662
+  clusters**: **3103 skinned** (1559 rigid) / **1,315,626 influences** / **max 3
+  influences per vertex**; every skinned cluster tiles exactly (`4+4n+4+2m+8+b`),
+  **0** bad clusters, **0** out-of-range bone indices, **0** missing matrix-map
+  tails. Per-vertex weights sum to exactly 1.0 on `Riddick_H01`/`B03`/`LGuard`/
+  `H_Civ` (**0** violations). Sample `Riddick_H01` cluster 0: 985 verts / 1564
+  influences / `max_bone=17` (< 70 skeleton nodes) / `v0 = {3:.008, 1:.102,
+  0:.890}`. `test_mos_xmd.py` PASS; `validate_addresses.py`,
+  `verify_reported_fixes.py`, `scenario_tests.py --check`, `verify_hook_init.py`
+  all pass. No C++ changed, so `build-all.ps1`/CTest were not rerun (as in
+  Wakes 3–5).
+- Blocker: none. Next: decode the `NODES` skeleton (names + hierarchy) +
+  `NODEINDICES` so bone indices resolve to named joints; then extract the
+  Riddick hand/forearm surfaces (`RIDDICK_ARMSCAR_*`, `Pa2_Hand_01`) with
+  geometry + UVs + skin and add a native mesh path behind a flag, keeping
+  `VRHandRenderer` as fallback.
+- Branch: committed on `docs/rea-mos-loader-layout` (single-writer mode — no new
+  branch; not pushed; `main` untouched).
+
 ## Wake 5 — 2026-10-15 22:48 (scheduled loop)
 - **Unit:** GH #55 → #46 — decode the `.xmd` `TVERTEXFRAMES` (UV) payloads from
   the shipped `MXR.dll` loader.

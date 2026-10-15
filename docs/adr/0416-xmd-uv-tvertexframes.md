@@ -86,3 +86,7 @@ A cluster with no UVs stores an EMPTY (data_size == 0) TVERTEXFRAMES node.
   the Riddick hand/forearm surfaces (`RIDDICK_ARMSCAR_*`, `Pa2_Hand_01`) with
   geometry + UVs + skin weights and add a native mesh path behind a flag,
   keeping `VRHandRenderer` as the fallback until a path is tested in-headset.
+- **Done (2026-10-15, Wake 6):** `BONEDEFORM` is decoded — see
+  `docs/adr/0417-xmd-bonedeform-skinning.md`. No shipped model uses the
+  separate top-level `BONEVERTEXINFO`/`BONEINFLUENCE`/`BONEMATRIXMAP` chunks;
+  all 3103 skinned clusters use the embedded `BONEDEFORM` form.
