@@ -54,8 +54,11 @@ work this wake, then stop. Keep total effort bounded (<= 4 concurrent subagents)
    **`--check` only** — never `scenario_tests.py --run` (that invokes
    `semi_play.py` and launches the game), and never pass `-Deploy` to
    `build-all.ps1` (it would write into the game install).
-6. Record: commit work to a non-main branch (never force-push; do not deploy
-   binaries; do not modify `main` history). Update `tools/autoloop/STATE.md`
+6. Record: you are the **sole writer**. Work on the **currently checked-out
+   branch** and commit there with a clear, descriptive message. Do NOT create
+   new branches and do NOT switch branches (keeps history linear and avoids
+   sprawl across the 24h run). Never force-push, never rewrite history, never
+   deploy binaries. Update `tools/autoloop/STATE.md`
    with: timestamp, what you did, evidence, blocker, next step. Append one line
    to `tools/autoloop/logs/STATE.log`. Comment concise progress on the issue.
 7. If blocked with nothing doable, document the blocker, create/refine an issue,
