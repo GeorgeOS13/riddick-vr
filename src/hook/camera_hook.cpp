@@ -1055,6 +1055,26 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_inductionOverheatStart = 0;
             }
 
+            // Inmate Pit Brawl Liver Hook & Sternum Elbow Smash Combination (ADR 0145)
+            static DWORD s_liverHookTime = 0;
+            static DWORD s_lastLiverElbowComboTime = 0;
+            bool liverHookStrike = (s_currentBlockEngaged && rVel.y > 1.10f && fabsf(rVel.x) > 0.90f);
+            if (liverHookStrike && (now - s_lastLiverElbowComboTime > 1500)) {
+                if (s_liverHookTime == 0) {
+                    s_liverHookTime = now;
+                    VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL LIVER HOOK CONNECTED (Ry: %.2f, Rx: %.2f)", rVel.y, rVel.x);
+                    vrState.rightHapticPulse = 0.95f; // Soft-tissue concussive shockwave (220 Hz)
+                }
+            }
+            bool sternumElbowSmash = (s_liverHookTime > 0 && (now - s_liverHookTime < 500) && rVel.y < -1.20f);
+
+            // Security Guard Stun Baton Charged Underarm Spear Thrust (ADR 0146)
+            static DWORD s_lastSpearThrustTime = 0;
+            bool batonChargedSpearArmed = (vrState.rightController.grip > 0.60f && vrState.rightController.trigger > 0.65f);
+            bool batonSpearBracing = (handsDistSledge < 0.22f);
+            bool batonLinearSpearThrust = (rVel.z < -1.35f);
+            bool isBatonChargedSpear = batonChargedSpearArmed && batonSpearBracing && batonLinearSpearThrust;
+
             if (isInductionOverheated) {
                 VR_LOG_INFO("Tactical Melee: STUN BATON INDUCTION COIL OVERHEAT ARC DETONATED");
                 SendKey('S', true);
@@ -1075,6 +1095,30 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 vrState.leftHapticPulse = 0.98f;  // High-voltage electrostatic arc ring shockwave (300 Hz)
                 vrState.rightHapticPulse = 0.98f;
+            } else if (sternumElbowSmash && (now - s_lastLiverElbowComboTime > 1500)) {
+                s_lastLiverElbowComboTime = now;
+                s_liverHookTime = 0;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: STERNUM ELBOW SMASH COMPLETED COMBO (Ry: %.2f)", rVel.y);
+                SendKey('W', true);
+                SendKey('A', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('A', false);
+                SendKey('W', false);
+                vrState.rightHapticPulse = 0.98f; // Bone-fracturing sternum blunt crack (280 Hz)
+            } else if (isBatonChargedSpear && (now - s_lastSpearThrustTime > 1500)) {
+                s_lastSpearThrustTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Tactical Melee: STUN BATON CHARGED UNDERARM SPEAR THRUST (Rz: %.2f)", rVel.z);
+                SendKey('W', true);
+                SendKey('S', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('S', false);
+                SendKey('W', false);
+                vrState.rightHapticPulse = 0.98f; // High-voltage linear shockwave (310 Hz)
+                vrState.leftHapticPulse = 0.65f;  // Forearm bracing recoil (140 Hz)
             } else if (isKneeStomp && (now - s_lastKneeStompTime > 1500)) {
                 s_lastKneeStompTime = now;
                 s_lastPunchTime = now;
@@ -2809,6 +2853,45 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_TAB);
                 vrState.leftHapticPulse = 0.85f;  // Filter canal sliding release clunk (180 Hz)
                 vrState.rightHapticPulse = 0.85f;
+            }
+
+            // Dark Athena EVA Solar Collector Photovoltaic Cell Thermal Decoupling Fuse Pull (ADR 0143)
+            static DWORD s_lastThermalFusePullTime = 0;
+            bool handAtThermalFuseSocket = (rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > -0.20f && rightLocal.y < 0.25f &&
+                                            vrState.rightController.grip > 0.45f && vrState.rightController.grip < 0.85f && vrState.rightController.trigger < 0.35f);
+            float fuseWrenchSpeed = sqrtf(rVel.x * rVel.x + rVel.y * rVel.y + rVel.z * rVel.z);
+            if (handAtThermalFuseSocket && fuseWrenchSpeed > 0.65f && (now - s_lastThermalFusePullTime > 1500)) {
+                s_lastThermalFusePullTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA SOLAR ARRAY THERMAL DECOUPLING FUSE EXTRACTED (Speed: %.2f)", fuseWrenchSpeed);
+                SendKeyTap('E');
+                SendKeyTap(VK_RETURN);
+                SendKeyTap('Q');
+                vrState.rightHapticPulse = 0.85f; // Spring retention detent release snap (160 Hz)
+            }
+
+            // Subterranean Hydroponics Bio-Sludge Siphon Pump T-Handle Reciprocating Stroke (ADR 0144)
+            static DWORD s_lastSludgeStrokeTime = 0;
+            static int s_sludgePumpStrokeCount = 0;
+            bool bothAtSludgePumpTBar = (twoHandDist < 0.26f &&
+                                         leftLocal.z > -0.38f && leftLocal.z < -0.14f && leftLocal.y > -0.35f && leftLocal.y < 0.15f &&
+                                         rightLocal.z > -0.38f && rightLocal.z < -0.14f && rightLocal.y > -0.35f && rightLocal.y < 0.15f &&
+                                         vrState.leftController.grip > 0.55f && vrState.rightController.grip > 0.55f);
+            bool dualDownwardPumpStroke = (lVel.y < -0.70f && rVel.y < -0.70f);
+            if (bothAtSludgePumpTBar && dualDownwardPumpStroke && (now - s_lastSludgeStrokeTime > 240)) {
+                s_lastSludgeStrokeTime = now;
+                s_sludgePumpStrokeCount++;
+                VR_LOG_INFO("Environmental Gesture: HYDROPONICS SLUDGE SIPHON STROKE #%d (Ly: %.2f, Ry: %.2f)", s_sludgePumpStrokeCount, lVel.y, rVel.y);
+                vrState.leftHapticPulse = 0.65f;  // Heavy viscous hydraulic drag (70 Hz)
+                vrState.rightHapticPulse = 0.65f;
+                if (s_sludgePumpStrokeCount >= 3) {
+                    s_sludgePumpStrokeCount = 0;
+                    VR_LOG_INFO("Environmental Gesture: SLUDGE SIPHON CLEARED & SUMP DRAIN OPENED");
+                    SendKeyTap('E');
+                    SendKeyTap(VK_SPACE);
+                    SendKeyTap('W');
+                    vrState.leftHapticPulse = 0.95f;  // Siphon surge pop & drainage rumble (120 Hz)
+                    vrState.rightHapticPulse = 0.95f;
+                }
             }
         }
     }
