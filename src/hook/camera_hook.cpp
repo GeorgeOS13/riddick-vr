@@ -42,7 +42,6 @@ struct NanoMedState {
 static NanoMedState s_nanomed;
 static bool s_twoHandedStabilizationActive = false;
 static bool s_physicalBlockEngaged = false;
-static DWORD s_lastReloadGestureTime = 0;
 static bool s_isAimingOrBlocking = false;
 static RiddickVRTrackedPose s_stabilizedAimPose{};
 static bool s_hasStabilizedPose = false;
@@ -1355,6 +1354,165 @@ static HeadLookIntent UpdateHeadLook(HeadLookState& st, DWORD now,
     return out;
 }
 
+// GH #17 step 8: tactical weapon reload gestures extracted (section 6:
+// off-hand receiver/waist/cell-eject via DetectReloadGesture, plus 6a
+// shiv-sharpening hone, 6a-2 whittle, 6a-3 spork, 6a-4 flare, 6a-5 syringe).
+// Pure detection: updates st, returns edge intents; Update owns
+// SendGestureTap/SendKeyTap/SendMouseClick/HapticRequest/logs. Same volumes,
+// velocities, cooldowns, and stroke counts as the inline block it replaces.
+struct ReloadState {
+    DWORD lastReloadGestureTime = 0;
+    DWORD lastHoneStrokeTime = 0;
+    DWORD lastWhittleStrokeTime = 0;
+    int whittleStrokeCount = 0;
+    DWORD lastSporkStrokeTime = 0;
+    int sporkStrokeCount = 0;
+    DWORD lastFlareIgniteTime = 0;
+    DWORD lastSyringeInjectTime = 0;
+};
+static ReloadState s_reload;
+
+struct ReloadIntent {
+    bool cellEject = false;
+    float cellEjectVelY = 0.0f;
+    float cellEjectDist = 0.0f;
+    bool manualReload = false;
+    bool manualIsMagInsert = false;
+    float manualDist = 0.0f;
+    float manualOffY = 0.0f;
+    bool honeStroke = false;
+    float honeRelVelY = 0.0f;
+    float honeDist = 0.0f;
+    bool whittleStroke = false;
+    int whittleCount = 0;
+    float whittleSpeedX = 0.0f;
+    bool whittleComplete = false;
+    bool sporkStroke = false;
+    int sporkCount = 0;
+    float sporkSpeedX = 0.0f;
+    bool sporkComplete = false;
+    bool flareIgnited = false;
+    float flareShearY = 0.0f;
+    float flareShearX = 0.0f;
+    bool syringeInjected = false;
+    float syringeX = 0.0f;
+    float syringeY = 0.0f;
+    float syringeZ = 0.0f;
+};
+
+static ReloadIntent UpdateReload(ReloadState& st, DWORD now,
+                                 const RiddickVRVector3& leftLocal, const RiddickVRVector3& rightLocal,
+                                 const RiddickVRVector3& lVel, const RiddickVRVector3& rVel,
+                                 float leftGrip, float rightGrip, float rightTrigger,
+                                 bool crouched, bool deepProne,
+                                 bool physicalBlockEngaged, bool isClimbingActive,
+                                 bool twoHandedActive, bool meleeFired, bool southpaw) {
+    ReloadIntent out;
+    float reloadHandDist = sqrtf(
+        powf(leftLocal.x - rightLocal.x, 2) +
+        powf(leftLocal.y - rightLocal.y, 2) +
+        powf(leftLocal.z - rightLocal.z, 2)
+    );
+
+    // 6. Tactical Weapon Reload Gestures (off-hand receiver/waist/cell-eject).
+    // ADR 0394: suppressed while two-handed stabilization holds; off-hand
+    // resolves via southpaw (Track C #14).
+    const RiddickVRVector3& offHandLocal = southpaw ? rightLocal : leftLocal;
+    float offHandVelY = southpaw ? rVel.y : lVel.y;
+    float offGrip = southpaw ? rightGrip : leftGrip;
+    ReloadGestureRequest reloadReq = DetectReloadGesture(reloadHandDist, offGrip, offHandVelY,
+                                                         offHandLocal.y, offHandLocal.x);
+    if (!physicalBlockEngaged && !isClimbingActive && !twoHandedActive && (now - st.lastReloadGestureTime > 1200)) {
+        if (reloadReq.cellEject) {
+            st.lastReloadGestureTime = now;
+            out.cellEject = true;
+            out.cellEjectVelY = offHandVelY;
+            out.cellEjectDist = reloadHandDist;
+        } else if (reloadReq.magInsert || reloadReq.waistPouch) {
+            st.lastReloadGestureTime = now;
+            out.manualReload = true;
+            out.manualIsMagInsert = reloadReq.magInsert;
+            out.manualDist = reloadHandDist;
+            out.manualOffY = offHandLocal.y;
+        }
+    }
+
+    // 6a. Physical Shiv Sharpening & Blade Grinding (ADR 0035).
+    bool inHoneProximity = (reloadHandDist < 0.15f) && (leftGrip > 0.40f) && (rightGrip > 0.40f);
+    if (inHoneProximity && !physicalBlockEngaged && !isClimbingActive) {
+        float relVelY = fabsf(lVel.y - rVel.y);
+        if (relVelY > 0.55f && (now - st.lastHoneStrokeTime > 250)) {
+            st.lastHoneStrokeTime = now;
+            out.honeStroke = true;
+            out.honeRelVelY = relVelY;
+            out.honeDist = reloadHandDist;
+        }
+    }
+
+    // 6a-2. Inmate Toothbrush Shank Whittling & Rapid Friction Sharpening (ADR 0068).
+    bool crouchedForWhittle = (crouched || deepProne);
+    bool grippingShank = (rightGrip > 0.50f);
+    bool dominantNearFloor = (rightLocal.y < -0.45f && rightLocal.z > -0.45f && rightLocal.z < -0.15f);
+    bool fastFrictionStroke = (fabsf(rVel.x) > 0.65f);
+    if (crouchedForWhittle && dominantNearFloor && grippingShank && fastFrictionStroke && !physicalBlockEngaged) {
+        if (now - st.lastWhittleStrokeTime > 180) {
+            st.lastWhittleStrokeTime = now;
+            st.whittleStrokeCount++;
+            out.whittleStroke = true;
+            out.whittleCount = st.whittleStrokeCount;
+            out.whittleSpeedX = rVel.x;
+            if (st.whittleStrokeCount >= 5) {
+                st.whittleStrokeCount = 0;
+                out.whittleComplete = true;
+            }
+        }
+    }
+
+    // 6a-3. Inmate Mess Hall Contraband Spork Whittling & Tine Sharpening (ADR 0080).
+    bool sporkTableHeight = (rightLocal.y > -0.55f && rightLocal.y < -0.25f) &&
+                            (rightLocal.z > -0.42f && rightLocal.z < -0.16f);
+    bool fastSporkStroke = (fabsf(rVel.x) > 0.60f);
+    if (crouchedForWhittle && sporkTableHeight && grippingShank && fastSporkStroke && !physicalBlockEngaged) {
+        if (now - st.lastSporkStrokeTime > 160) {
+            st.lastSporkStrokeTime = now;
+            st.sporkStrokeCount++;
+            out.sporkStroke = true;
+            out.sporkCount = st.sporkStrokeCount;
+            out.sporkSpeedX = rVel.x;
+            if (st.sporkStrokeCount >= 4) {
+                st.sporkStrokeCount = 0;
+                out.sporkComplete = true;
+            }
+        }
+    }
+
+    // 6a-4. Security Camera Thermal Decoy Flare Igniting Gesture (ADR 0089).
+    bool flareInOffHand = (leftLocal.z > -0.35f && leftLocal.z < -0.15f) && (leftGrip > 0.55f);
+    bool strikerAtCap = (reloadHandDist < 0.16f) && (rightGrip > 0.55f);
+    float shearVelY = fabsf(lVel.y - rVel.y);
+    float shearVelX = fabsf(lVel.x - rVel.x);
+    if (flareInOffHand && strikerAtCap && (shearVelY > 0.80f || shearVelX > 0.80f) && !physicalBlockEngaged && !meleeFired && (now - st.lastFlareIgniteTime > 1800)) {
+        st.lastFlareIgniteTime = now;
+        out.flareIgnited = true;
+        out.flareShearY = shearVelY;
+        out.flareShearX = shearVelX;
+    }
+
+    // 6a-5. Medical Syringe Sedative Self-Injection & Bio-Adrenaline Rush (ADR 0087).
+    bool dominantAtOffArm = (rightLocal.x > -0.24f && rightLocal.x < -0.06f) &&
+                            (rightLocal.y > -0.18f && rightLocal.y < 0.12f) &&
+                            (rightLocal.z > -0.25f && rightLocal.z < -0.05f);
+    bool syringePlungerPressed = (rightGrip > 0.50f) && (rightTrigger > 0.65f);
+    if (dominantAtOffArm && syringePlungerPressed && !physicalBlockEngaged && (now - st.lastSyringeInjectTime > 1500)) {
+        st.lastSyringeInjectTime = now;
+        out.syringeInjected = true;
+        out.syringeX = rightLocal.x;
+        out.syringeY = rightLocal.y;
+        out.syringeZ = rightLocal.z;
+    }
+    return out;
+}
+
 void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (!m_initialized || !vrState.vrActive) return;
 
@@ -1420,7 +1578,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         const RiddickVRTrackedPose& ctrlAimPose =
             (s_twoHandedStabilizationActive && s_hasStabilizedPose) ?
             s_stabilizedAimPose : (domCtrl.aimPose.isValid ? domCtrl.aimPose : domCtrl.gripPose); // Track C #14
-        bool lookReloading = (now - s_lastReloadGestureTime <= 1100);
+        bool lookReloading = (now - s_reload.lastReloadGestureTime <= 1100);
         bool lookAimHeld = s_isAimingOrBlocking || (offCtrl.trigger > 0.5f); // Track C #14
         HeadLookIntent lookIntent = UpdateHeadLook(s_headlook, now,
             vrState.hmdPose, ctrlAimPose,
@@ -7084,111 +7242,67 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     }
 
     // 6. Tactical Weapon Reload Gestures (F.E.A.R. / Riddick VR Style)
+    // GH #17 step 8: detection delegated to UpdateReload (explicit
+    // ReloadState); side effects (gesture taps/keys/haptics/logs) stay here.
+    // Same volumes, velocities, cooldowns, and stroke counts; no behavior change.
     // Supports physical gestures:
     // A) Off-hand brought to weapon receiver / magazine well (< 20cm)
     // B) Off-hand reaching down to waist ammo pouch (y < -0.38m relative to HMD)
-    float reloadHandDist = sqrtf(
-        powf(leftLocal.x - rightLocal.x, 2) +
-        powf(leftLocal.y - rightLocal.y, 2) +
-        powf(leftLocal.z - rightLocal.z, 2)
-    );
-
-    // ADR 0394: Tactical Weapon Reload Ergonomics & Off-Hand Mag-Well Gating
-    // Suppress reload when already in two-handed stabilization to prevent accidental reloads while aiming.
-    // Off-hand reaching to dominant weapon receiver requires upward seating motion (lVel.y > 0.35 m/s).
-    // Waist pouch reach strictly tracks off-hand (leftLocal), eliminating accidental reloads when resting dominant arm.
-    // Track C #17: detection delegated to DetectReloadGesture (explicit
-    // ReloadGestureRequest state, same thresholds, no behavior change).
-    // Track C #14: off-hand (waist pouch / mag-well) resolves via southpaw.
-    // Track C #15: taps funnel through debounced SendGestureTap.
-    const RiddickVRVector3& offHandLocal = g_vrConfig.southpaw ? rightLocal : leftLocal;
-    float offHandVelY = g_vrConfig.southpaw ? rVel.y : lVel.y;
-    ReloadGestureRequest reloadReq = DetectReloadGesture(reloadHandDist, offCtrl.grip, offHandVelY,
-                                                         offHandLocal.y, offHandLocal.x);
-    if (!s_physicalBlockEngaged && !isClimbingActive && !s_twoHandedStabilizationActive && (now - s_lastReloadGestureTime > 1200)) {
-        if (reloadReq.cellEject) {
-            s_lastReloadGestureTime = now;
-            VR_LOG_INFO("Tactical Weapon: POWER CELL HOT-SWAP EJECTED (Vy: %.2f m/s, Dist: %.2fm)", offHandVelY, reloadHandDist);
-            SendGestureTap('R', "reload/powercell-eject");
-            HapticRequest(0, 0.75f, kHapticReload); // GH #32: magnetic cell disconnect snap (140 Hz)
-            HapticRequest(1, 0.50f, kHapticUi);
-        } else if (reloadReq.magInsert || reloadReq.waistPouch) {
-            s_lastReloadGestureTime = now;
-            VR_LOG_INFO("Tactical Gesture: MANUAL WEAPON RELOAD triggered (%s, HandDist: %.2fm, LeftY: %.2f)",
-                reloadReq.magInsert ? "Weapon Receiver / Mag-Well" : "Waist Ammo Pouch", reloadHandDist, offHandLocal.y);
-            SendGestureTap('R', "reload/manual");
-            HapticRequest(0, 0.55f, kHapticLadder); // GH #32
-            HapticRequest(1, 0.75f, kHapticReload);
-        }
+    ReloadIntent reloadIntent = UpdateReload(s_reload, now,
+        leftLocal, rightLocal, lVel, rVel,
+        vrState.leftController.grip, vrState.rightController.grip,
+        vrState.rightController.trigger,
+        s_posture.isPhysicallyCrouched, s_posture.isDeepProne,
+        s_physicalBlockEngaged, isClimbingActive,
+        s_twoHandedStabilizationActive, meleeFiredThisFrame,
+        g_vrConfig.southpaw);
+    if (reloadIntent.cellEject) {
+        VR_LOG_INFO("Tactical Weapon: POWER CELL HOT-SWAP EJECTED (Vy: %.2f m/s, Dist: %.2fm)", reloadIntent.cellEjectVelY, reloadIntent.cellEjectDist);
+        SendGestureTap('R', "reload/powercell-eject");
+        HapticRequest(0, 0.75f, kHapticReload); // GH #32: magnetic cell disconnect snap (140 Hz)
+        HapticRequest(1, 0.50f, kHapticUi);
+    } else if (reloadIntent.manualReload) {
+        VR_LOG_INFO("Tactical Gesture: MANUAL WEAPON RELOAD triggered (%s, HandDist: %.2fm, LeftY: %.2f)",
+            reloadIntent.manualIsMagInsert ? "Weapon Receiver / Mag-Well" : "Waist Ammo Pouch", reloadIntent.manualDist, reloadIntent.manualOffY);
+        SendGestureTap('R', "reload/manual");
+        HapticRequest(0, 0.55f, kHapticLadder); // GH #32
+        HapticRequest(1, 0.75f, kHapticReload);
     }
 
     // 6a. Physical Shiv Sharpening & Blade Grinding (ADR 0035)
-    static DWORD s_lastHoneStrokeTime = 0;
-    bool inHoneProximity = (reloadHandDist < 0.15f) && (vrState.leftController.grip > 0.40f) && (vrState.rightController.grip > 0.40f);
-    if (inHoneProximity && !s_physicalBlockEngaged && !isClimbingActive) {
-        float relVelY = fabsf(lVel.y - rVel.y);
-        if (relVelY > 0.55f && (now - s_lastHoneStrokeTime > 250)) {
-            s_lastHoneStrokeTime = now;
-            VR_LOG_INFO("Physical Gesture: SHIV SHARPENING / BLADE GRINDING STROKE (RelVelY: %.2f m/s, Dist: %.2fm)", relVelY, reloadHandDist);
-            HapticRequest(0, (0.55f), kHapticLadder);  // Crisp metallic scrape (220 Hz)
-            HapticRequest(1, (0.55f), kHapticLadder);
-        }
+    if (reloadIntent.honeStroke) {
+        VR_LOG_INFO("Physical Gesture: SHIV SHARPENING / BLADE GRINDING STROKE (RelVelY: %.2f m/s, Dist: %.2fm)", reloadIntent.honeRelVelY, reloadIntent.honeDist);
+        HapticRequest(0, (0.55f), kHapticLadder);  // Crisp metallic scrape (220 Hz)
+        HapticRequest(1, (0.55f), kHapticLadder);
     }
 
     // 6a-2. Inmate Toothbrush Shank Whittling & Rapid Friction Sharpening (ADR 0068)
-    static DWORD s_lastWhittleStrokeTime = 0;
-    static int s_whittleStrokeCount = 0;
-    bool crouchedForWhittle = (s_posture.isPhysicallyCrouched || s_posture.isDeepProne);
-    bool dominantNearFloor = (rightLocal.y < -0.45f && rightLocal.z > -0.45f && rightLocal.z < -0.15f);
-    bool grippingShank = (vrState.rightController.grip > 0.50f);
-    bool fastFrictionStroke = (fabsf(rVel.x) > 0.65f);
-    if (crouchedForWhittle && dominantNearFloor && grippingShank && fastFrictionStroke && !s_physicalBlockEngaged) {
-        if (now - s_lastWhittleStrokeTime > 180) {
-            s_lastWhittleStrokeTime = now;
-            s_whittleStrokeCount++;
-            VR_LOG_INFO("Physical Gesture: TOOTHBRUSH SHANK WHITTLING STROKE #%d (SpeedX: %.2f m/s)", s_whittleStrokeCount, rVel.x);
-            HapticRequest(1, (0.50f), kHapticUi); // Abrasive concrete grinding pulse (200 Hz)
-            if (s_whittleStrokeCount >= 5) {
-                s_whittleStrokeCount = 0;
-                VR_LOG_INFO("Physical Gesture: IMPROVISED SHIV RAZOR TIP HONED / EQUIPPED");
-                SendKeyTap('E');
-                SendKeyTap('3'); // Equip shank slot
-                HapticRequest(1, (0.70f), kHapticReload); // Hone completion resonance (260 Hz)
-            }
+    if (reloadIntent.whittleStroke) {
+        VR_LOG_INFO("Physical Gesture: TOOTHBRUSH SHANK WHITTLING STROKE #%d (SpeedX: %.2f m/s)", reloadIntent.whittleCount, reloadIntent.whittleSpeedX);
+        HapticRequest(1, (0.50f), kHapticUi); // Abrasive concrete grinding pulse (200 Hz)
+        if (reloadIntent.whittleComplete) {
+            VR_LOG_INFO("Physical Gesture: IMPROVISED SHIV RAZOR TIP HONED / EQUIPPED");
+            SendKeyTap('E');
+            SendKeyTap('3'); // Equip shank slot
+            HapticRequest(1, (0.70f), kHapticReload); // Hone completion resonance (260 Hz)
         }
     }
 
     // 6a-3. Inmate Mess Hall Contraband Spork Whittling & Tine Sharpening (ADR 0080)
-    static DWORD s_lastSporkStrokeTime = 0;
-    static int s_sporkStrokeCount = 0;
-    bool sporkTableHeight = (rightLocal.y > -0.55f && rightLocal.y < -0.25f) &&
-                            (rightLocal.z > -0.42f && rightLocal.z < -0.16f);
-    bool fastSporkStroke = (fabsf(rVel.x) > 0.60f);
-    if (crouchedForWhittle && sporkTableHeight && grippingShank && fastSporkStroke && !s_physicalBlockEngaged) {
-        if (now - s_lastSporkStrokeTime > 160) {
-            s_lastSporkStrokeTime = now;
-            s_sporkStrokeCount++;
-            VR_LOG_INFO("Physical Gesture: MESS SPORK TINE NOTCHING STROKE #%d (SpeedX: %.2f m/s)", s_sporkStrokeCount, rVel.x);
-            HapticRequest(1, (0.45f), kHapticUi); // Serrated rasp pulse (190 Hz)
-            if (s_sporkStrokeCount >= 4) {
-                s_sporkStrokeCount = 0;
-                VR_LOG_INFO("Physical Gesture: SERRATED CONTRABAND PUNCTURE SPORK CRAFTED / EQUIPPED");
-                SendKeyTap('E');
-                SendKeyTap('3'); // Equip shank/shiv slot
-                HapticRequest(1, (0.70f), kHapticReload); // Hone ping resonance (240 Hz)
-            }
+    if (reloadIntent.sporkStroke) {
+        VR_LOG_INFO("Physical Gesture: MESS SPORK TINE NOTCHING STROKE #%d (SpeedX: %.2f m/s)", reloadIntent.sporkCount, reloadIntent.sporkSpeedX);
+        HapticRequest(1, (0.45f), kHapticUi); // Serrated rasp pulse (190 Hz)
+        if (reloadIntent.sporkComplete) {
+            VR_LOG_INFO("Physical Gesture: SERRATED CONTRABAND PUNCTURE SPORK CRAFTED / EQUIPPED");
+            SendKeyTap('E');
+            SendKeyTap('3'); // Equip shank/shiv slot
+            HapticRequest(1, (0.70f), kHapticReload); // Hone ping resonance (240 Hz)
         }
     }
 
     // 6a-4. Security Camera Thermal Decoy Flare Igniting Gesture (ADR 0089)
-    static DWORD s_lastFlareIgniteTime = 0;
-    bool flareInOffHand = (leftLocal.z > -0.35f && leftLocal.z < -0.15f) && (vrState.leftController.grip > 0.55f);
-    bool strikerAtCap = (reloadHandDist < 0.16f) && (vrState.rightController.grip > 0.55f);
-    float shearVelY = fabsf(lVel.y - rVel.y);
-    float shearVelX = fabsf(lVel.x - rVel.x);
-    if (flareInOffHand && strikerAtCap && (shearVelY > 0.80f || shearVelX > 0.80f) && !s_physicalBlockEngaged && !meleeFiredThisFrame && (now - s_lastFlareIgniteTime > 1800)) { // GH #31
-        s_lastFlareIgniteTime = now;
-        VR_LOG_INFO("Tactical Decoy: THERMAL MAGNESIUM FLARE IGNITED (ShearVelY: %.2f, ShearVelX: %.2f)", shearVelY, shearVelX);
+    if (reloadIntent.flareIgnited) { // GH #31: melee priority evaluated in UpdateReload
+        VR_LOG_INFO("Tactical Decoy: THERMAL MAGNESIUM FLARE IGNITED (ShearVelY: %.2f, ShearVelX: %.2f)", reloadIntent.flareShearY, reloadIntent.flareShearX);
         SendKeyTap('4'); // Equip flare / throwable slot
         SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
         SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
@@ -7197,14 +7311,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     }
 
     // 6a-5. Medical Syringe Sedative Self-Injection & Bio-Adrenaline Rush (ADR 0087)
-    static DWORD s_lastSyringeInjectTime = 0;
-    bool dominantAtOffArm = (rightLocal.x > -0.24f && rightLocal.x < -0.06f) &&
-                            (rightLocal.y > -0.18f && rightLocal.y < 0.12f) &&
-                            (rightLocal.z > -0.25f && rightLocal.z < -0.05f);
-    bool syringePlungerPressed = (vrState.rightController.grip > 0.50f) && (vrState.rightController.trigger > 0.65f);
-    if (dominantAtOffArm && syringePlungerPressed && !s_physicalBlockEngaged && (now - s_lastSyringeInjectTime > 1500)) {
-        s_lastSyringeInjectTime = now;
-        VR_LOG_INFO("Medical Restoration: PNEUMATIC BIO-ADRENALINE SYRINGE INJECTED (Rx: %.2f, Ry: %.2f, Rz: %.2f)", rightLocal.x, rightLocal.y, rightLocal.z);
+    if (reloadIntent.syringeInjected) {
+        VR_LOG_INFO("Medical Restoration: PNEUMATIC BIO-ADRENALINE SYRINGE INJECTED (Rx: %.2f, Ry: %.2f, Rz: %.2f)", reloadIntent.syringeX, reloadIntent.syringeY, reloadIntent.syringeZ);
         SendKeyTap('E');
         SendKeyTap('Q'); // Bio-adrenaline / stimulant surge
         HapticRequest(1, (0.85f), kHapticReload); // Needle plunge & adrenaline rush pulse (100 Hz)
@@ -7256,7 +7364,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         powf(vrState.leftController.gripPose.position.z - vrState.rightController.gripPose.position.z, 2)
     );
 
-    bool isReloading = (now - s_lastReloadGestureTime <= 1100);
+    bool isReloading = (now - s_reload.lastReloadGestureTime <= 1100);
     bool isHarriesStance = s_flashlightActive && (twoHandDist < 0.18f) && (vrState.leftController.grip > 0.35f);
 
     constexpr float DIST_ATTACH = 0.28f;
@@ -10757,7 +10865,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // Track C #14 southpaw: dominant controller owns the trigger.
     float trigVal = (g_vrConfig.southpaw ? vrState.leftController.trigger : vrState.rightController.trigger);
     bool wantRightTrigger = s_rightTriggerDown ? (trigVal >= 0.45f) : (trigVal > 0.65f);
-    bool reloadActive = (now - s_lastReloadGestureTime <= 1100);
+    bool reloadActive = (now - s_reload.lastReloadGestureTime <= 1100);
     if (wantRightTrigger && (reloadActive || s_physicalBlockEngaged || isClimbingActive)) {
         wantRightTrigger = false;
     }
