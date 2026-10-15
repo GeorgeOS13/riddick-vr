@@ -1118,7 +1118,6 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
     if (m_sessionActive && m_session && xrEndFrame) {
         std::vector<XrCompositionLayerBaseHeader*> layers;
         XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
-        XrCompositionLayerQuad quadLayer{XR_TYPE_COMPOSITION_LAYER_QUAD};
         XrCompositionLayerQuad wristQuadLayer{XR_TYPE_COMPOSITION_LAYER_QUAD};
         XrCompositionLayerQuad weaponAmmoQuadLayer{XR_TYPE_COMPOSITION_LAYER_QUAD};
         XrCompositionLayerProjectionView projViews[2] = {
@@ -1176,83 +1175,17 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
                 projViews[eye].subImage.imageRect.extent = { (int32_t)m_swapchains[eye].width, (int32_t)m_swapchains[eye].height };
             }
 
-            static bool s_wasCinemaMode = false;
-            static XrPosef s_cinemaQuadPose = { {0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, -1.8f} };
-            static bool s_hasCinemaPose = false;
-            static float s_cinemaYaw = 0.0f;
-
-            if (clientState.cinemaMode) {
-                // Floating Virtual Cinema Screen for Menus and Cutscenes (ADR 0375 / ADR 0399)
-                // Strict binary mode: render ONLY the 16:9 cinema quad at 1.8m (no expanding portal POV switch)
-                float qx = m_locatedViews[0].pose.orientation.x;
-                float qy = m_locatedViews[0].pose.orientation.y;
-                float qz = m_locatedViews[0].pose.orientation.z;
-                float qw = m_locatedViews[0].pose.orientation.w;
-                float currentHmdYaw = atan2f(2.0f * (qw * qy + qz * qx), 1.0f - 2.0f * (qx * qx + qy * qy));
-
-                if (!s_wasCinemaMode || !s_hasCinemaPose || clientState.shouldRecenter) {
-                    s_cinemaYaw = currentHmdYaw;
-                    s_hasCinemaPose = true;
-                } else {
-                    // Lazy-Follow: if user looks away by > 40 degrees, smoothly rotate screen to follow
-                    float deltaYaw = currentHmdYaw - s_cinemaYaw;
-                    while (deltaYaw > 3.14159265f) deltaYaw -= 6.2831853f;
-                    while (deltaYaw < -3.14159265f) deltaYaw += 6.2831853f;
-
-                    constexpr float LAZY_FOLLOW_THRESHOLD = 0.70f; // ~40 degrees
-                    if (fabsf(deltaYaw) > LAZY_FOLLOW_THRESHOLD) {
-                        float followStep = (fabsf(deltaYaw) - LAZY_FOLLOW_THRESHOLD) * 0.05f;
-                        s_cinemaYaw += (deltaYaw > 0.0f) ? followStep : -followStep;
-                    }
-                }
-
-                float sinHalf = sinf(s_cinemaYaw * 0.5f);
-                float cosHalf = cosf(s_cinemaYaw * 0.5f);
-                s_cinemaQuadPose.orientation = {0.0f, sinHalf, 0.0f, cosHalf};
-
-                float fwdX = -sinf(s_cinemaYaw);
-                float fwdZ = -cosf(s_cinemaYaw);
-
-                constexpr float CINEMA_DIST = 1.80f;
-                constexpr float QUAD_W = 2.00f;
-                constexpr float SRC_ASPECT = 16.0f / 9.0f;
-                constexpr float QUAD_H = QUAD_W / SRC_ASPECT;
-
-                s_cinemaQuadPose.position.x = m_locatedViews[0].pose.position.x + fwdX * CINEMA_DIST;
-                s_cinemaQuadPose.position.y = m_locatedViews[0].pose.position.y;
-                s_cinemaQuadPose.position.z = m_locatedViews[0].pose.position.z + fwdZ * CINEMA_DIST;
-                s_wasCinemaMode = true;
-
-                quadLayer.layerFlags = 0;
-                quadLayer.space = m_appSpace ? m_appSpace : (m_viewSpace ? m_viewSpace : XR_NULL_HANDLE);
-                quadLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-                quadLayer.subImage.swapchain = m_swapchains[0].handle;
-
-                // Crop to the exact 16:9 active region (matching stereo_renderer.cpp blit)
-                int32_t dstW = m_swapchains[0].width;
-                int32_t dstH = static_cast<int32_t>(dstW / SRC_ASPECT);
-                if (dstH > static_cast<int32_t>(m_swapchains[0].height)) {
-                    dstH = m_swapchains[0].height;
-                    dstW = static_cast<int32_t>(dstH * SRC_ASPECT);
-                }
-                int32_t dstX = (m_swapchains[0].width - dstW) / 2;
-                int32_t dstY = (m_swapchains[0].height - dstH) / 2;
-
-                quadLayer.subImage.imageRect.offset = {dstX, dstY};
-                quadLayer.subImage.imageRect.extent = {dstW, dstH};
-                quadLayer.pose = s_cinemaQuadPose;
-                quadLayer.size.width = QUAD_W;
-                quadLayer.size.height = QUAD_H;
-
-                layers.push_back((XrCompositionLayerBaseHeader*)&quadLayer);
-            } else {
-                s_wasCinemaMode = false;
-                // IMMERSIVE 3D ACTION MODE: Edge-to-edge projection layer with zero black bars
-                layer.layerFlags = 0;
-                layer.space = m_appSpace;
-                layer.viewCount = 2;
-                layer.views = projViews;
-                layers.push_back((XrCompositionLayerBaseHeader*)&layer);
+            // Unified Single-POV Architecture (ADR 0405):
+            // Completely eliminated dual-POV switching between Quad and Projection layers.
+            // OpenXR strictly renders XrCompositionLayerProjection at all times.
+            // Menus are rendered by stereo_renderer.cpp with black bars into the projection swapchain.
+            // In-game action renders edge-to-edge full VR coverage with zero black bars.
+            // Eliminates all POV switching, portal expansions, and menu flashing.
+            layer.layerFlags = 0;
+            layer.space = m_appSpace;
+            layer.viewCount = 2;
+            layer.views = projViews;
+            layers.push_back((XrCompositionLayerBaseHeader*)&layer);
 
                 // Diegetic Wrist Health HUD on Left Glove / Gauntlet (Issue #7 & ADR 0006)
                 if (clientState.leftController.gripPose.isValid) {
@@ -1366,7 +1299,6 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
                     }
                 }
             }
-        }
 
         XrFrameEndInfo endInfo{XR_TYPE_FRAME_END_INFO};
         endInfo.displayTime = predictedDisplayTime;

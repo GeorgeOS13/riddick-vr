@@ -242,39 +242,38 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
     uint32_t btns = vrState.rightController.buttons | vrState.leftController.buttons;
     static uint32_t s_prevButtons = 0;
-    static bool s_cinemaModeState = true; // Default to Cinema Mode for initial game boot & main menu
     static bool s_wasIn3D = false;
 
     bool has3D = OpenGLProxy::Has3DGameplayProjection();
 
     // Auto-transition into Full 3D VR Immersion the moment the game loads its 3D gameplay projection
     if (has3D && !s_wasIn3D) {
-        s_cinemaModeState = false;
         s_wasIn3D = true;
-        VR_LOG_INFO("3D Gameplay projection intercepted: transitioned from Menu Quad to Full 3D VR Immersion");
+        VR_LOG_INFO("3D Gameplay projection intercepted: transitioned from Menu Letterbox to Full 3D VR Immersion");
     }
 
-    // 1. Manual Cinema Mode Toggle via Button Y
+    // 1. Left Controller Button Y -> Riddick Eyeshine Night Vision ('Q') (ADR 0022 / ADR 0405)
+    // Completely removed legacy cinema toggle: Button Y NEVER switches POV or introduces black bars.
     if ((btns & RIDDICK_VR_BTN_Y) && !(s_prevButtons & RIDDICK_VR_BTN_Y)) {
-        s_cinemaModeState = !s_cinemaModeState;
-        VR_LOG_INFO("Cinema Screen Mode toggled manually via Button Y: %s", s_cinemaModeState ? "ON (Virtual Cinema Quad)" : "OFF (Full 3D VR Immersion)");
+        SendKeyTap('Q');
+        vrState.eyeshineActive = !vrState.eyeshineActive;
+        vrState.leftHapticPulse = 0.35f;
+        VR_LOG_INFO("Button Y: RIDDICK EYESHINE NIGHT VISION TOGGLED ('Q')");
     }
 
-    // 2. Pause Menu Cinema Mode via Left Menu Button
+    // 2. Pause Menu via Left Controller Menu Button (Escape)
     bool btnMenu = (btns & RIDDICK_VR_BTN_MENU) != 0;
     bool prevBtnMenu = (s_prevButtons & RIDDICK_VR_BTN_MENU) != 0;
     if (btnMenu && !prevBtnMenu) {
-        s_cinemaModeState = !s_cinemaModeState;
-        VR_LOG_INFO("Cinema Screen Mode toggled via Menu Button: %s", s_cinemaModeState ? "ON (Virtual Cinema Quad)" : "OFF (Full 3D VR Immersion)");
+        SendKeyTap(VK_ESCAPE);
+        VR_LOG_INFO("Menu Button tapped (VK_ESCAPE)");
     }
 
-    // In menus/boot sequence (before 3D gameplay begins): strictly Cinema Mode quad screen.
-    // In 3D gameplay: cinemaMode is only engaged on pause/menu/toggle.
-    if (!has3D) {
-        vrState.cinemaMode = true;
-    } else {
-        vrState.cinemaMode = s_cinemaModeState || cursorShowing;
-    }
+    // Unified Mode Discipline (ADR 0405):
+    // In boot sequence & initial main menus: cinemaMode = true (16:9 letterbox with black bars).
+    // Once 3D gameplay begins: cinemaMode = false (100% full VR FOV edge-to-edge).
+    // Zero cursor flickering, zero POV switching.
+    vrState.cinemaMode = !has3D;
 
     // 0. Decoupled Motion Controller Aim Steering & Head Tracking Look Input (ADR 0008)
     // Only apply in-game look when not in cinema menu mode
