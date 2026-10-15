@@ -37,6 +37,7 @@ investigation (docs/adr/0413) and the REA track.
 Usage:
     python tools/mos_xmd.py <file.xmd> [--json] [--strings] [--tree]
     python tools/mos_xmd.py <file.xmd> --mesh [--cluster N] [--json]
+    python tools/mos_xmd.py <file.xmd> --skeleton [--json]
     python tools/mos_xmd.py --inventory <root-dir> [--json]
     python tools/mos_xmd.py <file.xmd> --check
     python tools/mos_xmd.py --inventory <root-dir> --check
@@ -105,6 +106,31 @@ Geometry (recovered from MXR.dll ``CTriangleMeshCore::Read`` +
                  submesh, in traversal order; every index must be < the paired
                  frame's vertex count and a non-empty UV frame's count must
                  equal its position frame's count (validated by ``--check``).
+
+  SKELETON     : the ``NODES`` and ``NODEINDICES`` chunks, recovered from
+                 MXR.dll ``FUN_100219d0`` (skeleton reader), ``FUN_1001f7a0``
+                 (writer) and the node record reader/writer ``FUN_1001fc30`` /
+                 ``FUN_1001eec0`` (see
+                 ``docs/adr/0418-xmd-skeleton-nodes-nodeindices.md``). ``NODES``
+                 is an array of fixed **34-byte** records (version ``0x100``)::
+
+                     u16  version           = 0x100
+                     f32  translation[3]    bind-pose local translation
+                     u16  reserved          (0 in every shipped asset)
+                     u16  index             (per-node id/offset; uninterpreted)
+                     u16  child_count       number of *used* direct children
+                     u16  parent            parent index (0..N-1)
+                     f32  scale[2]          (1.0f, 1.0f in every shipped asset)
+                     u16  rotation_slot     == node index; 0xFFFF = padding
+                     u16  movement_slot     < 0x20, or 0xFFFF for "none"
+
+                 A record with ``rotation_slot == 0xFFFF`` is a **padding** node
+                 (also ``movement_slot == 0xFFFF``, zero translation,
+                 ``parent == 0``) and is excluded from ``NODEINDICES``.
+
+                 ``NODEINDICES`` is ``u16[used_nodes - 1]`` listing every used
+                 non-root node exactly once: the skeleton's bone/traversal order.
+                 Validated by ``--check`` on all 249 shipped skeletons.
 
 This parser is intentionally dependency-free and strictly read-only: it never
 writes next to the game install. It backs the native first-person hand/arm
@@ -461,6 +487,196 @@ def decode_bonedeform(b: bytes, off: int,
                       matrix_bones, consumed, exact), consumed
 
 
+# SKELETON/NODES (recovered from MXR.dll: the skeleton reader FUN_100219d0,
+# writer FUN_1001f7a0, and the node record reader FUN_1001fc30 / writer
+# FUN_1001eec0, which agree byte for byte; finalizer FUN_1001ff60 caps the two
+# animation slots). Every shipped node record is a fixed 34-byte structure,
+# version 0x100. See docs/adr/0418-xmd-skeleton-nodes-nodeindices.md.
+NODE_ENTRY_VERSION = 0x100
+NODE_ENTRY_LEN = 34
+# FUN_1001ff60 rejects > these; a slot index of NODE_SLOT_NONE means "none".
+MAX_ROTATION_SLOTS = 0x80
+MAX_MOVEMENT_SLOTS = 0x20
+NODE_SLOT_NONE = 0xFFFF
+
+
+class SkeletonNode:
+    """One ``NODES`` record (34 bytes, version 0x100).
+
+    Field widths are proven from the decompiled loader (``FUN_1001eec0`` writer
+    and ``FUN_1001fc30`` reader agree byte for byte)::
+
+        u16  version
+        f32  translation[3]    x,y,z bind-pose local translation
+        u16  unknown_c         (0 in every shipped asset)
+        u16  unknown_e         (per-node index/offset; not yet interpreted)
+        u16  child_count       number of *used* direct children
+        u16  parent            parent index (0..N-1; node 0 is the root)
+        f32  scale_xy[2]       (1.0f, 1.0f in every shipped asset)
+        u16  rotation_slot     == node index for used nodes; 0xFFFF = padding
+        u16  movement_slot     < 0x20, or 0xFFFF for "none"
+
+    A record whose ``rotation_slot`` is ``NODE_SLOT_NONE`` (0xFFFF) is a
+    **padding/unused** node: it also carries ``movement_slot == 0xFFFF``, a zero
+    translation and ``parent == 0``, and is excluded from ``NODEINDICES``.
+    """
+
+    __slots__ = ("index", "version", "translation", "unknown_c", "unknown_e",
+                 "child_count", "parent", "scale_xy", "rotation_slot",
+                 "movement_slot")
+
+    def __init__(self, index, version, translation, unknown_c, unknown_e,
+                 child_count, parent, scale_xy, rotation_slot, movement_slot):
+        self.index = index
+        self.version = version
+        self.translation = translation      # (x, y, z) floats
+        self.unknown_c = unknown_c
+        self.unknown_e = unknown_e
+        self.child_count = child_count
+        self.parent = parent
+        self.scale_xy = scale_xy            # (sx, sy) floats (1.0, 1.0)
+        self.rotation_slot = rotation_slot
+        self.movement_slot = movement_slot
+
+    def is_root(self) -> bool:
+        return self.parent == self.index
+
+    def is_used(self) -> bool:
+        """A real skeleton node. Padding records have ``rotation_slot == none``."""
+        return self.rotation_slot != NODE_SLOT_NONE
+
+    def as_dict(self):
+        return {
+            "index": self.index,
+            "version": self.version,
+            "translation": list(self.translation),
+            "parent": self.parent,
+            "child_count": self.child_count,
+            "rotation_slot": self.rotation_slot,
+            "movement_slot": self.movement_slot,
+            "unknown_c": self.unknown_c,
+            "unknown_e": self.unknown_e,
+            "scale_xy": list(self.scale_xy),
+        }
+
+
+class Skeleton:
+    """Decoded ``SKELETON`` sub-tree: the ``NODES`` array + ``NODEINDICES``."""
+
+    __slots__ = ("nodes", "node_indices", "size", "indices_size", "exact")
+
+    def __init__(self, nodes, node_indices, size, indices_size, exact):
+        self.nodes = nodes                  # list of SkeletonNode
+        self.node_indices = node_indices    # tuple of u16 (bone traversal order)
+        self.size = size
+        self.indices_size = indices_size
+        self.exact = exact
+
+    def used_nodes(self) -> list[SkeletonNode]:
+        """Real skeleton nodes (padding records have ``rotation_slot == none``)."""
+        return [n for n in self.nodes if n.is_used()]
+
+    def unused_nodes(self) -> list[SkeletonNode]:
+        return [n for n in self.nodes if not n.is_used()]
+
+    def children_of(self, index: int) -> list[int]:
+        return [n.index for n in self.used_nodes()
+                if n.parent == index and n.index != index and n.index != 0]
+
+    def roots(self) -> list[int]:
+        """Used nodes that are their own parent (node 0 normally)."""
+        return [n.index for n in self.used_nodes() if n.index == n.parent]
+
+    def is_tree(self) -> bool:
+        """True when every used node reaches a root without a cycle."""
+        used = {n.index for n in self.used_nodes()}
+        for n in self.used_nodes():
+            if not (0 <= n.parent < len(self.nodes)):
+                return False
+            seen = set()
+            j = n.index
+            while j != 0 and j not in seen:
+                if j not in used or not (0 <= self.nodes[j].parent < len(self.nodes)):
+                    return False
+                seen.add(j)
+                j = self.nodes[j].parent
+            if j != 0 and j != n.index:
+                return False
+        return True
+
+    def max_rotation_slot(self) -> int:
+        slots = [n.rotation_slot for n in self.nodes if n.is_used()]
+        return max(slots, default=-1)
+
+    def max_movement_slot(self) -> int:
+        slots = [n.movement_slot for n in self.nodes
+                 if n.movement_slot != NODE_SLOT_NONE]
+        return max(slots, default=-1)
+
+    def child_count_matches(self) -> bool:
+        return all(n.child_count == len(self.children_of(n.index))
+                   for n in self.used_nodes())
+
+    def as_dict(self, with_nodes=False):
+        used = self.used_nodes()
+        d = {
+            "node_count": len(self.nodes),
+            "used_nodes": len(used),
+            "unused_nodes": len(self.nodes) - len(used),
+            "index_count": len(self.node_indices),
+            "roots": self.roots(),
+            "tree": self.is_tree(),
+            "child_count_matches": self.child_count_matches(),
+            "max_rotation_slot": self.max_rotation_slot(),
+            "max_movement_slot": self.max_movement_slot(),
+            "size": self.size,
+            "exact": self.exact,
+        }
+        if with_nodes:
+            d["nodes"] = [n.as_dict() for n in self.nodes]
+            d["node_indices"] = list(self.node_indices)
+        return d
+
+
+def decode_skeleton(b: bytes, nodes_off: int, nodes_size: int, count: int,
+                    indices_off: int | None = None,
+                    indices_size: int = 0) -> Skeleton:
+    """Decode the ``NODES`` (and optional ``NODEINDICES``) payload.
+
+    Mirrors MXR.dll ``FUN_100219d0`` + ``FUN_1001fc30`` (node reader). Raises
+    ``GeometryError`` when the node payload does not tile exactly or the record
+    count disagrees with the chunk header."""
+    if nodes_size < 4 and count == 0:
+        return Skeleton([], (), nodes_size, indices_size, True)
+    if count and nodes_size != count * NODE_ENTRY_LEN:
+        raise GeometryError(
+            f"NODES size {nodes_size} != {count} * {NODE_ENTRY_LEN}")
+    n = count or nodes_size // NODE_ENTRY_LEN
+    if nodes_size != n * NODE_ENTRY_LEN:
+        raise GeometryError(
+            f"NODES size {nodes_size} is not a multiple of {NODE_ENTRY_LEN}")
+    if nodes_off + nodes_size > len(b):
+        raise GeometryError("NODES payload runs past EOF")
+    nodes = []
+    for i in range(n):
+        (ver, ax, ay, az, uc, ue, cc, par, sx, sy, rot, mov
+         ) = struct.unpack_from("<HfffHHHHffHH", b,
+                                nodes_off + i * NODE_ENTRY_LEN)
+        nodes.append(SkeletonNode(
+            i, ver, (ax, ay, az), uc, ue, cc, par, (sx, sy), rot, mov))
+    node_indices: tuple[int, ...] = ()
+    if indices_off is not None and indices_size:
+        if indices_size % 2:
+            raise GeometryError(f"NODEINDICES size {indices_size} is odd")
+        m = indices_size // 2
+        if indices_off + indices_size > len(b):
+            raise GeometryError("NODEINDICES payload runs past EOF")
+        node_indices = struct.unpack_from("<%dH" % m, b, indices_off)
+    exact = (nodes_size == n * NODE_ENTRY_LEN
+             and indices_size % 2 == 0)
+    return Skeleton(nodes, node_indices, nodes_size, indices_size, exact)
+
+
 class Node:
     __slots__ = ("offset", "name", "next_sibling", "first_child",
                  "data_offset", "data_size", "count", "flags", "raw")
@@ -580,6 +796,21 @@ class Xmd:
         summary["decoded_influences"] = dec["decoded_influences"]
         summary["max_influences_per_vertex"] = dec["max_influences_per_vertex"]
         summary["bad_clusters"] = dec["bad_clusters"]
+        try:
+            skel = self.skeleton()
+        except GeometryError:
+            skel = None
+        summary["skeleton_nodes"] = len(skel.nodes) if skel else 0
+        summary["skeleton_used_nodes"] = (
+            len(skel.used_nodes()) if skel else 0)
+        summary["skeleton_unused_nodes"] = (
+            len(skel.unused_nodes()) if skel else 0)
+        summary["skeleton_indices"] = len(skel.node_indices) if skel else 0
+        summary["skeleton_tree_ok"] = skel.is_tree() if skel else None
+        summary["skeleton_max_rotation_slot"] = (
+            skel.max_rotation_slot() if skel else None)
+        summary["skeleton_max_movement_slot"] = (
+            skel.max_movement_slot() if skel else None)
         return summary
 
     def surface_names(self) -> list[str]:
@@ -713,6 +944,75 @@ class Xmd:
                 problems.append(
                     f"cluster {c['index']}: bone index {c['max_bone']} "
                     f">= skeleton node count {bone_total}")
+
+        # Skeleton cross-check (GH #55): NODES must tile exactly, use version
+        # 0x100, keep the padding/slot invariants, form an acyclic tree with a
+        # correct child_count, and NODEINDICES must list each used non-root node
+        # exactly once (the bone traversal order). Every rule below holds on all
+        # 268 shipped NODES-bearing models (see ADR-0418).
+        try:
+            skel = self.skeleton()
+        except GeometryError as e:
+            skel = None
+            problems.append(f"skeleton: {e}")
+        if skel is not None and skel.nodes:
+            n = len(skel.nodes)
+            for nd in skel.nodes:
+                if nd.version != NODE_ENTRY_VERSION:
+                    problems.append(
+                        f"skeleton node {nd.index}: version 0x{nd.version:04x} "
+                        f"!= expected 0x{NODE_ENTRY_VERSION:04x}")
+                    break
+                if nd.unknown_c != 0:
+                    problems.append(
+                        f"skeleton node {nd.index}: reserved field != 0 "
+                        f"({nd.unknown_c})")
+                    break
+                if tuple(nd.scale_xy) != (1.0, 1.0):
+                    problems.append(
+                        f"skeleton node {nd.index}: scale {nd.scale_xy} != 1.0")
+                    break
+                if not 0 <= nd.parent < n:
+                    problems.append(
+                        f"skeleton node {nd.index}: parent {nd.parent} out of "
+                        f"range 0..{n - 1}")
+                    break
+                if nd.is_used():
+                    if nd.rotation_slot != nd.index:
+                        problems.append(
+                            f"skeleton node {nd.index}: rotation slot "
+                            f"{nd.rotation_slot} != index")
+                        break
+                    if nd.rotation_slot >= MAX_ROTATION_SLOTS:
+                        problems.append(
+                            f"skeleton node {nd.index}: rotation slot "
+                            f"{nd.rotation_slot} >= {MAX_ROTATION_SLOTS}")
+                        break
+                else:
+                    if (nd.movement_slot != NODE_SLOT_NONE
+                            or nd.parent != 0
+                            or tuple(nd.translation) != (0.0, 0.0, 0.0)):
+                        problems.append(
+                            f"skeleton node {nd.index}: padding record not "
+                            f"zeroed")
+                        break
+                if (nd.movement_slot != NODE_SLOT_NONE
+                        and nd.movement_slot >= MAX_MOVEMENT_SLOTS):
+                    problems.append(
+                        f"skeleton node {nd.index}: movement slot "
+                        f"{nd.movement_slot} >= {MAX_MOVEMENT_SLOTS}")
+                    break
+            if not skel.is_tree():
+                problems.append("skeleton is not an acyclic tree")
+            if not skel.child_count_matches():
+                problems.append("skeleton child_count mismatches used children")
+            used_non_root = sorted(nd.index for nd in skel.used_nodes()
+                                   if nd.index != 0)
+            if skel.node_indices and (sorted(skel.node_indices) != used_non_root
+                                      or len(set(skel.node_indices))
+                                      != len(skel.node_indices)):
+                problems.append(
+                    "NODEINDICES is not exactly the used non-root node set")
         return problems
 
     # -- geometry ---------------------------------------------------------
@@ -788,6 +1088,20 @@ class Xmd:
             return None
         return decode_bonedeform(self.data, node.data_offset,
                                  node.data_size)[0]
+
+    def skeleton(self) -> Skeleton | None:
+        """Decode the ``SKELETON`` ``NODES``/``NODEINDICES`` sub-tree.
+
+        Returns ``None`` when the file has no ``NODES`` chunk (e.g. a static
+        prop). Mirrors MXR.dll ``FUN_100219d0`` (see :func:`decode_skeleton`)."""
+        nd = self.chunk("NODES")
+        if nd is None:
+            return None
+        ni = self.chunk("NODEINDICES")
+        return decode_skeleton(
+            self.data, nd.data_offset, nd.data_size, nd.count,
+            ni.data_offset if ni is not None else None,
+            ni.data_size if ni is not None else 0)
 
     def _skin_owner_map(self) -> dict[int, Node]:
         """Map each ``VERTEXFRAMES`` node offset to its sibling ``BONEDEFORM``.
@@ -950,7 +1264,8 @@ def _printable(b: bytes, minlen: int) -> list[str]:
 
 def report_file(path: str, want_json: bool, with_strings: bool,
                 with_tree: bool, with_mesh: bool = False,
-                cluster: int | None = None) -> dict:
+                cluster: int | None = None,
+                with_skeleton: bool = False) -> dict:
     x = Xmd(path)
     rec = {
         "path": path,
@@ -968,6 +1283,10 @@ def report_file(path: str, want_json: bool, with_strings: bool,
         rec["strings"] = x.text_strings()
     if with_mesh or cluster is not None:
         rec["clusters"] = x.cluster_meshes()
+    skel = None
+    if with_skeleton:
+        skel = x.skeleton()
+        rec["skeleton"] = skel.as_dict(with_nodes=True) if skel else None
     if cluster is not None:
         vf_nodes = [n for n in x.walk_linked() if n.name == "VERTEXFRAMES"]
         if not 0 <= cluster < len(vf_nodes):
@@ -1001,6 +1320,23 @@ def report_file(path: str, want_json: bool, with_strings: bool,
               f"decoded_influences={g['decoded_influences']}  "
               f"max_influences_per_vertex={g['max_influences_per_vertex']}  "
               f"bad_clusters={g['bad_clusters']}")
+        if with_skeleton and skel is not None:
+            print(f"   skeleton: nodes={len(skel.nodes)} "
+                  f"used={len(skel.used_nodes())} "
+                  f"padding={len(skel.unused_nodes())} "
+                  f"indices={len(skel.node_indices)} tree={skel.is_tree()} "
+                  f"max_rotation_slot={skel.max_rotation_slot()} "
+                  f"max_movement_slot={skel.max_movement_slot()}")
+            for nd in skel.nodes[:24]:
+                tag = "" if nd.is_used() else "  [padding]"
+                print(f"      node {nd.index:3d} parent={nd.parent:3d} "
+                      f"children={nd.child_count} "
+                      f"t=({nd.translation[0]:8.3f},{nd.translation[1]:8.3f},"
+                      f"{nd.translation[2]:8.3f}) rot={nd.rotation_slot} "
+                      f"mov={nd.movement_slot}{tag}")
+            print("      node order: "
+                  + " ".join(str(i) for i in skel.node_indices[:32])
+                  + (" ..." if len(skel.node_indices) > 32 else ""))
         if with_mesh:
             for c in rec.get("clusters", []):
                 fr = c["frames"][-1] if c["frames"] else {}
@@ -1105,6 +1441,8 @@ def main(argv=None) -> int:
     ap.add_argument("--cluster", type=int, metavar="N",
                     help="print the decoded frames (with positions) of "
                          "VERTEXFRAMES cluster N")
+    ap.add_argument("--skeleton", action="store_true",
+                    help="decode and print the SKELETON NODES/NODEINDICES tree")
     args = ap.parse_args(argv)
 
     if args.check:
@@ -1137,7 +1475,8 @@ def main(argv=None) -> int:
     if not args.path:
         ap.error("provide a .xmd path or --inventory DIR")
     rec = report_file(args.path, args.json, args.strings, args.tree,
-                      with_mesh=args.mesh, cluster=args.cluster)
+                      with_mesh=args.mesh, cluster=args.cluster,
+                      with_skeleton=args.skeleton)
     if args.json:
         print(json.dumps(rec, indent=2))
     return 0

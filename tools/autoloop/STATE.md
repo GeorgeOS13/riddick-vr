@@ -2,6 +2,59 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 7 — 2026-10-16 00:03 (scheduled loop)
+- **Unit:** GH #55 → #46 — decode the `.xmd` `SKELETON` `NODES`/`NODEINDICES`
+  payloads from the shipped `MXR.dll` loader (the skeleton step after
+  geometry/UV/skinning of Wakes 3–6).
+- Observation (real evidence, read-only; Ghidra 12.1.4 via `rea`): the
+  `SKELETON` string is at MXR.dll `.rdata` `0x10149df8`; `rea xrefs` → the model
+  writer `FUN_10081f30` and the model reader `FUN_10083060`
+  (`CTriangleMeshCore::Read`). The reader calls the skeleton reader
+  **`FUN_100219d0`**, which `GetNext("NODES")` then reads one record per node via
+  **`FUN_1001fc30`**, `GetNext("NODEINDICES")` (each element a `u16`), optional
+  `ATTACHPOINTS`, then finalizes with `FUN_1001ff60`. `FUN_1001fc30` (reader) and
+  `FUN_1001eec0` (writer) agree byte for byte: a **34-byte** node record
+  (`u16 version==0x100`; `f32 t[3]`; `u16 reserved`; `u16 index`; `u16
+  child_count`; `u16 parent`; `f32 scale[2]`; `u16 rotation_slot`; `u16
+  movement_slot`). `FUN_1001ff60` caps rotation slots at `0x80` and movement
+  slots at `0x20`.
+- Recovered: **used** nodes have `rotation_slot == index`; a record with
+  `rotation_slot == 0xFFFF` (also `movement_slot == 0xFFFF`, zero translation,
+  `parent == 0`) is a **padding** node excluded from `NODEINDICES`.
+  `NODEINDICES` = `u16[used_nodes − 1]`, every used non-root node exactly once
+  (the bone/traversal order). Node **names are not stored** in `.xmd`.
+- Change:
+  - `tools/mos_xmd.py`: added `SkeletonNode`, `Skeleton` (`used_nodes`,
+    `children_of`, `is_tree`, `child_count_matches`, `max_rotation_slot`,
+    `max_movement_slot`), `decode_skeleton`; `Xmd.skeleton()`;
+    `geometry_summary()` reports skeleton node/used/padding/index counts + tree
+    flag; `validate()` cross-checks the skeleton (version, 34-byte tiling,
+    reserved/scale, used `rotation_slot == index`, zeroed padding, `parent` in
+    range, acyclic tree, `child_count == used children`, `NODEINDICES == used
+    non-root set`); `--skeleton` CLI; docstring documents the layout.
+  - `tools/test_mos_xmd.py`: +7 headless synthetic-container skeleton tests
+    (round-trip, bad child_count, bad NODEINDICES, size mismatch, non-zeroed
+    padding, bad version, absent skeleton); fixed the skin helper to emit a
+    valid flat skeleton.
+  - `docs/adr/0418-xmd-skeleton-nodes-nodeindices.md` (new).
+- Evidence: `mos_xmd.py --inventory <game>\Content\Models --check` → **631/631
+  `ok`, 0 failures** (with skeleton cross-checks). Across shipped models: **268**
+  `NODES` chunks, **249** non-empty skeletons, **12593** records (**12424 used** /
+  **169 padding**), **12175** `NODEINDICES`; **0** violations for every invariant
+  above, **249/249** acyclic trees, max rotation slot **73** (< `0x80`), max
+  movement slot **20** (< `0x20`). Samples: `Riddick_B05.xmd` 70 nodes / 69
+  indices / coherent spine+arm chain (0→1→8→9→10→11→{15,20,24,…});
+  `dweller.xmd` 69 records (50 used / 19 padding) / 49 indices.
+  `test_mos_xmd.py` PASS; `validate_addresses.py`, `verify_reported_fixes.py`,
+  `scenario_tests.py --check`, `verify_hook_init.py` all pass. No C++ changed, so
+  `build-all.ps1`/CTest were not rerun (as in Wakes 3–6).
+- Blocker: none. Next: extract the Riddick hand/forearm surfaces
+  (`RIDDICK_ARMSCAR_D/S/N` in `Riddick_B05.xmd`) with geometry + UVs + skeleton +
+  skin and add a native mesh path behind a flag, keeping `VRHandRenderer` as
+  fallback (GH #46).
+- Branch: committed directly on `main` (sole-weight/single-writer mode); pushed
+  to `origin/main` (normal push). No game file modified.
+
 ## Wake 6 — 2026-10-15 23:08 (scheduled loop)
 - **Unit:** GH #55 → #46 — decode the `.xmd` `BONEDEFORM` skinning payloads from
   the shipped `MXR.dll` loader.

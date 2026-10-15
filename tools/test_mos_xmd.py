@@ -338,10 +338,19 @@ def _bonedeform(vertices, influences, matrix_map_id=None, matrix_bones=()):
     return bytes(out)
 
 
+def _flat_nodes(n: int) -> bytes:
+    """A minimal valid skeleton: node 0 as root with ``n-1`` direct children."""
+    recs = [dict(rotation_slot=0, movement_slot=0, child_count=n - 1, parent=0)]
+    for i in range(1, n):
+        recs.append(dict(rotation_slot=i,
+                         movement_slot=mos_xmd.NODE_SLOT_NONE, parent=0))
+    return _nodes_payload(recs)
+
+
 def _skin_container(vf_payload, bd_payload, bones):
     """VERTEXFRAMES + BONEDEFORM (+ NODES carrying ``bones`` skeleton nodes)."""
     stride = mos_xmd.NODE_RECORD_LEN
-    nodes_payload = b"\x00" * (34 * bones)
+    nodes_payload = _flat_nodes(bones)
     nodes = [
         ("VERTEXFRAMES", stride * 2, 0, len(vf_payload), 1, 0),
         ("BONEDEFORM", stride * 3, 0, len(bd_payload), 0, 0),
@@ -488,6 +497,154 @@ def test_skin_absent_is_ok(tmp_dir):
         os.remove(path)
 
 
+def _node_record(version=mos_xmd.NODE_ENTRY_VERSION, translation=(0.0, 0.0, 0.0),
+                 uc=0, ue=0, child_count=0, parent=0, scale=(1.0, 1.0),
+                 rotation_slot=0, movement_slot=mos_xmd.NODE_SLOT_NONE) -> bytes:
+    out = struct.pack("<HfffHHHHffHH", version, translation[0],
+                      translation[1], translation[2], uc, ue, child_count,
+                      parent, scale[0], scale[1], rotation_slot,
+                      movement_slot)
+    assert len(out) == mos_xmd.NODE_ENTRY_LEN, len(out)
+    return out
+
+
+def _nodes_payload(records) -> bytes:
+    """records: list of keyword dicts fed to :func:`_node_record`."""
+    return b"".join(_node_record(**r) for r in records)
+
+
+def _node_indices(indices) -> bytes:
+    return b"".join(struct.pack("<H", i) for i in indices)
+
+
+def _skeleton_container(nodes_payload, count, indices=b"") -> bytes:
+    stride = mos_xmd.NODE_RECORD_LEN
+    nodes = [
+        ("NODES", stride * 2, 0, len(nodes_payload), count, 0),
+        ("NODEINDICES", 0, 0, len(indices), len(indices) // 2, 0),
+    ]
+    return build_container(nodes, [nodes_payload, indices])
+
+
+def _basic_skeleton_records():
+    # node 0 root, children 1 & 2; node 3 is an all-zero padding record.
+    return [
+        dict(rotation_slot=0, movement_slot=0, child_count=2, parent=0),
+        dict(rotation_slot=1, movement_slot=1, parent=0),
+        dict(rotation_slot=2, parent=0, translation=(1.0, 2.0, 3.0)),
+        dict(rotation_slot=mos_xmd.NODE_SLOT_NONE,
+             movement_slot=mos_xmd.NODE_SLOT_NONE, parent=0),
+    ]
+
+
+def test_skeleton_roundtrip(tmp_dir):
+    payload = _nodes_payload(_basic_skeleton_records())
+    blob = _skeleton_container(payload, 4, _node_indices([1, 2]))
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        sk = x.skeleton()
+        assert len(sk.nodes) == 4, len(sk.nodes)
+        assert len(sk.used_nodes()) == 3 and len(sk.unused_nodes()) == 1
+        assert sk.node_indices == (1, 2), sk.node_indices
+        assert sk.children_of(0) == [1, 2], sk.children_of(0)
+        assert sk.roots() == [0], sk.roots()
+        assert sk.is_tree() and sk.child_count_matches()
+        assert sk.max_rotation_slot() == 2
+        assert sk.max_movement_slot() == 1
+        assert sk.nodes[2].translation == (1.0, 2.0, 3.0)
+        assert not sk.nodes[3].is_used()
+        assert x.validate() == [], x.validate()
+        g = x.geometry_summary()
+        assert g["skeleton_nodes"] == 4 and g["skeleton_used_nodes"] == 3, g
+        assert g["skeleton_unused_nodes"] == 1 and g["skeleton_indices"] == 2, g
+    finally:
+        os.remove(path)
+
+
+def test_skeleton_detects_bad_child_count(tmp_dir):
+    recs = _basic_skeleton_records()
+    recs[0]["child_count"] = 5           # really 2
+    payload = _nodes_payload(recs)
+    blob = _skeleton_container(payload, 4, _node_indices([1, 2]))
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        problems = x.validate()
+        assert any("child_count" in p for p in problems), problems
+    finally:
+        os.remove(path)
+
+
+def test_skeleton_detects_bad_node_indices(tmp_dir):
+    payload = _nodes_payload(_basic_skeleton_records())
+    # 3 is padding and 2 is missing -> not the used non-root node set
+    blob = _skeleton_container(payload, 4, _node_indices([1, 3]))
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        problems = x.validate()
+        assert any("NODEINDICES" in p for p in problems), problems
+    finally:
+        os.remove(path)
+
+
+def test_skeleton_detects_size_mismatch(tmp_dir):
+    # header claims 3 nodes but the payload only holds one record
+    payload = _nodes_payload(_basic_skeleton_records()[:1])
+    blob = _skeleton_container(payload, 3, _node_indices([1, 2]))
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        problems = x.validate()
+        assert any("NODES size" in p for p in problems), problems
+    finally:
+        os.remove(path)
+
+
+def test_skeleton_detects_padding_not_zeroed(tmp_dir):
+    recs = _basic_skeleton_records()
+    recs[3]["translation"] = (9.0, 9.0, 9.0)   # padding must be zeroed
+    payload = _nodes_payload(recs)
+    blob = _skeleton_container(payload, 4, _node_indices([1, 2]))
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        problems = x.validate()
+        assert any("padding record" in p for p in problems), problems
+    finally:
+        os.remove(path)
+
+
+def test_skeleton_detects_bad_version(tmp_dir):
+    recs = _basic_skeleton_records()
+    recs[1]["version"] = 0x200
+    payload = _nodes_payload(recs)
+    blob = _skeleton_container(payload, 4, _node_indices([1, 2]))
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        problems = x.validate()
+        assert any("version" in p for p in problems), problems
+    finally:
+        os.remove(path)
+
+
+def test_skeleton_absent_is_ok(tmp_dir):
+    verts = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+    normals = [(0, 0, 0)] * 3
+    blob = _geometry_container(_vf204_frame(verts, normals),
+                               _triangles([0, 1, 2]), 1)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        assert x.skeleton() is None
+        assert x.validate() == [], x.validate()
+        assert x.geometry_summary()["skeleton_nodes"] == 0
+    finally:
+        os.remove(path)
+
+
 def main() -> int:
     tests = (test_roundtrip, test_rejects_bad_magic,
              test_geometry_roundtrip, test_geometry_detects_index_out_of_range,
@@ -498,7 +655,12 @@ def main() -> int:
              test_skin_detects_prefix_sum_mismatch,
              test_skin_detects_vertex_count_mismatch,
              test_skin_detects_bone_out_of_range,
-             test_skin_bad_matrix_map_tiling, test_skin_absent_is_ok)
+             test_skin_bad_matrix_map_tiling, test_skin_absent_is_ok,
+             test_skeleton_roundtrip, test_skeleton_detects_bad_child_count,
+             test_skeleton_detects_bad_node_indices,
+             test_skeleton_detects_size_mismatch,
+             test_skeleton_detects_padding_not_zeroed,
+             test_skeleton_detects_bad_version, test_skeleton_absent_is_ok)
     with tempfile.TemporaryDirectory() as d:
         for t in tests:
             t(d)
