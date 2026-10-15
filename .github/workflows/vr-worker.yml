@@ -17,7 +17,8 @@ jobs:
         with:
           python-version: '3.12'
       - name: Show oldest open issues
-        run: gh issue list --state open --limit 10 --json number,title --jq ".[] | \"#\\(.number) \\(.title)\""
+        run: |
+          gh issue list --state open --limit 10 --json number,title --jq '.[] | "#\(.number) \(.title)"'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Build (x64 host + Win32 proxy)
@@ -25,6 +26,11 @@ jobs:
       - name: REA address-table self-test
         run: python tools/validate_addresses.py
       - name: Verify 368-symbol OpenGL forwarder table intact
-        run: powershell -Command "$s = (Select-String -Path src/hook/opengl_forwarders.c -Pattern 'GLPROXY_' | Measure-Object).Count; $d = Test-Path dist/opengl32.dll; Write-Host ""forwarder refs: $s, dll present: $d""; if ($s -lt 360 -or -not $d) { throw ""forwarder table check failed"" }"
+        shell: powershell
+        run: |
+          $s = (Select-String -Path src/hook/opengl_forwarders.c -Pattern 'GLPROXY_' | Measure-Object).Count
+          $d = Test-Path dist/opengl32.dll
+          Write-Host "forwarder refs: $s, dll present: $d"
+          if ($s -lt 360 -or -not $d) { throw 'forwarder table check failed' }
       - name: Worker summary
         run: echo "CI lane green - game-dependent semi-play runs on local 24/7 box"
