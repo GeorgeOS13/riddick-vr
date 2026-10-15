@@ -731,6 +731,299 @@ static void UpdateTurn(TurnState& st, uint32_t btns, RiddickVRSharedState& vrSta
     }
 }
 
+// GH #17 step 5: grips/throw/body-drag detection extracted (section 9:
+// interactions, physical throwing, body dragging, climbing/reload overlap).
+// Pure detection: updates st, returns edge intents; Update owns
+// SendKey/SendKeyTap/mouse_event/HapticRequest/logs. Same thresholds,
+// velocities, and cooldowns as the inline block it replaces.
+struct GripsState {
+    bool leftGripDown = false;
+    bool rightGripDown = false;
+    DWORD lastDiceRattleTime = 0;
+    DWORD lastCardDealTime = 0;
+    DWORD lastAshThrowTime = 0;
+    DWORD lastFanScatterTime = 0;
+    DWORD lastFanClenchBurstTime = 0;
+    DWORD fanClenchStartTime = 0;
+    bool handsWereClenchedChest = false;
+    DWORD lastEyeRecoveryTime = 0;
+    DWORD lastDragPulseTime = 0;
+    bool inspectingItem = false;
+    bool isThroatGripping = false;
+    DWORD lastShakedownPulseTime = 0;
+    bool isChokeholding = false;
+    DWORD lastChokeStruggleTime = 0;
+    DWORD lastBunkSearchTime = 0;
+    DWORD lastBunkConcealTime = 0;
+};
+static GripsState s_grips;
+
+struct GripsIntent {
+    bool leftGrab = false;   // press edge: SendKey('E', true) + latch haptic
+    bool leftThrow = false;  // release edge with forward flick: click + log + haptic
+    bool leftDrop = false;   // release edge without flick: SendKey('E', false)
+    float throwSpeed = 0.0f;
+    RiddickVRVector3 throwVel{};
+    bool diceRattle = false;
+    bool cardDeal = false;
+    float cardVx = 0.0f;
+    float cardVz = 0.0f;
+    bool ashThrow = false;
+    float ashVy = 0.0f;
+    float ashVz = 0.0f;
+    bool fanScatter = false;
+    float fanLx = 0.0f;
+    float fanRx = 0.0f;
+    bool fanClenchEngaged = false; // clench-start edge: friction haptic
+    bool fanBurst = false;
+    float burstLx = 0.0f;
+    float burstRx = 0.0f;
+    bool eyeRecovery = false;
+    bool eyeHeadShake = false; // true: head shake reason; false: forearm wipe
+    bool dragPulse = false;
+    bool inspectChanged = false;
+    bool inspectEngaged = false;
+    float inspectY = 0.0f;
+    bool throatEngaged = false;
+    float throatX = 0.0f;
+    float throatY = 0.0f;
+    float throatZ = 0.0f;
+    bool shakedown = false;
+    float shakeVelZ = 0.0f;
+    bool throatReleased = false;
+    bool chokeEngaged = false;
+    bool chokePulse = false; // periodic struggle tick (300 ms cadence)
+    bool chokeFinisher = false;
+    float chokeVx = 0.0f;
+    bool chokeReleased = false;
+    bool bunkSearch = false;
+    float bunkSweepVx = 0.0f;
+    bool bunkConceal = false;
+    float concealVz = 0.0f;
+    bool rightChanged = false;
+    bool rightDown = false; // new level for SendKey('R', down)
+};
+
+static GripsIntent UpdateGrips(GripsState& st, DWORD now,
+                               float leftGrip, float rightGrip, float rightTrigger,
+                               const RiddickVRVector3& leftLocal, const RiddickVRVector3& rightLocal,
+                               const RiddickVRVector3& lVel, const RiddickVRVector3& rVel,
+                               float lSpeed, float stickLX, float stickLY,
+                               bool isClimbingActive, bool twoHandedStabilizationActive,
+                               bool physicalBlockEngaged, bool meleeFiredThisFrame,
+                               bool crouched, bool deepProne, bool peeking,
+                               float lastHmdDeltaYaw) {
+    GripsIntent out;
+
+    // Left Grip -> Grab / Secondary Interact ('E') / Physical Object Throwing / Body Dragging
+    bool wantLeftGrip = !isClimbingActive && !twoHandedStabilizationActive && (leftGrip > 0.5f);
+    if (wantLeftGrip != st.leftGripDown) {
+        if (!wantLeftGrip && st.leftGripDown) {
+            // Evaluated at moment of release (ADR 0382: Forward Trajectory Vector Gating)
+            if (lVel.z < -0.65f && lSpeed > 1.10f && !meleeFiredThisFrame) { // GH #31: melee has priority
+                out.leftThrow = true;
+                out.throwSpeed = lSpeed;
+                out.throwVel = lVel;
+            } else {
+                out.leftDrop = true;
+            }
+        } else {
+            out.leftGrab = true;
+        }
+        st.leftGripDown = wantLeftGrip;
+    }
+
+    // Inmate Gambling Dice Shaking & Roll Throwing (ADR 0045)
+    bool cuppedLeftHand = (leftGrip > 0.40f && leftGrip < 0.85f);
+    if (cuppedLeftHand && lSpeed > 0.70f && !physicalBlockEngaged && (now - st.lastDiceRattleTime > 120)) {
+        st.lastDiceRattleTime = now;
+        out.diceRattle = true;
+    }
+
+    // Interactive Inmate Gambling Card Flipping & Dealing (ADR 0075)
+    bool cardHandProximity = (rightLocal.y > -0.45f && rightLocal.y < -0.10f) &&
+                             (rightLocal.z > -0.40f && rightLocal.z < -0.15f);
+    bool cardPinchGrip = (rightGrip > 0.40f && rightGrip < 0.75f) && (rightTrigger < 0.30f);
+    bool cardFlick = (fabsf(rVel.x) > 0.60f || rVel.z < -0.65f);
+    if (cardHandProximity && cardPinchGrip && cardFlick && !physicalBlockEngaged && (now - st.lastCardDealTime > 300)) {
+        st.lastCardDealTime = now;
+        out.cardDeal = true;
+        out.cardVx = rVel.x;
+        out.cardVz = rVel.z;
+    }
+
+    // Inmate Pit Brawl Dirt / Ash Throw Blind (ADR 0065)
+    bool ashThrowFlick = (crouched || deepProne) &&
+                         (rightGrip < 0.40f && rightTrigger < 0.40f) &&
+                         (rVel.y > 0.80f && rVel.z < -0.80f);
+    if (ashThrowFlick && !meleeFiredThisFrame && (now - st.lastAshThrowTime > 1200)) { // GH #31
+        st.lastAshThrowTime = now;
+        out.ashThrow = true;
+        out.ashVy = rVel.y;
+        out.ashVz = rVel.z;
+    }
+
+    // Inmate Pit Brawl Sand / Ash Throw Two-Handed Fan Scatter (ADR 0085)
+    bool bothHandsLowSand = (crouched || deepProne) &&
+                            (leftLocal.y < -0.40f && rightLocal.y < -0.40f) &&
+                            (leftGrip < 0.45f && rightGrip < 0.45f);
+    bool fanScatterOutward = (lVel.x < -0.80f && rVel.x > 0.80f) && (lVel.y > 0.40f || rVel.y > 0.40f);
+    if (bothHandsLowSand && fanScatterOutward && !meleeFiredThisFrame && (now - st.lastFanScatterTime > 1400)) { // GH #31
+        st.lastFanScatterTime = now;
+        out.fanScatter = true;
+        out.fanLx = lVel.x;
+        out.fanRx = rVel.x;
+    }
+
+    // Inmate Pit Brawl Dirt / Ash Two-Handed Fan Clench & Burst (ADR 0104)
+    float dxHandsFan = leftLocal.x - rightLocal.x;
+    float dyHandsFan = leftLocal.y - rightLocal.y;
+    float dzHandsFan = leftLocal.z - rightLocal.z;
+    float distHandsFan = sqrtf(dxHandsFan * dxHandsFan + dyHandsFan * dyHandsFan + dzHandsFan * dzHandsFan);
+
+    bool handsAtChest = (leftLocal.y > -0.25f && leftLocal.y < 0.05f) &&
+                        (rightLocal.y > -0.25f && rightLocal.y < 0.05f) &&
+                        (distHandsFan < 0.18f);
+    bool bothFanGripsClenched = (leftGrip > 0.60f && rightGrip > 0.60f);
+
+    if (handsAtChest && bothFanGripsClenched && !physicalBlockEngaged) {
+        if (!st.handsWereClenchedChest) {
+            st.handsWereClenchedChest = true;
+            st.fanClenchStartTime = now;
+            out.fanClenchEngaged = true;
+        }
+    } else if (st.handsWereClenchedChest) {
+        // Evaluate burst if fists were clenched together recently
+        if (now - st.fanClenchStartTime < 800) {
+            bool explosiveFanOutward = (lVel.x < -1.10f && rVel.x > 1.10f);
+            if (explosiveFanOutward && !meleeFiredThisFrame && (now - st.lastFanClenchBurstTime > 2000)) { // GH #31
+                st.lastFanClenchBurstTime = now;
+                out.fanBurst = true;
+                out.burstLx = lVel.x;
+                out.burstRx = rVel.x;
+            }
+        }
+        if (!bothFanGripsClenched || distHandsFan > 0.35f) {
+            st.handsWereClenchedChest = false;
+        }
+    }
+
+    // Inmate Pit Brawl Dirt / Ash Eye Recovery Blink Gesture (ADR 0073)
+    bool rightWipingEyes = (rightLocal.z > -0.22f && rightLocal.z < -0.05f) &&
+                           (rightLocal.y > -0.05f && rightLocal.y < 0.10f) &&
+                           (fabsf(rVel.x) > 0.50f);
+    bool leftWipingEyes = (leftLocal.z > -0.22f && leftLocal.z < -0.05f) &&
+                          (leftLocal.y > -0.05f && leftLocal.y < 0.10f) &&
+                          (fabsf(lVel.x) > 0.50f);
+    bool rapidHeadShake = (fabsf(lastHmdDeltaYaw) > 0.15f);
+
+    if ((rightWipingEyes || leftWipingEyes || rapidHeadShake) && (now - st.lastEyeRecoveryTime > 1200)) {
+        st.lastEyeRecoveryTime = now;
+        out.eyeRecovery = true;
+        out.eyeHeadShake = rapidHeadShake;
+    }
+
+    // Kinematic Body / Heavy Object Drag Resistance (ADR 0020)
+    if (st.leftGripDown && (crouched || peeking)) {
+        float moveMagnitude = fabsf(stickLX) + fabsf(stickLY);
+        if (moveMagnitude > 0.25f && (now - st.lastDragPulseTime > 450)) {
+            st.lastDragPulseTime = now;
+            out.dragPulse = true;
+        }
+    }
+
+    // Diegetic Collectible Inspection: Cigarette Packs & Bounty Cards (ADR 0029)
+    bool wantInspect = st.leftGripDown && (leftLocal.y > -0.05f && leftLocal.z > -0.32f);
+    if (wantInspect != st.inspectingItem) {
+        st.inspectingItem = wantInspect;
+        out.inspectChanged = true;
+        out.inspectEngaged = wantInspect;
+        out.inspectY = leftLocal.y;
+    }
+
+    // Interactive Guard Interrogation: Physical Throat-Grip Shakedown (ADR 0032)
+    bool inThroatZone = st.leftGripDown && (leftLocal.z > -0.60f && leftLocal.z < -0.22f) &&
+                                        (leftLocal.y > -0.25f && leftLocal.y < 0.15f) &&
+                                        (fabsf(leftLocal.x) < 0.28f);
+    if (inThroatZone) {
+        if (!st.isThroatGripping) {
+            st.isThroatGripping = true;
+            out.throatEngaged = true;
+            out.throatX = leftLocal.x;
+            out.throatY = leftLocal.y;
+            out.throatZ = leftLocal.z;
+        }
+        // Physical Forward/Back Shake: |lVel.z| > 0.70 m/s
+        if (fabsf(lVel.z) > 0.70f && (now - st.lastShakedownPulseTime > 350)) {
+            st.lastShakedownPulseTime = now;
+            out.shakedown = true;
+            out.shakeVelZ = lVel.z;
+        }
+    } else {
+        if (st.isThroatGripping) {
+            st.isThroatGripping = false;
+            out.throatReleased = true;
+        }
+    }
+
+    // Guard Subdue Chokehold & Silent Neck Snap (ADR 0047)
+    bool inChokeholdZone = (crouched || peeking || deepProne) &&
+                           st.leftGripDown && (leftLocal.z > -0.35f && leftLocal.z < -0.15f) &&
+                           (leftLocal.y > -0.20f && leftLocal.y < 0.10f) &&
+                           (fabsf(leftLocal.x) < 0.25f);
+    if (inChokeholdZone) {
+        if (!st.isChokeholding) {
+            st.isChokeholding = true;
+            out.chokeEngaged = true;
+        }
+        if (now - st.lastChokeStruggleTime > 300) {
+            st.lastChokeStruggleTime = now;
+            out.chokePulse = true;
+        }
+        // Cervical Twist Finisher: rapid lateral jerk of right hand (|rVel.x| > 0.80 m/s)
+        if ((fabsf(rVel.x) > 0.80f || fabsf(rVel.y) > 0.80f) && !meleeFiredThisFrame) { // GH #31: melee has priority
+            st.isChokeholding = false;
+            out.chokeFinisher = true;
+            out.chokeVx = rVel.x;
+        }
+    } else {
+        if (st.isChokeholding) {
+            st.isChokeholding = false;
+            out.chokeReleased = true;
+        }
+    }
+
+    // Inmate Bunk Mattress Stash Search (ADR 0050)
+    bool leftHoldingMattress = (crouched || deepProne) &&
+                               st.leftGripDown && (leftLocal.y > -0.55f && leftLocal.y < -0.25f);
+    bool rightSweepingUnder = (rightLocal.z < -0.30f) && (fabsf(rVel.x) > 0.35f);
+    if (leftHoldingMattress && rightSweepingUnder && (now - st.lastBunkSearchTime > 900)) {
+        st.lastBunkSearchTime = now;
+        out.bunkSearch = true;
+        out.bunkSweepVx = rVel.x;
+    }
+
+    // Inmate Bunk Shiv Sheath Concealment Under Mattress Frame (ADR 0110)
+    bool leftLiftingMattress = (crouched || deepProne) &&
+                               st.leftGripDown && (leftLocal.y > -0.45f && leftLocal.y < -0.15f);
+    bool rightThrustingIntoSlat = (rightLocal.z > -0.42f && rightLocal.z < -0.14f) && (rVel.z < -0.65f);
+    if (leftLiftingMattress && rightThrustingIntoSlat && (now - st.lastBunkConcealTime > 1500)) {
+        st.lastBunkConcealTime = now;
+        out.bunkConceal = true;
+        out.concealVz = rVel.z;
+    }
+
+    // Right Grip -> Weapon Reload ('R') (suppressed during ladder climb)
+    bool wantRightGrip = !isClimbingActive && (rightGrip > 0.5f);
+    if (wantRightGrip != st.rightGripDown) {
+        st.rightGripDown = wantRightGrip;
+        out.rightChanged = true;
+        out.rightDown = wantRightGrip;
+    }
+
+    return out;
+}
+
 void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (!m_initialized || !vrState.vrActive) return;
 
@@ -10369,7 +10662,6 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // In Riddick:
     // Right Mouse Button (ACTION_SECONDARYFIRE 241) = Guard / Block when unarmed/melee, Aim/Zoom when holding firearms.
     static bool s_rightTriggerDown = false;
-    static bool s_leftGripDown = false, s_rightGripDown = false;
 
     // Right Trigger -> Fire / Primary Attack / UI Select Click
     // GH #24: press > 0.65 / release < 0.45 hysteresis so hover/gesture
@@ -10498,60 +10790,49 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     }
 
     // 9. Left & Right Grip Mapping (Interactions, Physical Throwing, Body Dragging, Climbing, Reload - ADR 0017 & 0020)
+    // GH #17 step 5: detection delegated to UpdateGrips (explicit GripsState, no behavior change).
+    GripsIntent gripsIntent = UpdateGrips(s_grips, now,
+        vrState.leftController.grip, vrState.rightController.grip,
+        vrState.rightController.trigger,
+        leftLocal, rightLocal, lVel, rVel, lSpeed,
+        vrState.leftController.thumbstickX, vrState.leftController.thumbstickY,
+        isClimbingActive, s_twoHandedStabilizationActive, s_physicalBlockEngaged,
+        meleeFiredThisFrame,
+        s_posture.isPhysicallyCrouched, s_posture.isDeepProne, s_posture.isStealthPeeking,
+        s_lastHmdDeltaYaw);
+
     // Left Grip -> Grab / Secondary Interact ('E') / Physical Object Throwing / Body Dragging
-    bool wantLeftGrip = !isClimbingActive && !s_twoHandedStabilizationActive && (vrState.leftController.grip > 0.5f);
-    if (wantLeftGrip != s_leftGripDown) {
-        if (!wantLeftGrip && s_leftGripDown) {
-            // Evaluated at moment of release (ADR 0382: Forward Trajectory Vector Gating):
-            // Forward throwing motion requires positive forward velocity (lVel.z < -0.65 m/s) and speed > 1.10 m/s
-            // Arm retraction or sideways swings gently drop the object at feet rather than hurling it forward
-            if (lVel.z < -0.65f && lSpeed > 1.10f && !meleeFiredThisFrame) { // GH #31: melee has priority
-                VR_LOG_INFO("Physical Gesture: OBJECT THROW / PROPULSION executed (Speed: %.2f m/s, Vel: [%.2f, %.2f, %.2f])",
-                    lSpeed, lVel.x, lVel.y, lVel.z);
-                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                HapticRequest(0, (0.60f), kHapticLadder); // Tactile release impulse
-            } else {
-                SendKey('E', false); // Gentle drop at feet
-            }
-        } else {
-            SendKey('E', true);
-            HapticRequest(0, (0.35f), kHapticUi); // Object grab latch
-        }
-        s_leftGripDown = wantLeftGrip;
+    // (release evaluated at moment of release, ADR 0382: Forward Trajectory Vector Gating)
+    if (gripsIntent.leftThrow) {
+        VR_LOG_INFO("Physical Gesture: OBJECT THROW / PROPULSION executed (Speed: %.2f m/s, Vel: [%.2f, %.2f, %.2f])",
+            gripsIntent.throwSpeed, gripsIntent.throwVel.x, gripsIntent.throwVel.y, gripsIntent.throwVel.z);
+        mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+        mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+        HapticRequest(0, (0.60f), kHapticLadder); // Tactile release impulse
+    } else if (gripsIntent.leftDrop) {
+        SendKey('E', false); // Gentle drop at feet
+    }
+    if (gripsIntent.leftGrab) {
+        SendKey('E', true);
+        HapticRequest(0, (0.35f), kHapticUi); // Object grab latch
     }
 
     // Inmate Gambling Dice Shaking & Roll Throwing (ADR 0045)
-    static DWORD s_lastDiceRattleTime = 0;
-    bool cuppedLeftHand = (vrState.leftController.grip > 0.40f && vrState.leftController.grip < 0.85f);
-    if (cuppedLeftHand && lSpeed > 0.70f && !s_physicalBlockEngaged && (now - s_lastDiceRattleTime > 120)) {
-        s_lastDiceRattleTime = now;
+    if (gripsIntent.diceRattle) {
         HapticRequest(0, (0.30f), kHapticUi); // Rapid bone-on-bone dice rattle micro-tap (160 Hz)
     }
 
     // Interactive Inmate Gambling Card Flipping & Dealing (ADR 0075)
-    static DWORD s_lastCardDealTime = 0;
-    bool cardHandProximity = (rightLocal.y > -0.45f && rightLocal.y < -0.10f) &&
-                             (rightLocal.z > -0.40f && rightLocal.z < -0.15f);
-    bool cardPinchGrip = (vrState.rightController.grip > 0.40f && vrState.rightController.grip < 0.75f) &&
-                         (vrState.rightController.trigger < 0.30f);
-    bool cardFlick = (fabsf(rVel.x) > 0.60f || rVel.z < -0.65f);
-    if (cardHandProximity && cardPinchGrip && cardFlick && !s_physicalBlockEngaged && (now - s_lastCardDealTime > 300)) {
-        s_lastCardDealTime = now;
-        VR_LOG_INFO("Diegetic Interaction: INMATE GAMBLING CARD FLIPPED / DEALT (Vx: %.2f, Vz: %.2f)", rVel.x, rVel.z);
+    if (gripsIntent.cardDeal) {
+        VR_LOG_INFO("Diegetic Interaction: INMATE GAMBLING CARD FLIPPED / DEALT (Vx: %.2f, Vz: %.2f)", gripsIntent.cardVx, gripsIntent.cardVz);
         SendKeyTap('E');
         SendKeyTap(VK_RETURN);
         HapticRequest(1, (0.35f), kHapticUi); // Crisp paper card friction micro-haptic (240 Hz)
     }
 
     // Inmate Pit Brawl Dirt / Ash Throw Blind (ADR 0065)
-    static DWORD s_lastAshThrowTime = 0;
-    bool ashThrowFlick = (s_posture.isPhysicallyCrouched || s_posture.isDeepProne) &&
-                         (vrState.rightController.grip < 0.40f && vrState.rightController.trigger < 0.40f) &&
-                         (rVel.y > 0.80f && rVel.z < -0.80f);
-    if (ashThrowFlick && !meleeFiredThisFrame && (now - s_lastAshThrowTime > 1200)) { // GH #31
-        s_lastAshThrowTime = now;
-        VR_LOG_INFO("Combat Dirty Tactic: DIRT / ASH THROWN INTO ENEMY EYES (Vy: %.2f, Vz: %.2f)", rVel.y, rVel.z);
+    if (gripsIntent.ashThrow) {
+        VR_LOG_INFO("Combat Dirty Tactic: DIRT / ASH THROWN INTO ENEMY EYES (Vy: %.2f, Vz: %.2f)", gripsIntent.ashVy, gripsIntent.ashVz);
         SendKeyTap('E');
         mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
         mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
@@ -10559,14 +10840,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     }
 
     // Inmate Pit Brawl Sand / Ash Throw Two-Handed Fan Scatter (ADR 0085)
-    static DWORD s_lastFanScatterTime = 0;
-    bool bothHandsLowSand = (s_posture.isPhysicallyCrouched || s_posture.isDeepProne) &&
-                            (leftLocal.y < -0.40f && rightLocal.y < -0.40f) &&
-                            (vrState.leftController.grip < 0.45f && vrState.rightController.grip < 0.45f);
-    bool fanScatterOutward = (lVel.x < -0.80f && rVel.x > 0.80f) && (lVel.y > 0.40f || rVel.y > 0.40f);
-    if (bothHandsLowSand && fanScatterOutward && !meleeFiredThisFrame && (now - s_lastFanScatterTime > 1400)) { // GH #31
-        s_lastFanScatterTime = now;
-        VR_LOG_INFO("Combat Dirty Tactic: DUAL-HANDED SAND / ASH FAN SCATTER (Lx: %.2f, Rx: %.2f)", lVel.x, rVel.x);
+    if (gripsIntent.fanScatter) {
+        VR_LOG_INFO("Combat Dirty Tactic: DUAL-HANDED SAND / ASH FAN SCATTER (Lx: %.2f, Rx: %.2f)", gripsIntent.fanLx, gripsIntent.fanRx);
         SendKeyTap('E');
         mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
         mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
@@ -10575,61 +10850,24 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     }
 
     // Inmate Pit Brawl Dirt / Ash Two-Handed Fan Clench & Burst (ADR 0104)
-    static DWORD s_lastFanClenchBurstTime = 0;
-    static DWORD s_fanClenchStartTime = 0;
-    static bool s_handsWereClenchedChest = false;
-
-    float dxHandsFan = leftLocal.x - rightLocal.x;
-    float dyHandsFan = leftLocal.y - rightLocal.y;
-    float dzHandsFan = leftLocal.z - rightLocal.z;
-    float distHandsFan = sqrtf(dxHandsFan * dxHandsFan + dyHandsFan * dyHandsFan + dzHandsFan * dzHandsFan);
-
-    bool handsAtChest = (leftLocal.y > -0.25f && leftLocal.y < 0.05f) &&
-                        (rightLocal.y > -0.25f && rightLocal.y < 0.05f) &&
-                        (distHandsFan < 0.18f);
-    bool bothFanGripsClenched = (vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f);
-
-    if (handsAtChest && bothFanGripsClenched && !s_physicalBlockEngaged) {
-        if (!s_handsWereClenchedChest) {
-            s_handsWereClenchedChest = true;
-            s_fanClenchStartTime = now;
-            HapticRequest(0, (0.45f), kHapticUi);  // Friction grind during clench (200 Hz)
-            HapticRequest(1, (0.45f), kHapticUi);
-        }
-    } else if (s_handsWereClenchedChest) {
-        // Evaluate burst if fists were clenched together recently
-        if (now - s_fanClenchStartTime < 800) {
-            bool explosiveFanOutward = (lVel.x < -1.10f && rVel.x > 1.10f);
-            if (explosiveFanOutward && !meleeFiredThisFrame && (now - s_lastFanClenchBurstTime > 2000)) { // GH #31
-                s_lastFanClenchBurstTime = now;
-                VR_LOG_INFO("Combat Dirty Tactic: DIRT/ASH TWO-HANDED FAN CLENCH & BURST (Lx: %.2f, Rx: %.2f)", lVel.x, rVel.x);
-                SendKeyTap('E');
-                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKeyTap(VK_TAB);
-                HapticRequest(0, (0.70f), kHapticReload);  // Wide particulate cloud rush (175 Hz)
-                HapticRequest(1, (0.70f), kHapticReload);
-            }
-        }
-        if (!bothFanGripsClenched || distHandsFan > 0.35f) {
-            s_handsWereClenchedChest = false;
-        }
+    if (gripsIntent.fanClenchEngaged) {
+        HapticRequest(0, (0.45f), kHapticUi);  // Friction grind during clench (200 Hz)
+        HapticRequest(1, (0.45f), kHapticUi);
+    }
+    if (gripsIntent.fanBurst) {
+        VR_LOG_INFO("Combat Dirty Tactic: DIRT/ASH TWO-HANDED FAN CLENCH & BURST (Lx: %.2f, Rx: %.2f)", gripsIntent.burstLx, gripsIntent.burstRx);
+        SendKeyTap('E');
+        mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+        mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+        SendKeyTap(VK_TAB);
+        HapticRequest(0, (0.70f), kHapticReload);  // Wide particulate cloud rush (175 Hz)
+        HapticRequest(1, (0.70f), kHapticReload);
     }
 
     // Inmate Pit Brawl Dirt / Ash Eye Recovery Blink Gesture (ADR 0073)
-    static DWORD s_lastEyeRecoveryTime = 0;
-    bool rightWipingEyes = (rightLocal.z > -0.22f && rightLocal.z < -0.05f) &&
-                           (rightLocal.y > -0.05f && rightLocal.y < 0.10f) &&
-                           (fabsf(rVel.x) > 0.50f);
-    bool leftWipingEyes = (leftLocal.z > -0.22f && leftLocal.z < -0.05f) &&
-                          (leftLocal.y > -0.05f && leftLocal.y < 0.10f) &&
-                          (fabsf(lVel.x) > 0.50f);
-    bool rapidHeadShake = (fabsf(s_lastHmdDeltaYaw) > 0.15f);
-
-    if ((rightWipingEyes || leftWipingEyes || rapidHeadShake) && (now - s_lastEyeRecoveryTime > 1200)) {
-        s_lastEyeRecoveryTime = now;
+    if (gripsIntent.eyeRecovery) {
         VR_LOG_INFO("Combat Defense: CORNEAL BLINK / DIRT WIPED FROM EYES (%s)",
-            rapidHeadShake ? "Rapid Head Shake" : "Forearm Eye Wipe");
+            gripsIntent.eyeHeadShake ? "Rapid Head Shake" : "Forearm Eye Wipe");
         SendKeyTap(VK_SPACE); // Visual overlay recovery accelerator
         HapticRequest(1, (0.30f), kHapticUi); // Fine corneal blink micro-haptic (180 Hz)
         HapticRequest(0, (0.30f), kHapticUi);
@@ -10637,110 +10875,66 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
     // Kinematic Body / Heavy Object Drag Resistance (ADR 0020):
     // When crouched and hauling an object/corpse backwards or sideways, emit periodic drag friction pulses
-    static DWORD s_lastDragPulseTime = 0;
-    if (s_leftGripDown && (s_posture.isPhysicallyCrouched || s_posture.isStealthPeeking)) {
-        float moveMagnitude = fabsf(vrState.leftController.thumbstickX) + fabsf(vrState.leftController.thumbstickY);
-        if (moveMagnitude > 0.25f && (now - s_lastDragPulseTime > 450)) {
-            s_lastDragPulseTime = now;
-            HapticRequest(0, (0.38f), kHapticAmbient); // Low-frequency drag friction rumble (85 Hz)
-        }
+    if (gripsIntent.dragPulse) {
+        HapticRequest(0, (0.38f), kHapticAmbient); // Low-frequency drag friction rumble (85 Hz)
     }
 
     // Diegetic Collectible Inspection: Cigarette Packs & Bounty Cards (ADR 0029)
     // Holding item in off-hand up to eye level (Y > -0.05m, Z > -0.32m) engages inspection
-    static bool s_inspectingItem = false;
-    bool wantInspect = s_leftGripDown && (leftLocal.y > -0.05f && leftLocal.z > -0.32f);
-    if (wantInspect != s_inspectingItem) {
-        s_inspectingItem = wantInspect;
-        if (s_inspectingItem) {
-            VR_LOG_INFO("Diegetic Interaction: COLLECTIBLE INSPECTION / CIGARETTE PACK (Eye Level: %.2fm)", leftLocal.y);
-            HapticRequest(0, (0.25f), kHapticUi); // Tactile inspection buzz (180 Hz)
-        }
+    if (gripsIntent.inspectChanged && gripsIntent.inspectEngaged) {
+        VR_LOG_INFO("Diegetic Interaction: COLLECTIBLE INSPECTION / CIGARETTE PACK (Eye Level: %.2fm)", gripsIntent.inspectY);
+        HapticRequest(0, (0.25f), kHapticUi); // Tactile inspection buzz (180 Hz)
     }
 
     // Interactive Guard Interrogation: Physical Throat-Grip Shakedown (ADR 0032)
     // Off-hand held forward at collar/chest height (Z in [-0.60, -0.22]m, Y in [-0.25, +0.15]m) with Left Grip
-    static bool s_isThroatGripping = false;
-    static DWORD s_lastShakedownPulseTime = 0;
-    bool inThroatZone = s_leftGripDown && (leftLocal.z > -0.60f && leftLocal.z < -0.22f) &&
-                                        (leftLocal.y > -0.25f && leftLocal.y < 0.15f) &&
-                                        (fabsf(leftLocal.x) < 0.28f);
-    if (inThroatZone) {
-        if (!s_isThroatGripping) {
-            s_isThroatGripping = true;
-            VR_LOG_INFO("Diegetic Interaction: NPC THROAT / COLLAR GRIP engaged (Pos: [%.2f, %.2f, %.2f])",
-                leftLocal.x, leftLocal.y, leftLocal.z);
-            HapticRequest(0, (0.45f), kHapticUi); // Throaty struggle pulse (120 Hz)
-        }
-        // Physical Forward/Back Shake: |lVel.z| > 0.70 m/s
-        if (fabsf(lVel.z) > 0.70f && (now - s_lastShakedownPulseTime > 350)) {
-            s_lastShakedownPulseTime = now;
-            VR_LOG_INFO("Diegetic Interaction: PHYSICAL SHAKEDOWN GESTURE executed (VelZ: %.2f m/s)", lVel.z);
-            SendKeyTap('E'); // Advance extortion/interrogation dialogue
-            HapticRequest(0, (0.75f), kHapticReload); // Compliance snap haptic (220 Hz)
-        }
-    } else {
-        if (s_isThroatGripping) {
-            s_isThroatGripping = false;
-            VR_LOG_INFO("Diegetic Interaction: NPC THROAT GRIP released");
-        }
+    if (gripsIntent.throatEngaged) {
+        VR_LOG_INFO("Diegetic Interaction: NPC THROAT / COLLAR GRIP engaged (Pos: [%.2f, %.2f, %.2f])",
+            gripsIntent.throatX, gripsIntent.throatY, gripsIntent.throatZ);
+        HapticRequest(0, (0.45f), kHapticUi); // Throaty struggle pulse (120 Hz)
+    }
+    // Physical Forward/Back Shake: |lVel.z| > 0.70 m/s
+    if (gripsIntent.shakedown) {
+        VR_LOG_INFO("Diegetic Interaction: PHYSICAL SHAKEDOWN GESTURE executed (VelZ: %.2f m/s)", gripsIntent.shakeVelZ);
+        SendKeyTap('E'); // Advance extortion/interrogation dialogue
+        HapticRequest(0, (0.75f), kHapticReload); // Compliance snap haptic (220 Hz)
+    }
+    if (gripsIntent.throatReleased) {
+        VR_LOG_INFO("Diegetic Interaction: NPC THROAT GRIP released");
     }
 
     // Guard Subdue Chokehold & Silent Neck Snap (ADR 0047)
     // Sneaking in crouch/prone with left arm wrapped across chest level (Z in [-0.35, -0.15]m, Y in [-0.20, +0.10]m) with Left Grip
-    static bool s_isChokeholding = false;
-    static DWORD s_lastChokeStruggleTime = 0;
-    bool inChokeholdZone = (s_posture.isPhysicallyCrouched || s_posture.isStealthPeeking || s_posture.isDeepProne) &&
-                           s_leftGripDown && (leftLocal.z > -0.35f && leftLocal.z < -0.15f) &&
-                           (leftLocal.y > -0.20f && leftLocal.y < 0.10f) &&
-                           (fabsf(leftLocal.x) < 0.25f);
-    if (inChokeholdZone) {
-        if (!s_isChokeholding) {
-            s_isChokeholding = true;
-            VR_LOG_INFO("Stealth Takedown: REAR CHOKEHOLD GRAPPLE engaged");
-            HapticRequest(0, (0.45f), kHapticUi); // Rhythmic struggle pulse (100 Hz)
-        }
-        if (now - s_lastChokeStruggleTime > 300) {
-            s_lastChokeStruggleTime = now;
-            HapticRequest(0, (0.40f), kHapticUi);
-        }
-        // Cervical Twist Finisher: rapid lateral jerk of right hand (|rVel.x| > 0.80 m/s)
-        if ((fabsf(rVel.x) > 0.80f || fabsf(rVel.y) > 0.80f) && !meleeFiredThisFrame) { // GH #31: melee has priority
-            s_isChokeholding = false;
-            VR_LOG_INFO("Stealth Takedown: SILENT CERVICAL NECK SNAP FINISHER executed (Vx: %.2f m/s)", rVel.x);
-            mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-            mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-            HapticRequest(1, (0.95f), kHapticFinisher); // Bone-cracking crunch (280 Hz)
-            HapticRequest(0, (0.95f), kHapticFinisher);
-        }
-    } else {
-        if (s_isChokeholding) {
-            s_isChokeholding = false;
-            VR_LOG_INFO("Stealth Takedown: REAR CHOKEHOLD released");
-        }
+    if (gripsIntent.chokeEngaged) {
+        VR_LOG_INFO("Stealth Takedown: REAR CHOKEHOLD GRAPPLE engaged");
+        HapticRequest(0, (0.45f), kHapticUi); // Rhythmic struggle pulse (100 Hz)
+    }
+    if (gripsIntent.chokePulse) {
+        HapticRequest(0, (0.40f), kHapticUi);
+    }
+    // Cervical Twist Finisher: rapid lateral jerk of right hand (|rVel.x| > 0.80 m/s)
+    if (gripsIntent.chokeFinisher) {
+        VR_LOG_INFO("Stealth Takedown: SILENT CERVICAL NECK SNAP FINISHER executed (Vx: %.2f m/s)", gripsIntent.chokeVx);
+        mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+        mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+        HapticRequest(1, (0.95f), kHapticFinisher); // Bone-cracking crunch (280 Hz)
+        HapticRequest(0, (0.95f), kHapticFinisher);
+    }
+    if (gripsIntent.chokeReleased) {
+        VR_LOG_INFO("Stealth Takedown: REAR CHOKEHOLD released");
     }
 
     // Inmate Bunk Mattress Stash Search (ADR 0050)
-    static DWORD s_lastBunkSearchTime = 0;
-    bool leftHoldingMattress = (s_posture.isPhysicallyCrouched || s_posture.isDeepProne) &&
-                               s_leftGripDown && (leftLocal.y > -0.55f && leftLocal.y < -0.25f);
-    bool rightSweepingUnder = (rightLocal.z < -0.30f) && (fabsf(rVel.x) > 0.35f);
-    if (leftHoldingMattress && rightSweepingUnder && (now - s_lastBunkSearchTime > 900)) {
-        s_lastBunkSearchTime = now;
-        VR_LOG_INFO("Environmental Gesture: INMATE BUNK MATTRESS STASH SEARCH (SweepVx: %.2f m/s)", rVel.x);
+    if (gripsIntent.bunkSearch) {
+        VR_LOG_INFO("Environmental Gesture: INMATE BUNK MATTRESS STASH SEARCH (SweepVx: %.2f m/s)", gripsIntent.bunkSweepVx);
         SendKeyTap('E');
         HapticRequest(1, (0.60f), kHapticUi); // Metallic discovery chime haptic (200 Hz)
         HapticRequest(0, (0.30f), kHapticUi);
     }
 
     // Inmate Bunk Shiv Sheath Concealment Under Mattress Frame (ADR 0110)
-    static DWORD s_lastBunkConcealTime = 0;
-    bool leftLiftingMattress = (s_posture.isPhysicallyCrouched || s_posture.isDeepProne) &&
-                               s_leftGripDown && (leftLocal.y > -0.45f && leftLocal.y < -0.15f);
-    bool rightThrustingIntoSlat = (rightLocal.z > -0.42f && rightLocal.z < -0.14f) && (rVel.z < -0.65f);
-    if (leftLiftingMattress && rightThrustingIntoSlat && (now - s_lastBunkConcealTime > 1500)) {
-        s_lastBunkConcealTime = now;
-        VR_LOG_INFO("Environmental Gesture: INMATE BUNK SHIV SHEATH CONCEALED UNDER MATTRESS FRAME (Vz: %.2f m/s)", rVel.z);
+    if (gripsIntent.bunkConceal) {
+        VR_LOG_INFO("Environmental Gesture: INMATE BUNK SHIV SHEATH CONCEALED UNDER MATTRESS FRAME (Vz: %.2f m/s)", gripsIntent.concealVz);
         SendKeyTap('3'); // Holster / stow shiv weapon
         SendKeyTap('E');
         HapticRequest(0, (0.35f), kHapticUi);  // Mattress wire tension hum (120 Hz)
@@ -10748,11 +10942,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     }
 
     // Right Grip -> Weapon Reload ('R') (suppressed during ladder climb)
-    bool wantRightGrip = !isClimbingActive && (vrState.rightController.grip > 0.5f);
-    if (wantRightGrip != s_rightGripDown) {
-        SendKey('R', wantRightGrip);
-        s_rightGripDown = wantRightGrip;
-        if (wantRightGrip) HapticRequest(1, (0.5f), kHapticUi);
+    if (gripsIntent.rightChanged) {
+        SendKey('R', gripsIntent.rightDown);
+        if (gripsIntent.rightDown) HapticRequest(1, (0.5f), kHapticUi);
     }
 
     // 10. Face Buttons Mapping (ADR 0410: Unified Action & Dialogue Confirmation)
