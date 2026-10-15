@@ -628,11 +628,12 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     static bool s_ladderClimbDown = false;
     static DWORD s_lastMantleTime = 0;
 
-    // Grab initiate: hand raised above chin/shoulder level (Y > 0.15m) and grip squeezed (> 0.5f)
+    // Grab initiate: hand raised in front of chest/chin (Y > 0.15m, Z in [-0.55, -0.16]) and grip squeezed (> 0.5f)
+    // ADR 0381: Spatial forward-cone depth filtering decouples ladder grabs from over-shoulder weapon drawing!
     if (!s_leftHoldingRung) {
-        if (leftLocal.y > 0.15f && vrState.leftController.grip > 0.5f) {
+        if (leftLocal.y > 0.15f && (leftLocal.z >= -0.55f && leftLocal.z <= -0.16f) && vrState.leftController.grip > 0.5f) {
             s_leftHoldingRung = true;
-            VR_LOG_INFO("Physical Gesture: LADDER RUNG GRABBED (Left hand, Y: %.2fm)", leftLocal.y);
+            VR_LOG_INFO("Physical Gesture: LADDER RUNG GRABBED (Left hand, Y: %.2fm, Z: %.2fm)", leftLocal.y, leftLocal.z);
             vrState.leftHapticPulse = 0.35f;
             SendKeyTap('E');
         }
@@ -643,9 +644,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     }
 
     if (!s_rightHoldingRung) {
-        if (rightLocal.y > 0.15f && vrState.rightController.grip > 0.5f) {
+        if (rightLocal.y > 0.15f && (rightLocal.z >= -0.55f && rightLocal.z <= -0.16f) && vrState.rightController.grip > 0.5f) {
             s_rightHoldingRung = true;
-            VR_LOG_INFO("Physical Gesture: LADDER RUNG GRABBED (Right hand, Y: %.2fm)", rightLocal.y);
+            VR_LOG_INFO("Physical Gesture: LADDER RUNG GRABBED (Right hand, Y: %.2fm, Z: %.2fm)", rightLocal.y, rightLocal.z);
             vrState.rightHapticPulse = 0.35f;
             SendKeyTap('E');
         }
@@ -6266,10 +6267,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     }
 
     // 6b. Two-Handed Firearm Stabilization (ADR 0005)
-    // Detect when player brings off-hand to steady the two-handed weapon:
-    // - Distance between controller grip poses < 25cm
-    // - Off-hand grip button held (leftController.grip > 0.45)
-    // - Not in boxer guard or weapon reload mode
+    // Detect when player brings off-hand to steady the two-handed weapon (ADR 0379):
+    // - Distance hysteresis: Attach within 28cm, detach when separated beyond 38cm
+    // - Grip hysteresis: Attach when leftController.grip > 0.50, detach when < 0.30
+    // - Not in boxer guard, reloading, or climbing
     float twoHandDist = sqrtf(
         powf(vrState.leftController.gripPose.position.x - vrState.rightController.gripPose.position.x, 2) +
         powf(vrState.leftController.gripPose.position.y - vrState.rightController.gripPose.position.y, 2) +
@@ -6278,10 +6279,19 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
     bool isReloading = (now - s_lastReloadGestureTime <= 1100);
     bool isHarriesStance = s_flashlightActive && (twoHandDist < 0.18f) && (vrState.leftController.grip > 0.35f);
-    bool wantTwoHanded = (((twoHandDist < 0.25f) && (vrState.leftController.grip > 0.45f)) || isHarriesStance) &&
-                         !s_physicalBlockEngaged &&
-                         !isReloading &&
-                         !isClimbingActive;
+
+    constexpr float DIST_ATTACH = 0.28f;
+    constexpr float DIST_DETACH = 0.38f;
+    constexpr float GRIP_ATTACH = 0.50f;
+    constexpr float GRIP_DETACH = 0.30f;
+
+    bool wantTwoHanded = false;
+    if (s_twoHandedStabilizationActive) {
+        wantTwoHanded = (twoHandDist < DIST_DETACH && vrState.leftController.grip > GRIP_DETACH) || isHarriesStance;
+    } else {
+        wantTwoHanded = (twoHandDist < DIST_ATTACH && vrState.leftController.grip > GRIP_ATTACH) || isHarriesStance;
+    }
+    wantTwoHanded = wantTwoHanded && !s_physicalBlockEngaged && !isReloading && !isClimbingActive;
 
     if (wantTwoHanded != s_twoHandedStabilizationActive) {
         s_twoHandedStabilizationActive = wantTwoHanded;
@@ -6291,7 +6301,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             vrState.leftHapticPulse = isHarriesStance ? 0.35f : 0.25f;  // Subtle haptic confirmation pulse
             vrState.rightHapticPulse = isHarriesStance ? 0.35f : 0.25f;
         } else {
-            VR_LOG_INFO("Two-Handed Firearm Stabilization DISENGAGED");
+            VR_LOG_INFO("Two-Handed Firearm Stabilization DISENGAGED (HandDist: %.2fm)", twoHandDist);
         }
     }
 
@@ -9722,8 +9732,11 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     static DWORD s_lastFlashlightTime = 0;
 
     if (!isClimbingActive) {
-        // Right Hand -> Eyeshine Night Vision
-        bool rightAtTemple = (rightLocal.y > 0.08f && rightLocal.x > 0.12f && vrState.rightController.grip > 0.5f);
+        // Right Hand -> Eyeshine Night Vision (ADR 0380: 3D Anatomical Bounding Box)
+        bool rightAtTemple = (rightLocal.y >= 0.06f && rightLocal.y <= 0.22f) &&
+                             (rightLocal.x >= 0.12f && rightLocal.x <= 0.28f) &&
+                             (rightLocal.z >= -0.15f && rightLocal.z <= 0.08f) &&
+                             (vrState.rightController.grip > 0.5f);
         if (rightAtTemple && (now - s_lastEyeshineTime > 1200)) {
             s_lastEyeshineTime = now;
             s_eyeshineActive = !s_eyeshineActive;
@@ -9732,8 +9745,11 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             vrState.rightHapticPulse = 0.85f; // High-resonance optical buzz
         }
 
-        // Left Hand -> Tactical Shoulder Flashlight
-        bool leftAtShoulder = (leftLocal.y > 0.06f && leftLocal.x < -0.12f && vrState.leftController.grip > 0.5f);
+        // Left Hand -> Tactical Shoulder Flashlight (ADR 0380: 3D Anatomical Bounding Box)
+        bool leftAtShoulder = (leftLocal.y >= -0.10f && leftLocal.y <= 0.12f) &&
+                              (leftLocal.x >= -0.28f && leftLocal.x <= -0.12f) &&
+                              (leftLocal.z >= -0.20f && leftLocal.z <= 0.06f) &&
+                              (vrState.leftController.grip > 0.5f);
         if (leftAtShoulder && (now - s_lastFlashlightTime > 1200)) {
             s_lastFlashlightTime = now;
             s_flashlightActive = !s_flashlightActive;
@@ -9908,9 +9924,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     bool wantLeftGrip = !isClimbingActive && !s_twoHandedStabilizationActive && (vrState.leftController.grip > 0.5f);
     if (wantLeftGrip != s_leftGripDown) {
         if (!wantLeftGrip && s_leftGripDown) {
-            // Evaluated at moment of release:
-            // Fast throwing motion (lSpeed > 1.2 m/s) launches carried object forward!
-            if (lSpeed > 1.2f) {
+            // Evaluated at moment of release (ADR 0382: Forward Trajectory Vector Gating):
+            // Forward throwing motion requires positive forward velocity (lVel.z < -0.65 m/s) and speed > 1.10 m/s
+            // Arm retraction or sideways swings gently drop the object at feet rather than hurling it forward
+            if (lVel.z < -0.65f && lSpeed > 1.10f) {
                 VR_LOG_INFO("Physical Gesture: OBJECT THROW / PROPULSION executed (Speed: %.2f m/s, Vel: [%.2f, %.2f, %.2f])",
                     lSpeed, lVel.x, lVel.y, lVel.z);
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);

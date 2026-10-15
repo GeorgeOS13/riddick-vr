@@ -89,6 +89,10 @@ Key technical choices, trade-offs, and implementation strategies are documented 
 | [**ADR-0376**](docs/adr/0376-weapon-slot-recoil-and-haptic-profile-calibration.md) | Weapon Slot Recoil & Haptic Profile Calibration | Gunplay: Calibrated kick pitch and multi-tier haptics per weapon category (Slots 1-5) |
 | [**ADR-0377**](docs/adr/0377-physical-crouch-height-calibration-and-jump-immunity.md) | Physical Crouch Height Calibration & Jump Immunity | Movement: Velocity-gated standing eye height adaptation preventing permanent crouch lock |
 | [**ADR-0378**](docs/adr/0378-melee-trajectory-filtering-and-velocity-alignment.md) | Melee Trajectory Filtering & Velocity Vector Alignment | Combat: Dominant axis projection for 100% reliable punch/uppercut/hook execution |
+| [**ADR-0379**](docs/adr/0379-two-handed-weapon-foregrip-distance-hysteresis.md) | Two-Handed Weapon Foregrip Distance Hysteresis | Gunplay: Dual distance (28cm / 38cm) and grip force hysteresis eliminating state jitter |
+| [**ADR-0380**](docs/adr/0380-diegetic-temple-and-shoulder-gesture-bounding-box.md) | Diegetic Temple & Shoulder Gesture Spatial Bounding Box | Controls: 3D bounding boxes preventing accidental Eyeshine/Flashlight during climbing |
+| [**ADR-0381**](docs/adr/0381-ladder-rung-forward-cone-filtering-and-holster-decoupling.md) | Ladder Rung Forward-Cone Filtering & Holster Decoupling | Locomotion: Forward depth corridor (Z in [-0.55, -0.16]) decoupling ladder grabs from holsters |
+| [**ADR-0382**](docs/adr/0382-off-hand-throwing-trajectory-forward-vector-gating.md) | Off-Hand Throwing Trajectory Forward Vector Gating | Physics: Forward trajectory gating (Vz < -0.65 m/s) preventing accidental throws |
 
 
 ---
