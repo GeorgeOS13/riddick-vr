@@ -1200,26 +1200,41 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
             static bool s_wasCinemaMode = false;
             static XrPosef s_cinemaQuadPose = { {0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, -1.8f} };
             static bool s_hasCinemaPose = false;
+            static float s_cinemaYaw = 0.0f;
 
             if (clientState.cinemaMode) {
-                // Floating Virtual Cinema Screen for Menus and Cutscenes
-                if (!s_wasCinemaMode || !s_hasCinemaPose || clientState.shouldRecenter) {
-                    float qx = m_locatedViews[0].pose.orientation.x;
-                    float qy = m_locatedViews[0].pose.orientation.y;
-                    float qz = m_locatedViews[0].pose.orientation.z;
-                    float qw = m_locatedViews[0].pose.orientation.w;
-                    float yaw = atan2f(2.0f * (qw * qy + qz * qx), 1.0f - 2.0f * (qx * qx + qy * qy));
-                    float sinHalf = sinf(yaw * 0.5f);
-                    float cosHalf = cosf(yaw * 0.5f);
-                    s_cinemaQuadPose.orientation = {0.0f, sinHalf, 0.0f, cosHalf};
+                // Floating Virtual Cinema Screen for Menus and Cutscenes (ADR 0375)
+                float qx = m_locatedViews[0].pose.orientation.x;
+                float qy = m_locatedViews[0].pose.orientation.y;
+                float qz = m_locatedViews[0].pose.orientation.z;
+                float qw = m_locatedViews[0].pose.orientation.w;
+                float currentHmdYaw = atan2f(2.0f * (qw * qy + qz * qx), 1.0f - 2.0f * (qx * qx + qy * qy));
 
-                    float fwdX = -sinf(yaw);
-                    float fwdZ = -cosf(yaw);
-                    s_cinemaQuadPose.position.x = m_locatedViews[0].pose.position.x + fwdX * 1.8f;
-                    s_cinemaQuadPose.position.y = m_locatedViews[0].pose.position.y;
-                    s_cinemaQuadPose.position.z = m_locatedViews[0].pose.position.z + fwdZ * 1.8f;
+                if (!s_wasCinemaMode || !s_hasCinemaPose || clientState.shouldRecenter) {
+                    s_cinemaYaw = currentHmdYaw;
                     s_hasCinemaPose = true;
+                } else {
+                    // Lazy-Follow: if user looks away by > 40 degrees, smoothly rotate screen to follow
+                    float deltaYaw = currentHmdYaw - s_cinemaYaw;
+                    while (deltaYaw > 3.14159265f) deltaYaw -= 6.2831853f;
+                    while (deltaYaw < -3.14159265f) deltaYaw += 6.2831853f;
+
+                    constexpr float LAZY_FOLLOW_THRESHOLD = 0.70f; // ~40 degrees
+                    if (fabsf(deltaYaw) > LAZY_FOLLOW_THRESHOLD) {
+                        float followStep = (fabsf(deltaYaw) - LAZY_FOLLOW_THRESHOLD) * 0.05f;
+                        s_cinemaYaw += (deltaYaw > 0.0f) ? followStep : -followStep;
+                    }
                 }
+
+                float sinHalf = sinf(s_cinemaYaw * 0.5f);
+                float cosHalf = cosf(s_cinemaYaw * 0.5f);
+                s_cinemaQuadPose.orientation = {0.0f, sinHalf, 0.0f, cosHalf};
+
+                float fwdX = -sinf(s_cinemaYaw);
+                float fwdZ = -cosf(s_cinemaYaw);
+                s_cinemaQuadPose.position.x = m_locatedViews[0].pose.position.x + fwdX * 1.8f;
+                s_cinemaQuadPose.position.y = m_locatedViews[0].pose.position.y;
+                s_cinemaQuadPose.position.z = m_locatedViews[0].pose.position.z + fwdZ * 1.8f;
                 s_wasCinemaMode = true;
 
                 quadLayer.layerFlags = 0;

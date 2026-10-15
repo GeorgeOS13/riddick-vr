@@ -472,9 +472,12 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             VR_LOG_INFO("Initial standing eye height calibrated: %.2fm", s_standingEyeHeight);
         }
 
-        // Peak tracking when standing upright: adapt if player stands taller or adjusts headset
-        if (!s_isPhysicallyCrouched && currentY > s_standingEyeHeight) {
-            s_standingEyeHeight = currentY;
+        // ADR 0377: Peak tracking with Jump Immunity & Vertical Velocity Gating
+        // Only adapt standing height when stationary and upright (|Vy| < 0.12 m/s).
+        // Adapt gradually via exponential smoothing so jumping or head bob never latches a false floor!
+        float hmdVelY = vrState.hmdPose.linearVelocity.y;
+        if (!s_isPhysicallyCrouched && currentY > s_standingEyeHeight && fabsf(hmdVelY) < 0.12f) {
+            s_standingEyeHeight += 0.002f * (currentY - s_standingEyeHeight);
         }
 
         // Calculate height drop from calibrated standing height
@@ -6006,59 +6009,52 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 else vrState.leftHapticPulse = 0.90f;
                 goto combat_gesture_done;
             }
-            if (activeVel.y > 1.2f) {
-                VR_LOG_INFO("Physical Gesture: UPPERCUT detected (Speed: %.2f m/s)", activeVel.y);
-                SendKey('S', true);
-                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey('S', false);
-
-                if (rSpeed > lSpeed) vrState.rightHapticPulse = 0.9f;
-                else vrState.leftHapticPulse = 0.9f;
-                goto combat_gesture_done;
-            }
-            if (activeVel.x > 1.2f) {
-                VR_LOG_INFO("Physical Gesture: RIGHT HOOK / BLADE SLASH detected (Speed: %.2f m/s)", activeVel.x);
-                SendKey('D', true);
-                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey('D', false);
-
-                if (rSpeed > lSpeed) vrState.rightHapticPulse = 0.9f;
-                else vrState.leftHapticPulse = 0.9f;
-                goto combat_gesture_done;
-            }
-            if (activeVel.x < -1.2f) {
-                VR_LOG_INFO("Physical Gesture: LEFT HOOK / BLADE SLASH detected (Speed: %.2f m/s)", activeVel.x);
-                SendKey('A', true);
-                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey('A', false);
-
-                if (rSpeed > lSpeed) vrState.rightHapticPulse = 0.9f;
-                else vrState.leftHapticPulse = 0.9f;
-                goto combat_gesture_done;
-            }
             {
-                bool isBatonArcJab = (vrState.rightController.trigger > 0.60f);
-                if (isBatonArcJab) {
-                    VR_LOG_INFO("Physical Gesture: RIOT BATON ELECTRIC ARC SHOCK & JAB (Speed: %.2f m/s)", rSpeed);
+                // ADR 0378: Melee Trajectory Filtering & Dominant Axis Strike Direction Alignment
+                float fwdZ = -activeVel.z; // Forward punch velocity is along -Z
+                float absX = fabsf(activeVel.x);
+                float absY = fabsf(activeVel.y);
+
+                // Forward Straight Punch / Blade Thrust: forward speed dominates lateral & vertical
+                if (fwdZ > 1.10f && fwdZ >= absX && fwdZ >= absY) {
+                    bool isBatonArcJab = (vrState.rightController.trigger > 0.60f);
+                    VR_LOG_INFO("Physical Gesture: %s detected (Vz: %.2f m/s, Speed: %.2f m/s)",
+                        isBatonArcJab ? "RIOT BATON ARC JAB" : "STRAIGHT JAB / BLADE THRUST", fwdZ, (rSpeed > lSpeed) ? rSpeed : lSpeed);
                     SendKey('W', true);
                     mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                     mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                     SendKey('W', false);
-                    vrState.rightHapticPulse = 0.90f; // High-voltage arc discharge sizzle (260 Hz)
+
+                    float pulse = isBatonArcJab ? 0.95f : 0.90f;
+                    if (rSpeed > lSpeed) vrState.rightHapticPulse = pulse;
+                    else vrState.leftHapticPulse = pulse;
                     goto combat_gesture_done;
-            }
-            {
-                    VR_LOG_INFO("Physical Gesture: STRAIGHT PUNCH / LUNGING BLADE THRUST detected (Speed: %.2f m/s)", (rSpeed > lSpeed) ? rSpeed : lSpeed);
-                    SendKey('W', true);
+                }
+                // Uppercut: upward vertical speed dominates forward & lateral
+                else if (activeVel.y > 1.10f && activeVel.y > absX && activeVel.y > fwdZ) {
+                    VR_LOG_INFO("Physical Gesture: UPPERCUT detected (Vy: %.2f m/s)", activeVel.y);
+                    SendKey('S', true);
                     mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                     mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                    SendKey('W', false);
+                    SendKey('S', false);
 
                     if (rSpeed > lSpeed) vrState.rightHapticPulse = 0.9f;
                     else vrState.leftHapticPulse = 0.9f;
+                    goto combat_gesture_done;
+                }
+                // Lateral Hook / Blade Slash: lateral speed dominates
+                else if (absX > 1.10f) {
+                    char hookKey = (activeVel.x > 0.0f) ? 'D' : 'A';
+                    VR_LOG_INFO("Physical Gesture: %s HOOK / BLADE SLASH detected (Vx: %.2f m/s)",
+                        (hookKey == 'D') ? "RIGHT" : "LEFT", activeVel.x);
+                    SendKey(hookKey, true);
+                    mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                    mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                    SendKey(hookKey, false);
+
+                    if (rSpeed > lSpeed) vrState.rightHapticPulse = 0.9f;
+                    else vrState.leftHapticPulse = 0.9f;
+                    goto combat_gesture_done;
                 }
             }
         combat_gesture_done: ;
@@ -6541,6 +6537,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // - Left Hand Hip Draw (Y < -0.32m, X < -0.14m, grip > 0.50): Equips / Draws Melee Blades / Ulaks ('3')
     // - Hand at Ankle Boot (Y < -0.65m, grip > 0.50) while Crouched: Stashes / Retrieves Contraband (ADR 0038)
     static DWORD s_lastHolsterTime = 0;
+    static int s_activeWeaponSlot = 1; // ADR 0376: 1: Primary, 2: Sidearm, 3: Melee/Blades, 4: Ordnance, 5: Heavy
     if (!isClimbingActive && !s_physicalBlockEngaged && !s_twoHandedStabilizationActive && (now - s_lastHolsterTime > 900)) {
         bool rightOverShoulder = (rightLocal.y > 0.15f && rightLocal.z > -0.05f && vrState.rightController.grip > 0.50f);
         bool rightAtChest = (rightLocal.y >= -0.22f && rightLocal.y <= 0.05f && fabsf(rightLocal.x) < 0.14f && rightLocal.z > -0.25f && vrState.rightController.grip > 0.50f);
@@ -6554,21 +6551,25 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
         if (rightOverShoulder) {
             s_lastHolsterTime = now;
+            s_activeWeaponSlot = 1;
             VR_LOG_INFO("Holster Gesture: PRIMARY WEAPON slot toggled (Over-Shoulder)");
             SendKeyTap('1');
             vrState.rightHapticPulse = 0.75f; // Solid mechanical latch pulse
         } else if (rightAtChest) {
             s_lastHolsterTime = now;
+            s_activeWeaponSlot = 4;
             VR_LOG_INFO("Holster Gesture: TACTICAL GRENADE slot toggled (Chest Bandolier)");
             SendKeyTap('4');
             vrState.rightHapticPulse = 0.65f; // Grenade bandolier snap pulse
         } else if (rightLowSpine) {
             s_lastHolsterTime = now;
+            s_activeWeaponSlot = 5;
             VR_LOG_INFO("Holster Gesture: HEAVY WEAPON / SCAR GUN slot toggled (Low Spine)");
             SendKeyTap('5');
             vrState.rightHapticPulse = 0.85f; // Heavy industrial magnetic clamp pulse
         } else if ((s_isPhysicallyCrouched || s_isDeepProne) && (leftAtBootSheath || rightAtBootSheath)) {
             s_lastHolsterTime = now;
+            s_activeWeaponSlot = 3;
             VR_LOG_INFO("Holster Gesture: CONCEALED SHIV DRAWN FROM BOOT SHEATH (Y: %.2fm)", leftAtBootSheath ? leftLocal.y : rightLocal.y);
             SendKeyTap('3'); // Equip shiv/knife slot
             if (leftAtBootSheath) vrState.leftHapticPulse = 0.45f; // Leather boot sheath friction click (160 Hz)
@@ -6581,11 +6582,13 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (leftAtAnkle) vrState.leftHapticPulse = 0.35f;
         } else if (rightAtHip) {
             s_lastHolsterTime = now;
+            s_activeWeaponSlot = 2;
             VR_LOG_INFO("Holster Gesture: SIDEARM / PISTOL slot toggled (Right Hip)");
             SendKeyTap('2');
             vrState.rightHapticPulse = 0.65f; // Leather holster draw pulse
         } else if (leftAtHip) {
             s_lastHolsterTime = now;
+            s_activeWeaponSlot = 3;
             VR_LOG_INFO("Holster Gesture: MELEE / ULAK slot toggled (Left Hip)");
             SendKeyTap('3');
             vrState.leftHapticPulse = 0.70f; // Metallic blade unsheathe pulse
@@ -9790,11 +9793,33 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         mouse_event(wantRightTrigger ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
         s_rightTriggerDown = wantRightTrigger;
         if (wantRightTrigger) {
-            // Weapon Recoil Kick & Tactical Impulse (ADR 0013 & 0014)
-            s_recoilKickPitch = s_twoHandedStabilizationActive ? 0.022f : 0.040f;
-            vrState.rightHapticPulse = s_twoHandedStabilizationActive ? 0.65f : 0.82f;
-            if (s_twoHandedStabilizationActive) {
-                vrState.leftHapticPulse = 0.45f; // Foregrip haptic transmission
+            // ADR 0376: Weapon Slot Recoil & Haptic Profile Calibration
+            switch (s_activeWeaponSlot) {
+                case 3: // Melee / Shivs / Ulaks
+                    s_recoilKickPitch = 0.005f;
+                    vrState.rightHapticPulse = 0.45f;
+                    break;
+                case 2: // Sidearm / Pistol / Tranq Gun
+                    s_recoilKickPitch = s_twoHandedStabilizationActive ? 0.012f : 0.024f;
+                    vrState.rightHapticPulse = s_twoHandedStabilizationActive ? 0.50f : 0.62f;
+                    if (s_twoHandedStabilizationActive) vrState.leftHapticPulse = 0.35f;
+                    break;
+                case 1: // Primary Shotgun / Combat Long-Arm
+                    s_recoilKickPitch = s_twoHandedStabilizationActive ? 0.028f : 0.055f;
+                    vrState.rightHapticPulse = s_twoHandedStabilizationActive ? 0.80f : 0.95f;
+                    if (s_twoHandedStabilizationActive) vrState.leftHapticPulse = 0.65f;
+                    break;
+                case 4: // Tactical Assault Rifle / Ordnance
+                    s_recoilKickPitch = s_twoHandedStabilizationActive ? 0.015f : 0.028f;
+                    vrState.rightHapticPulse = s_twoHandedStabilizationActive ? 0.60f : 0.72f;
+                    if (s_twoHandedStabilizationActive) vrState.leftHapticPulse = 0.45f;
+                    break;
+                case 5: // Heavy Weapon / SCAR Gun / Rotary Chaingun
+                default:
+                    s_recoilKickPitch = s_twoHandedStabilizationActive ? 0.025f : 0.065f;
+                    vrState.rightHapticPulse = s_twoHandedStabilizationActive ? 0.85f : 0.98f;
+                    if (s_twoHandedStabilizationActive) vrState.leftHapticPulse = 0.75f;
+                    break;
             }
         }
     }

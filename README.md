@@ -85,6 +85,10 @@ Key technical choices, trade-offs, and implementation strategies are documented 
 | [**ADR-0372**](docs/adr/0372-radial-locomotion-deadzone-and-diagonal-normalization.md) | Radial Locomotion Deadzone & Diagonal Normalization | Movement: Circular 0.22 deadzone with ±25° forward-priority angular deadband |
 | [**ADR-0373**](docs/adr/0373-speed-adaptive-one-euro-filter-for-weapon-aim-stabilization.md) | Speed-Adaptive One-Euro Filter for Aim Stabilization | Gunplay: Velocity-scaled temporal filtering (alpha 0.22 - 0.90) for one-handed aim |
 | [**ADR-0374**](docs/adr/0374-quest-controller-ergonomic-barrel-pitch-calibration.md) | Quest Controller Ergonomic Barrel Pitch Calibration | Gunplay: -10.5° downward pitch offset aligning gun barrel with relaxed forearm index line |
+| [**ADR-0375**](docs/adr/0375-virtual-cinema-lazy-follow-and-recenter-ergonomics.md) | Virtual Cinema Lazy-Follow Yaw Dynamics | UI & Menus: Smooth deadband (±40°) lazy-follow and instant recentering |
+| [**ADR-0376**](docs/adr/0376-weapon-slot-recoil-and-haptic-profile-calibration.md) | Weapon Slot Recoil & Haptic Profile Calibration | Gunplay: Calibrated kick pitch and multi-tier haptics per weapon category (Slots 1-5) |
+| [**ADR-0377**](docs/adr/0377-physical-crouch-height-calibration-and-jump-immunity.md) | Physical Crouch Height Calibration & Jump Immunity | Movement: Velocity-gated standing eye height adaptation preventing permanent crouch lock |
+| [**ADR-0378**](docs/adr/0378-melee-trajectory-filtering-and-velocity-alignment.md) | Melee Trajectory Filtering & Velocity Vector Alignment | Combat: Dominant axis projection for 100% reliable punch/uppercut/hook execution |
 
 
 ---
