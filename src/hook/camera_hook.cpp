@@ -1924,6 +1924,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                           rVel.y < -2.15f && lVel.y < -1.90f &&
                                           fabsf(rVel.x - lVel.x) > 1.50f);
 
+            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Hyperextension Cranial Grating Grind (ADR 0309)
+            static DWORD s_lastCranialGrindTime = 0;
+            static char s_cranialGrindDirKey = 'A';
+            bool cranialGrindStance = (handsDistSledge < 0.26f &&
+                                       leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                       vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
+            bool cranialGrindPlunge = (cranialGrindStance && rVel.y < -2.15f &&
+                                       lVel.y < -1.90f && fabsf(lVel.x) > 0.90f);
+            if (cranialGrindPlunge && (now - s_lastCranialGrindTime > 2000)) {
+                s_cranialGrindDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+            }
+
+            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Singularity Overdrive (ADR 0310)
+            static DWORD s_lastPlasmaSingularityOverdriveTime = 0;
+            bool plasmaSingularityOverdriveStance = (handsDistSledge < 0.28f &&
+                                                    vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
+                                                    vrState.rightController.trigger > 0.65f);
+            bool plasmaSingularityOverdrivePlunge = (plasmaSingularityOverdriveStance && isJumpingStance &&
+                                                    rVel.y < -2.20f && lVel.y < -1.95f &&
+                                                    fabsf(rVel.x - lVel.x) > 1.55f);
+
             // Inmate Pit Brawl Outside Leg Hook Sweep & Ground Knee Drop (ADR 0209)
             static DWORD s_lastOutsideLegSweepTime = 0;
             static DWORD s_outsideLegSweepHookTime = 0;
@@ -1970,7 +1991,71 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_crossBlockHoldStart = 0;
             }
 
-            if (plasmaHypernovaPlunge && (now - s_lastPlasmaHypernovaTime > 2000)) {
+            if (plasmaSingularityOverdrivePlunge && (now - s_lastPlasmaSingularityOverdriveTime > 2000)) {
+                s_lastPlasmaSingularityOverdriveTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM SINGULARITY OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
+                SendKey(VK_SPACE, true);
+                SendKey('W', true);
+                SendKey('Q', true);
+                SendKey(VK_TAB, true);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                SendKey('C', true);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                SendKey(VK_TAB, true);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                SendKey('Q', true);
+                SendKey(VK_TAB, true);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_TAB, false);
+                SendKey('Q', false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_TAB, false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey('C', false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_TAB, false);
+                SendKey('Q', false);
+                SendKey('W', false);
+                SendKey(VK_SPACE, false);
+                vrState.rightHapticPulse = 0.98f; // Resonant cataclysm singularity overdrive shockwave (410 Hz)
+                vrState.leftHapticPulse = 0.98f;  // Structural deck singularity recoil (280 Hz)
+            } else if (cranialGrindPlunge && (now - s_lastCranialGrindTime > 2000)) {
+                s_lastCranialGrindTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL GRATING GRIND EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialGrindDirKey, rVel.y, lVel.y);
+                SendKey('W', true);
+                SendKey(s_cranialGrindDirKey, true);
+                SendKey('C', true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, false);
+                SendKey('C', false);
+                SendKey(s_cranialGrindDirKey, false);
+                SendKey('W', false);
+                vrState.rightHapticPulse = 0.98f; // Cranial diamond grating abrasion shockwave (410 Hz)
+                vrState.leftHapticPulse = 0.95f;  // Whizzer collar tie drag (330 Hz)
+            } else if (plasmaHypernovaPlunge && (now - s_lastPlasmaHypernovaTime > 2000)) {
                 s_lastPlasmaHypernovaTime = now;
                 s_lastPunchTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM HYPERNOVA EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
@@ -6627,6 +6712,42 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 vrState.rightHapticPulse = 0.95f; // 8-position detented rotary switch clicks (330 Hz)
                 vrState.leftHapticPulse = 0.50f;  // Chassis frame vibration (130 Hz)
+            }
+
+            // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode Cathode Terminal Lug Lead Torque Wrench Tighten (ADR 0307)
+            static DWORD s_lastDiodeLugTorqueTime = 0;
+            bool handAtDiodeCathodePost = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
+                                           vrState.leftController.grip > 0.55f);
+            bool handOnTorqueWrench = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
+                                       vrState.rightController.trigger < 0.40f);
+            bool diodeLugTorqueStroke = (fabsf(rVel.x) > 0.70f);
+            if (handAtDiodeCathodePost && handOnTorqueWrench && diodeLugTorqueStroke && (now - s_lastDiodeLugTorqueTime > 1800)) {
+                s_lastDiodeLugTorqueTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA SOLAR DIODE TERMINAL LUG TORQUED (Rx: %.2f)", rVel.x);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap(VK_TAB);
+                SendKeyTap(VK_RETURN);
+                vrState.rightHapticPulse = 0.95f; // Mechanical torque wrench break-over click (320 Hz)
+                vrState.leftHapticPulse = 0.55f;  // Terminal post reaction tension (150 Hz)
+            }
+
+            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Diagnostic Oscilloscope Timebase Variable Vernier Calibration Knob Twist (ADR 0308)
+            static DWORD s_lastTachVernierTime = 0;
+            bool handAtOscilloscopeSideBracket = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
+                                                  vrState.leftController.grip > 0.55f);
+            bool handOnVernierKnob = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
+                                      vrState.rightController.trigger > 0.50f);
+            bool tachVernierStroke = (fabsf(rVel.x) > 0.65f);
+            if (handAtOscilloscopeSideBracket && handOnVernierKnob && tachVernierStroke && (now - s_lastTachVernierTime > 1800)) {
+                s_lastTachVernierTime = now;
+                VR_LOG_INFO("Environmental Gesture: DRAFT FAN TACHOMETER OSCILLOSCOPE TIMEBASE VERNIER TWISTED (Rx: %.2f)", rVel.x);
+                SendKeyTap('E');
+                SendKeyTap('Q');
+                SendKeyTap(VK_TAB);
+                SendKeyTap(VK_SPACE);
+                vrState.rightHapticPulse = 0.95f; // Continuous viscous potentiometer drag (300 Hz)
+                vrState.leftHapticPulse = 0.50f;  // Chassis grounding hum (120 Hz)
             }
         }
     }
