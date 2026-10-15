@@ -10,6 +10,36 @@
     "abstraction": "MSystem.dll (5.1MB) + MXR.dll (4.6MB); RndrGL.dll (0.94MB) owns GL present",
     "implication": "SendInput keystrokes travel the same USER32 path the engine polls; keep foreground guard (#33). REA/Ghidra follow-up: locate player action dispatcher inside MSystem.dll."
   },
+  "research_notes": {
+    "date": "2026-10-15",
+    "track": "C #34 (GH #34)",
+    "method": "READ-ONLY static recon; game files never modified, game never launched. dumpbin 14.42.34436.0 /EXPORTS + /IMPORTS; python printable-runs (>=5 chars) strings scan.",
+    "msystem_exports": {
+      "dll": "MSystem.dll (5113072 bytes, timestamp 2009-03-25 15:22:21)",
+      "total_exports": 2701,
+      "keyword_hits_action_input_player_use_fire_reload_trigger_weapon_interact": 145,
+      "finding": "All 145 keyword hits are CInputContext*/CInputEnvelope*/CScanKey* polling/queue/mouse methods (e.g. IsPressed, IsNotPressed, KeyPressed, DownKey/UpKey, QueueScanKey, GetMouseButtons/Position, AddScanKey) plus sound-mixer Con_Snd_Mix_AutoReload/Reload. ZERO exports matching Trigger/Action/Weapon/Fire/Player/Interact as game-action dispatch. MSystem is the input-polling + sound/streaming abstraction, NOT the player-action dispatcher."
+    },
+    "strings_scan": {
+      "tokens": ["TRIGGER", "REFILL", "usethirdperson", "slot", "ammo", "shiv", "NanoMED", "Eyeshine"],
+      "DarkAthena_exe": "0 hits for every gameplay token (23477 printable strings scanned)",
+      "MSystem_dll": "0 hits for every gameplay token (19381 strings); only 'reload' hits are snd_mix_autoreload/snd_mix_reload + Con_Snd_Mix_AutoReload/Reload symbols",
+      "MXR_dll": "literal 'TRIGGER' (1 uniq) + 'Too many movement-slots/rotation-slots used' + XREngine_DepthReload; 14826 strings",
+      "RndrGL_dll": "only gl_reloadprograms; no action tokens",
+      "MCCDyn_dll_dvm_dll": "no action tokens",
+      "finding": "Gameplay action/token strings live in NEITHER DarkAthena.exe NOR MSystem.dll: DarkAthena.exe is a thin-client loader, action logic is packed in content archives or internal (static) engine code. MXR.dll is the only module containing a TRIGGER token."
+    },
+    "darkathena_imports": ["AVIFIL32.dll", "KERNEL32.dll", "USER32.dll", "GDI32.dll", "ADVAPI32.dll", "SHELL32.dll", "ole32.dll", "OLEAUT32.dll", "MSystem.dll", "MCCDyn.dll", "WINMM.dll", "WS2_32.dll", "dvm.dll"],
+    "mxr_exports": "6 only (DllEntryPoint/DllMain/MRTC_DLLAttachProcess/MRTC_DLLDetachProcess/MRTC_GetClassContainer/Alloc_SkeletonInst) => action dispatch is internal static code, needs Ghidra, not import-table binding",
+    "ranked_next_targets": [
+      "1. MXR.dll TRIGGER string xref in Ghidra (only TRIGGER token in any module; XR runtime 4.6MB)",
+      "2. CInputContextCore::IsPressed/IsNotPressed/KeyPressed/QueueScanKey callers in MSystem (synthetic-input injection point if action dispatch stays unreachable)",
+      "3. Content-archive (non-DLL) scan for TRIGGER/REFILL/usethirdperson/slot/ammo/shiv/NanoMED/Eyeshine config/script tokens",
+      "4. MCCDyn.dll (1.2MB, imported by exe, zero action strings) in Ghidra: candidate game-logic owner",
+      "5. Debugger breakpoint on IsPressed/DownKey paths to back-trace the per-frame action consumer"
+    ],
+    "implication": "Player.FireAction/ReloadAction/UseAction sigscan entries stay candidate-unverified; do NOT bind. Next REA session starts at MXR.dll TRIGGER xref, not MSystem exports."
+  },
   "entries": [
     {
       "id": "RndrGL.PresentHook",
