@@ -241,32 +241,30 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
     uint32_t btns = vrState.rightController.buttons | vrState.leftController.buttons;
     static uint32_t s_prevButtons = 0;
-    static bool s_manualCinemaToggle = false;
+    static bool s_cinemaModeState = true; // Default to Cinema Mode for initial game boot & main menu
 
-    // Toggle Cinema Screen Mode manually on Button Y (or auto-engage in cursor menus)
+    // 1. Manual Cinema Mode Toggle via Button Y
     if ((btns & RIDDICK_VR_BTN_Y) && !(s_prevButtons & RIDDICK_VR_BTN_Y)) {
-        s_manualCinemaToggle = !s_manualCinemaToggle;
-        VR_LOG_INFO("Cinema Screen Mode toggled manually: %s", s_manualCinemaToggle ? "ON (Virtual Screen)" : "OFF (Immersive 3D)");
+        s_cinemaModeState = !s_cinemaModeState;
+        VR_LOG_INFO("Cinema Screen Mode toggled manually via Button Y: %s", s_cinemaModeState ? "ON (Virtual Cinema Quad)" : "OFF (Full 3D VR Immersion)");
     }
-    s_prevButtons = btns;
 
-    // Accurately detect menus and cutscenes for cinemaMode:
-    // If projection matrix is orthographic (proj[15] == 1.0f), or no 3D gameplay projection has been loaded yet,
-    // or proj[0] > 1.20f (cutscene telephoto lens), or cursorShowing is true, or s_manualCinemaToggle is true -> cinemaMode = true.
-    bool isMenuOrCutscene = false;
-    if (!OpenGLProxy::Has3DGameplayProjection()) {
-        isMenuOrCutscene = true;
-    } else {
-        const float* proj = OpenGLProxy::GetLastProjectionMatrix();
-        if (proj) {
-            bool isOrtho = (fabsf(proj[15] - 1.0f) < 0.001f);
-            bool isTelephoto = (proj[0] > 1.20f);
-            if (isOrtho || isTelephoto) {
-                isMenuOrCutscene = true;
-            }
-        }
+    // 2. Pause Menu Cinema Mode via Left Menu Button
+    bool btnMenu = (btns & RIDDICK_VR_BTN_MENU) != 0;
+    bool prevBtnMenu = (s_prevButtons & RIDDICK_VR_BTN_MENU) != 0;
+    if (btnMenu && !prevBtnMenu) {
+        s_cinemaModeState = true;
     }
-    vrState.cinemaMode = isMenuOrCutscene || cursorShowing || s_manualCinemaToggle;
+
+    // 3. Locomotion or Look Engagement Auto-Transitions from Menu to 3D Action Mode (0 black bars)
+    if (s_cinemaModeState && (fabsf(vrState.leftController.thumbstickX) > 0.35f ||
+                              fabsf(vrState.leftController.thumbstickY) > 0.35f ||
+                              fabsf(vrState.rightController.thumbstickX) > 0.35f)) {
+        s_cinemaModeState = false;
+        VR_LOG_INFO("Player engaged locomotion/look: auto-transitioned to Full 3D VR Immersion (0 black bars)");
+    }
+
+    vrState.cinemaMode = s_cinemaModeState || cursorShowing;
 
     // 0. Decoupled Motion Controller Aim Steering & Head Tracking Look Input (ADR 0008)
     // Only apply in-game look when not in cinema menu mode
@@ -466,22 +464,22 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     s_hasPrevCtrlAim = false;
                 }
 
-                // Decouple head tracking look from mouse look: head orientation is handled purely in VR
-                // view matrix stabilization without mouse emulation.
-                // In mouse_event, only inject subtle controller deadband aim pull when actively aiming.
-                bool isActivelyAiming = (s_isPhysicalADS || s_twoHandedStabilizationActive || isAiming) && !s_physicalBlockEngaged && !isReloading;
-                float aimPullYaw = isActivelyAiming ? (pullYaw * wPull) : 0.0f;
-                float aimPullPitch = isActivelyAiming ? (pullPitch * wPull) : 0.0f;
+                // Pure 1:1 Head Tracking Look: map HMD yaw and pitch directly to in-game camera
+                // Center deadzone (~0.06 deg) filters high-frequency sensor noise / tremor
+                constexpr float HMD_LOOK_DEADZONE = 0.0010f;
+                float cleanDeltaYaw = (fabsf(deltaYaw) > HMD_LOOK_DEADZONE) ? deltaYaw : 0.0f;
+                float cleanDeltaPitch = (fabsf(deltaPitch) > HMD_LOOK_DEADZONE) ? deltaPitch : 0.0f;
 
+                // Motion controllers never steer the head camera (ZERO controller aim pull):
                 constexpr float SENSITIVITY_YAW = 445.6f;
                 constexpr float SENSITIVITY_PITCH = 445.6f;
 
-                float mouseDeltaX = -aimPullYaw * SENSITIVITY_YAW;
-                float mouseDeltaY = -aimPullPitch * SENSITIVITY_PITCH;
+                float mouseDeltaX = -cleanDeltaYaw * SENSITIVITY_YAW;
+                float mouseDeltaY = -cleanDeltaPitch * SENSITIVITY_PITCH;
 
-                // Two-Handed Firearm Stabilization: dampens micro-tremors and aiming jitter
+                // Two-Handed Firearm Stabilization: dampens micro-tremors during physical ADS
                 if (s_twoHandedStabilizationActive || s_isPhysicalADS) {
-                    float stabilizeDamping = s_isPhysicalADS ? 0.50f : 0.65f;
+                    float stabilizeDamping = s_isPhysicalADS ? 0.50f : 0.70f;
                     mouseDeltaX *= stabilizeDamping;
                     mouseDeltaY *= stabilizeDamping;
                 }
@@ -6395,49 +6393,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         }
     }
 
-    // Security Guard DNA Biometric Weapon Grip Shock Suppression (ADR 0083)
-    static DWORD s_lastDnaSuppressionTime = 0;
-    bool insulatedTapeWrap = (twoHandDist < 0.15f) && (vrState.leftController.grip > 0.60f);
-    if (insulatedTapeWrap && !s_physicalBlockEngaged && (now - s_lastDnaSuppressionTime > 1500)) {
-        s_lastDnaSuppressionTime = now;
-        VR_LOG_INFO("Tactical Firearm: GUARD DNA BIOMETRIC CIRCUIT SUPPRESSED WITH INSULATED GAUNTLET (Dist: %.2fm)", twoHandDist);
-        SendKeyTap('E'); // Suppress/bypass DNA lock circuit
-        vrState.leftHapticPulse = 0.40f; // Neutralized low hum (80 Hz)
-        vrState.rightHapticPulse = 0.40f;
-    }
 
-    // Tactical Laser Sighting Module Pressure Pad Foregrip Tap (ADR 0091)
-    static DWORD s_lastLaserToggleTime = 0;
-    bool foregripLaserPad = (vrState.leftController.trigger > 0.50f) || ((vrState.leftController.buttons & RIDDICK_VR_BTN_STICK_LEFT) != 0);
-    if (s_twoHandedStabilizationActive && foregripLaserPad && (now - s_lastLaserToggleTime > 350)) {
-        s_lastLaserToggleTime = now;
-        VR_LOG_INFO("Tactical Firearm: FOREGRIP PRESSURE PAD LASER SIGHT TOGGLED");
-        SendKeyTap('F');
-        vrState.leftHapticPulse = 0.45f; // Crisp micro-switch click (180 Hz)
-    }
-
-    // Dark Athena Drone Optical Sensor Scramble Laser Strike (ADR 0103)
-    static DWORD s_laserScrambleDwellStart = 0;
-    static DWORD s_lastLaserScrambleTime = 0;
-    bool droneSensorAimLock = (rightLocal.z > -0.45f && rightLocal.z < -0.18f) &&
-                              (rightLocal.y > -0.10f && rightLocal.y < 0.30f) &&
-                              (fabsf(rSpeed) < 0.20f);
-    bool laserEngaged = (vrState.leftController.trigger > 0.50f);
-    if (s_twoHandedStabilizationActive && laserEngaged && droneSensorAimLock) {
-        if (s_laserScrambleDwellStart == 0) {
-            s_laserScrambleDwellStart = now;
-        } else if ((now - s_laserScrambleDwellStart > 500) && (now - s_lastLaserScrambleTime > 1600)) {
-            s_lastLaserScrambleTime = now;
-            s_laserScrambleDwellStart = 0;
-            VR_LOG_INFO("Tactical Firearm: DRONE OPTICAL SENSOR SCRAMBLED VIA COHERENT LASER (Rz: %.2f, Ry: %.2f)", rightLocal.z, rightLocal.y);
-            SendKeyTap('F');
-            SendKeyTap('E');
-            vrState.leftHapticPulse = 0.65f; // Optic overload pop (240 Hz)
-            vrState.rightHapticPulse = 0.65f;
-        }
-    } else {
-        s_laserScrambleDwellStart = 0;
-    }
 
     // Apply exponential smoothing / spherical interpolation on weapon aim pose when two-handed
     if (vrState.rightController.aimPose.isValid) {
@@ -10337,10 +10293,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             vrState.rightHapticPulse = 0.85f;
         }
     } else {
-        // Left Thumbstick Click -> Crouch Toggle ('C')
-        if (stickLeft && !prevStickLeft) {
-            SendKeyTap('C');
-        }
+        // Left Thumbstick Click -> Sprint Toggle is handled at line 802.
+        // Crouch toggle is mapped to Button X and physical crouch stance.
 
         // Right Thumbstick Click -> Recenter HMD & Cinema Screen & Reset Standing Eye Height
         if (stickRight && !prevStickRight) {
@@ -10355,8 +10309,6 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     }
 
     // Left Controller Menu Button -> Pause Menu / Dismiss / Skip Cutscene (Escape & Backspace & Tab)
-    bool btnMenu = (btns & RIDDICK_VR_BTN_MENU) != 0;
-    bool prevBtnMenu = (s_prevButtons & RIDDICK_VR_BTN_MENU) != 0;
     if (btnMenu && !prevBtnMenu) {
         SendKeyTap(VK_ESCAPE);
         SendKeyTap(VK_BACK);

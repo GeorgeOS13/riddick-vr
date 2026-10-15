@@ -285,9 +285,8 @@ void WINAPI OpenGLProxy::Hook_glLoadMatrixf(const GLfloat *m) {
         s_hasProjection = true;
         s_projMatrixCount++;
 
-        bool isOrtho = (fabsf(m[15] - 1.0f) < 0.001f);
-        bool isTelephoto = (m[0] > 1.20f);
-        if (!isOrtho && !isTelephoto && m[0] > 0.001f) {
+        bool isPerspective = (fabsf(m[15]) < 0.01f && m[0] > 0.10f && m[0] < 4.0f);
+        if (isPerspective) {
             s_has3DGameplayProjection = true;
         }
 
@@ -322,7 +321,7 @@ void WINAPI OpenGLProxy::Hook_glFrustum(GLdouble left, GLdouble right, GLdouble 
         s_lastProjection[14] = static_cast<float>(-(2.0 * zFar * zNear) / (zFar - zNear));
         s_lastProjection[15] = 0.0f;
         s_hasProjection = true;
-        if (s_lastProjection[0] <= 1.20f && s_lastProjection[0] > 0.001f) {
+        if (s_lastProjection[0] > 0.10f && s_lastProjection[0] < 4.0f) {
             s_has3DGameplayProjection = true;
         }
     }
