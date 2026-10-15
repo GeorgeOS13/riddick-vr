@@ -1693,6 +1693,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                            rVel.y < -1.60f && lVel.y < -1.35f &&
                                            fabsf(rVel.x - lVel.x) > 0.95f);
 
+            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Sternum Bone Fracture Mat Spike (ADR 0265)
+            static DWORD s_lastSternumFractureSpikeTime = 0;
+            static char s_sternumFractureSpikeDirKey = 'A';
+            bool sternumFractureSpikeStance = (handsDistSledge < 0.26f &&
+                                               leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                               vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
+            bool sternumFractureSpikeThrow = (sternumFractureSpikeStance && rVel.y < -1.60f &&
+                                              lVel.y < -1.35f && fabsf(lVel.x) > 0.85f);
+            if (sternumFractureSpikeThrow && (now - s_lastSternumFractureSpikeTime > 2000)) {
+                s_sternumFractureSpikeDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+            }
+
+            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Cleave Wave (ADR 0266)
+            static DWORD s_lastPlasmaCleaveWaveTime = 0;
+            bool plasmaCleaveWaveStance = (handsDistSledge < 0.28f &&
+                                           vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
+                                           vrState.rightController.trigger > 0.65f);
+            bool plasmaCleaveWavePlunge = (plasmaCleaveWaveStance && isJumpingStance &&
+                                           rVel.y < -1.65f && lVel.y < -1.40f &&
+                                           fabsf(rVel.x - lVel.x) > 1.00f);
+
             // Inmate Pit Brawl Outside Leg Hook Sweep & Ground Knee Drop (ADR 0209)
             static DWORD s_lastOutsideLegSweepTime = 0;
             static DWORD s_outsideLegSweepHookTime = 0;
@@ -1739,7 +1760,43 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_crossBlockHoldStart = 0;
             }
 
-            if (kineticPulseWavePlunge && (now - s_lastKineticPulseWaveTime > 2000)) {
+            if (plasmaCleaveWavePlunge && (now - s_lastPlasmaCleaveWaveTime > 2000)) {
+                s_lastPlasmaCleaveWaveTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA CLEAVE WAVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
+                SendKey(VK_SPACE, true);
+                SendKey('W', true);
+                SendKey('Q', true);
+                SendKey(VK_TAB, true);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_TAB, false);
+                SendKey('Q', false);
+                SendKey('W', false);
+                SendKey(VK_SPACE, false);
+                vrState.rightHapticPulse = 0.98f; // Kinetic plasma cleave wave (360 Hz)
+                vrState.leftHapticPulse = 0.98f;  // Structural deck recoil (100 Hz)
+            } else if (sternumFractureSpikeThrow && (now - s_lastSternumFractureSpikeTime > 2000)) {
+                s_lastSternumFractureSpikeTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER STERNUM FRACTURE SPIKE EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_sternumFractureSpikeDirKey, rVel.y, lVel.y);
+                SendKey('W', true);
+                SendKey(s_sternumFractureSpikeDirKey, true);
+                SendKey('C', true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, false);
+                SendKey('C', false);
+                SendKey(s_sternumFractureSpikeDirKey, false);
+                SendKey('W', false);
+                vrState.rightHapticPulse = 0.98f; // Sternum bone fracture shockwave (360 Hz)
+                vrState.leftHapticPulse = 0.92f;  // Collar tie tension (250 Hz)
+            } else if (kineticPulseWavePlunge && (now - s_lastKineticPulseWaveTime > 2000)) {
                 s_lastKineticPulseWaveTime = now;
                 s_lastPunchTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL KINETIC PULSE WAVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
@@ -5476,6 +5533,42 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_RETURN);
                 vrState.rightHapticPulse = 0.98f; // Grounding screw torque stop (290 Hz)
                 vrState.leftHapticPulse = 0.60f;  // Braided copper wire compression (150 Hz)
+            }
+
+            // Dark Athena EVA Solar Collector Photovoltaic Cell Busbar Laser Weld Inspection Pyrometer (ADR 0263)
+            static DWORD s_lastBusbarPyrometerTime = 0;
+            bool handAtBusbarGuide = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
+                                      vrState.leftController.grip > 0.55f);
+            bool handOnPyrometerHead = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
+                                        vrState.rightController.trigger > 0.50f);
+            bool pyrometerScanStroke = (rVel.z < -0.80f);
+            if (handAtBusbarGuide && handOnPyrometerHead && pyrometerScanStroke && (now - s_lastBusbarPyrometerTime > 1800)) {
+                s_lastBusbarPyrometerTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA SOLAR BUSBAR WELD PYROMETER INSPECTED (Rz: %.2f)", rVel.z);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap(VK_TAB);
+                SendKeyTap(VK_RETURN);
+                vrState.rightHapticPulse = 0.95f; // Laser pyrometer pulse chime (310 Hz)
+                vrState.leftHapticPulse = 0.55f;  // Busbar thermal contact buzz (160 Hz)
+            }
+
+            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Signal Amplifier Potentiometer (ADR 0264)
+            static DWORD s_lastTachPotentiometerTime = 0;
+            bool handAtAmpCasing = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
+                                    vrState.leftController.grip > 0.55f);
+            bool handOnPotentiometerTrimmer = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
+                                               vrState.rightController.trigger < 0.40f);
+            bool tachPotentiometerTorque = (fabsf(rVel.x) > 0.65f);
+            if (handAtAmpCasing && handOnPotentiometerTrimmer && tachPotentiometerTorque && (now - s_lastTachPotentiometerTime > 1800)) {
+                s_lastTachPotentiometerTime = now;
+                VR_LOG_INFO("Environmental Gesture: DRAFT FAN TACHOMETER POTENTIOMETER ADJUSTED (Rx: %.2f)", rVel.x);
+                SendKeyTap('E');
+                SendKeyTap('Q');
+                SendKeyTap(VK_TAB);
+                SendKeyTap(VK_SPACE);
+                vrState.rightHapticPulse = 0.55f; // Potentiometer detent wiper micro-clicks (200 Hz)
+                vrState.leftHapticPulse = 0.95f;  // Signal gain lock chime (330 Hz)
             }
         }
     }
