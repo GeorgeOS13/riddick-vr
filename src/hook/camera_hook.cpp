@@ -584,15 +584,85 @@ static PostureIntent UpdatePosture(PostureState& st, bool hmdValid,
     return out;
 }
 
+// GH #17 step 3: turn handling extracted (snap/smooth + mode toggle).
+// No behavior change: same thresholds, hysteresis, INI wiring, guards.
+enum VRTurnMode {
+    VR_TURN_SNAP = 0,    // Discrete 45° snap turns with zero pre-snap crawl
+    VR_TURN_SMOOTH = 1   // Continuous rotation with cubic acceleration curve
+};
+
+struct TurnState {
+    VRTurnMode mode = VR_TURN_SNAP;
+    bool snapArmed = true;
+    bool prevToggle = false;
+    float smoothAccum = 0.0f;
+};
+
+static TurnState s_turn;
+
+static void UpdateTurn(TurnState& st, uint32_t btns, RiddickVRSharedState& vrState) {
+    // Mode Toggle: Left Grip + Right Stick Click toggles turn mode
+    bool stickRightClick = (btns & RIDDICK_VR_BTN_STICK_RIGHT) != 0;
+    bool leftGripHeld = vrState.leftController.grip > 0.5f;
+    if (stickRightClick && leftGripHeld && !st.prevToggle) {
+        st.mode = (st.mode == VR_TURN_SNAP) ? VR_TURN_SMOOTH : VR_TURN_SNAP;
+        VR_LOG_INFO("Turning Mode Toggled: %s", (st.mode == VR_TURN_SNAP) ? "SNAP TURN (45 deg)" : "SMOOTH TURN (Cubic Curve)");
+        HapticRequest(1, ((st.mode == VR_TURN_SNAP) ? 0.40f : 0.25f), kHapticUi);
+    }
+    st.prevToggle = (stickRightClick && leftGripHeld);
+
+    float stickX = vrState.rightController.thumbstickX;
+
+    if (st.mode == VR_TURN_SNAP) {
+        // Pure Snap Turn: require deflection > 0.70f, trigger clean single 45° mouse delta
+        // CRITICAL: Absolutely no smooth mouse move during ramp-up or return to center!
+        constexpr float SNAP_THRESHOLD = 0.70f;
+        constexpr float RESET_THRESHOLD = 0.30f;
+
+        if (fabsf(stickX) > SNAP_THRESHOLD) {
+            if (st.snapArmed) {
+                st.snapArmed = false;
+                int snapDelta = static_cast<int>(350.0f * (g_vrConfig.snapAngleDeg / 45.0f)) * ((stickX > 0.0f) ? 1 : -1); // Track C #10 INI angle
+                SendMouseMove(snapDelta, 0); // GH #33: SendInput helper
+                HapticRequest(1, 0.25f, kHapticUi); // GH #32: crisp tactile click on snap
+            }
+        } else if (fabsf(stickX) < RESET_THRESHOLD) {
+            st.snapArmed = true;
+        }
+    } else {
+        // Pure Smooth Turn: continuous rotation with progressive cubic curve and sub-pixel accumulation
+        // Zero truncation stutter or sudden snaps at stick limits
+        const float SMOOTH_DEADZONE = g_vrConfig.turnDeadzone; // Track C #10 (default 0.20)
+        if (fabsf(stickX) > SMOOTH_DEADZONE) {
+            float norm = (fabsf(stickX) - SMOOTH_DEADZONE) / (1.0f - SMOOTH_DEADZONE);
+            float curvedSpeed = norm * norm * g_vrConfig.smoothTurnSpeed; // Track C #10 INI (default 20.0)
+            // GH #23: guard corrupt stick input before accumulation.
+            if (curvedSpeed != curvedSpeed || fabsf(curvedSpeed) > 1e6f) {
+                curvedSpeed = 0.0f;
+                st.smoothAccum = 0.0f;
+            }
+            st.smoothAccum += std::copysign(curvedSpeed, stickX);
+            if (st.smoothAccum > 500.0f) st.smoothAccum = 500.0f;
+            if (st.smoothAccum < -500.0f) st.smoothAccum = -500.0f;
+            int deltaX = static_cast<int>(st.smoothAccum);
+            if (deltaX != 0) {
+                st.smoothAccum -= deltaX;
+                SendMouseMove(deltaX, 0); // GH #33: SendInput helper
+            }
+        } else {
+            st.smoothAccum = 0.0f;
+        }
+    }
+}
+
 void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (!m_initialized || !vrState.vrActive) return;
 
     DWORD now = GetTickCount();
 
     // Haptic decay (GH #38): fade stale pulses each frame so a one-shot reload /
-    // NanoMED buzz ends even if the host clear races. New gestures overwrite via max below.
-    // Note: full per-gesture arbitration (GH #32) still needs a central dispatch queue;
-    // client WriteState merges with max as a partial mitigation.
+    // NanoMED buzz ends even if the host clear races. Gestures file requests
+    // into the central HapticArbiter (GH #32); single publish point at end of Update.
     vrState.leftHapticPulse *= 0.70f;
     vrState.rightHapticPulse *= 0.70f;
     if (vrState.leftHapticPulse < 0.05f) vrState.leftHapticPulse = 0.0f;
@@ -1220,67 +1290,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     }
 
     // 4. Thumbstick Snap vs Smooth Turning Ergonomics & Input Hysteresis (ADR 0371)
-    enum VRTurnMode {
-        VR_TURN_SNAP = 0,    // Discrete 45Â° snap turns with zero pre-snap crawl
-        VR_TURN_SMOOTH = 1   // Continuous rotation with cubic acceleration curve
-    };
-    static VRTurnMode s_turnMode = VR_TURN_SNAP;
-    static bool s_snapTurnArmed = true;
-
-    // Mode Toggle: Left Grip + Right Stick Click toggles turn mode
-    static bool s_prevStickClickToggle = false;
-    bool stickRightClick = (btns & RIDDICK_VR_BTN_STICK_RIGHT) != 0;
-    bool leftGripHeld = vrState.leftController.grip > 0.5f;
-    if (stickRightClick && leftGripHeld && !s_prevStickClickToggle) {
-        s_turnMode = (s_turnMode == VR_TURN_SNAP) ? VR_TURN_SMOOTH : VR_TURN_SNAP;
-        VR_LOG_INFO("Turning Mode Toggled: %s", (s_turnMode == VR_TURN_SNAP) ? "SNAP TURN (45 deg)" : "SMOOTH TURN (Cubic Curve)");
-        HapticRequest(1, ((s_turnMode == VR_TURN_SNAP) ? 0.40f : 0.25f), kHapticUi);
-    }
-    s_prevStickClickToggle = (stickRightClick && leftGripHeld);
-
-    float stickX = vrState.rightController.thumbstickX;
-
-    if (s_turnMode == VR_TURN_SNAP) {
-        // Pure Snap Turn: require deflection > 0.70f, trigger clean single 45Â° mouse delta
-        // CRITICAL: Absolutely no smooth mouse move during ramp-up or return to center!
-        constexpr float SNAP_THRESHOLD = 0.70f;
-        constexpr float RESET_THRESHOLD = 0.30f;
-
-        if (fabsf(stickX) > SNAP_THRESHOLD) {
-            if (s_snapTurnArmed) {
-                s_snapTurnArmed = false;
-                int snapDelta = static_cast<int>(350.0f * (g_vrConfig.snapAngleDeg / 45.0f)) * ((stickX > 0.0f) ? 1 : -1); // Track C #10 INI angle
-                SendMouseMove(snapDelta, 0); // GH #33: SendInput helper
-                HapticRequest(1, 0.25f, kHapticUi); // GH #32: crisp tactile click on snap
-            }
-        } else if (fabsf(stickX) < RESET_THRESHOLD) {
-            s_snapTurnArmed = true;
-        }
-    } else {
-        // Pure Smooth Turn: continuous rotation with progressive cubic curve and sub-pixel accumulation
-        // Zero truncation stutter or sudden snaps at stick limits
-        const float SMOOTH_DEADZONE = g_vrConfig.turnDeadzone; // Track C #10 (default 0.20)
-        static float s_accumulatedSmoothTurnX = 0.0f;
-        if (fabsf(stickX) > SMOOTH_DEADZONE) {
-            float norm = (fabsf(stickX) - SMOOTH_DEADZONE) / (1.0f - SMOOTH_DEADZONE);
-            float curvedSpeed = norm * norm * g_vrConfig.smoothTurnSpeed; // Track C #10 INI (default 20.0)
-            // GH #23: guard corrupt stick input before accumulation.
-            if (curvedSpeed != curvedSpeed || fabsf(curvedSpeed) > 1e6f) {
-                curvedSpeed = 0.0f;
-                s_accumulatedSmoothTurnX = 0.0f;
-            }
-            s_accumulatedSmoothTurnX += std::copysign(curvedSpeed, stickX);
-            if (s_accumulatedSmoothTurnX > 500.0f) s_accumulatedSmoothTurnX = 500.0f;
-            if (s_accumulatedSmoothTurnX < -500.0f) s_accumulatedSmoothTurnX = -500.0f;
-            int deltaX = static_cast<int>(s_accumulatedSmoothTurnX);
-            if (deltaX != 0) {
-                s_accumulatedSmoothTurnX -= deltaX;
-                SendMouseMove(deltaX, 0); // GH #33: SendInput helper
-            }
-        } else {
-            s_accumulatedSmoothTurnX = 0.0f;
-        }
-    }
+    // GH #17 step 3: delegated to UpdateTurn (explicit TurnState, no behavior change).
+    UpdateTurn(s_turn, btns, vrState);
 
     // 4b. Dialogue & Menu Selection Navigation via Thumbstick Y (ADR 0410, GH #39)
     // In VR, vertical right-stick deflection is unused for camera pitch (head pitch is 1:1 physically tracked).
@@ -1323,7 +1334,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // it to the HUD convergence cue as a subtle comfort proxy. FOLLOW-UP: true
     // post-process peripheral vignette via shader injection (not implemented yet).
     {
-        float turnMag = fabsf(stickX);
+        float turnMag = fabsf(vrState.rightController.thumbstickX);
         float moveActive = (moveMag >= g_vrConfig.moveDeadzone) ? 0.5f : 0.0f;
         float turnActive = (turnMag >= g_vrConfig.turnDeadzone) ? 0.5f : 0.0f;
         float comfortTarget = g_vrConfig.comfortEnabled ? (moveActive + turnActive) * g_vrConfig.comfortStrength : 0.0f;
@@ -10754,8 +10765,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         // Crouch toggle is mapped to Button X and physical crouch stance.
 
         // Right Thumbstick Click -> Recenter HMD & Reset Standing Eye Height (GH #18: no cinema)
-        // Gated by !leftGripHeld so toggling snap/smooth turn mode does not unintentionally reset view
-        if (stickRight && !prevStickRight && !leftGripHeld) {
+        // Gated by grip so toggling snap/smooth turn mode does not unintentionally reset view
+        bool recenterGripHeld = vrState.leftController.grip > 0.5f;
+        if (stickRight && !prevStickRight && !recenterGripHeld) {
             vrState.shouldRecenter = true;
             s_hasPrevHmdOrientation = false;
             if (vrState.hmdPose.isValid) {
