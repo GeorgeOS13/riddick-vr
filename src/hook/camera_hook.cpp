@@ -44,7 +44,6 @@ static bool s_twoHandedStabilizationActive = false;
 static bool s_physicalBlockEngaged = false;
 static DWORD s_lastReloadGestureTime = 0;
 static bool s_isAimingOrBlocking = false;
-static bool s_isPhysicalADS = false;
 static RiddickVRTrackedPose s_stabilizedAimPose{};
 static bool s_hasStabilizedPose = false;
 
@@ -1079,6 +1078,283 @@ static ButtonsIntent UpdateButtons(ButtonsState& st, uint32_t btns, uint32_t pre
     return out;
 }
 
+// GH #17 step 7: head-look/mouse-emulation math extracted (section 0:
+// Singularity-Free Relative Quaternion Head Tracking + decoupled controller
+// aim steering + recoil kick + ADS corridor).
+// Pure math: updates st, returns mouse deltas + ADS edge intent; Update owns
+// SendMouseMove/HapticRequest/logs. Same quaternion math, deadzones,
+// sensitivities, GH #23 guard/clamps, and recoil decay as the inline block.
+struct HeadLookState {
+    bool hasPrevHmdOrientation = false;
+    float prevHmdX = 0.0f;
+    float prevHmdY = 0.0f;
+    float prevHmdZ = 0.0f;
+    float prevHmdW = 1.0f;
+    bool hasPrevCtrlAim = false;
+    float prevCtrlYaw = 0.0f;
+    float prevCtrlPitch = 0.0f;
+    float accumulatedLookX = 0.0f;
+    float accumulatedLookY = 0.0f;
+    float lastHmdYaw = 0.0f;
+    float lastHmdPitch = 0.0f;
+    float lastHmdDeltaYaw = 0.0f;
+    float recoilKickPitch = 0.0f;
+    DWORD adsEnterStartTime = 0;
+    bool adsHapticFired = false;
+    bool isPhysicalADS = false;
+};
+static HeadLookState s_headlook;
+
+struct HeadLookIntent {
+    int moveX = 0;
+    int moveY = 0;
+    bool adsAcquired = false; // edge: tactile detent haptic on sight picture acquisition
+};
+
+static HeadLookIntent UpdateHeadLook(HeadLookState& st, DWORD now,
+                                     const RiddickVRTrackedPose& hmdPose,
+                                     const RiddickVRTrackedPose& ctrlPose,
+                                     bool recenterEdge, bool isReloading, bool aimHeld,
+                                     bool physicalBlockEngaged, bool twoHandedActive,
+                                     bool southpaw) {
+    HeadLookIntent out;
+    if (!hmdPose.isValid) {
+        st.hasPrevHmdOrientation = false;
+        st.hasPrevCtrlAim = false;
+        return out;
+    }
+
+    float qx = hmdPose.orientation.x;
+    float qy = hmdPose.orientation.y;
+    float qz = hmdPose.orientation.z;
+    float qw = hmdPose.orientation.w;
+
+    float norm = sqrtf(qx * qx + qy * qy + qz * qz + qw * qw);
+    if (norm <= 0.0001f) return out;
+    qx /= norm;
+    qy /= norm;
+    qz /= norm;
+    qw /= norm;
+
+    if (!st.hasPrevHmdOrientation || recenterEdge) {
+        st.prevHmdX = qx;
+        st.prevHmdY = qy;
+        st.prevHmdZ = qz;
+        st.prevHmdW = qw;
+        st.hasPrevCtrlAim = false;
+        st.accumulatedLookX = 0.0f;
+        st.accumulatedLookY = 0.0f;
+        st.hasPrevHmdOrientation = true;
+        return out;
+    }
+
+    // ADR 0409: Compute relative rotation in head-local space: Delta Q = Q_prev^-1 * Q_curr
+    // Eliminates all gimbal lock singularities, division-by-zero, and runaway pitch divergence
+    float w1 = st.prevHmdW, x1 = st.prevHmdX, y1 = st.prevHmdY, z1 = st.prevHmdZ;
+    float w2 = qw, x2 = qx, y2 = qy, z2 = qz;
+
+    float dw = w1 * w2 + x1 * x2 + y1 * y2 + z1 * z2;
+    float dx = w1 * x2 - x1 * w2 - y1 * z2 + z1 * y2;
+    float dy = w1 * y2 + x1 * z2 - y1 * w2 - z1 * x2;
+    float dz = w1 * z2 - x1 * y2 + y1 * x2 - z1 * w2;
+
+    if (dw < 0.0f) {
+        dx = -dx;
+        dy = -dy;
+        dz = -dz;
+        dw = -dw;
+    }
+
+    // Small-angle approximation: theta ~= 2 * sin(theta/2)
+    float deltaYaw = 2.0f * dy;   // Pure local neck yaw around Y
+    float deltaPitch = 2.0f * dx; // Pure local head pitch around X
+    // deltaRoll = 2.0f * dz; // Pure local roll around Z (completely decoupled)
+
+    st.prevHmdX = qx;
+    st.prevHmdY = qy;
+    st.prevHmdZ = qz;
+    st.prevHmdW = qw;
+    st.lastHmdDeltaYaw = deltaYaw;
+
+    // Decoupled Motion Controller Aim Steering:
+    // Extract relative orientation between HMD and weapon aim controller: Q_rel = Q_hmd^-1 * Q_ctrl
+    float deltaCtrlYaw = 0.0f;
+    float deltaCtrlPitch = 0.0f;
+    float pullYaw = 0.0f;
+    float pullPitch = 0.0f;
+    float wPull = 0.0f;
+    bool isActivelyAiming = false;
+
+    // ADR 0383: Physical 6DOF Aim-Down-Sights (ADS) Eye-Relief Alignment & Parallax Mitigation
+    RiddickVRVector3 ctrlLocal = WorldToHmdLocal(ctrlPose.position, hmdPose);
+    if (southpaw) ctrlLocal.x = -ctrlLocal.x; // Track C #14: mirror into right-eye corridor frame
+    // Dominant eye sight line corridor:
+    // Y: [-0.18m, 0.08m] (chin to eye level)
+    // Z: [-0.36m, -0.10m] (10cm to 36cm eye relief)
+    // X: [0.02m, 0.22m] (dominant right eye alignment corridor)
+    bool inAdsCorridor = (ctrlLocal.y >= -0.18f && ctrlLocal.y <= 0.08f) &&
+                         (ctrlLocal.z >= -0.36f && ctrlLocal.z <= -0.10f) &&
+                         (ctrlLocal.x >= 0.02f && ctrlLocal.x <= 0.22f);
+
+    if (inAdsCorridor && !isReloading && !physicalBlockEngaged) {
+        if (st.adsEnterStartTime == 0) {
+            st.adsEnterStartTime = now;
+        } else if (now - st.adsEnterStartTime > 50) { // 50ms hold to confirm ADS
+            st.isPhysicalADS = true;
+            if (!st.adsHapticFired) {
+                out.adsAcquired = true; // call site: tactile detent on sight picture acquisition
+                st.adsHapticFired = true;
+            }
+        }
+    } else {
+        // Spatial exit hysteresis: requires moving clearly outside the corridor
+        if (ctrlLocal.y < -0.24f || ctrlLocal.z < -0.42f || ctrlLocal.x < -0.05f || ctrlLocal.x > 0.28f) {
+            st.isPhysicalADS = false;
+            st.adsEnterStartTime = 0;
+            st.adsHapticFired = false;
+        }
+    }
+
+    if (ctrlPose.isValid && !physicalBlockEngaged && !isReloading) {
+        float cx = ctrlPose.orientation.x;
+        float cy = ctrlPose.orientation.y;
+        float cz = ctrlPose.orientation.z;
+        float cw = ctrlPose.orientation.w;
+        float cNorm = sqrtf(cx * cx + cy * cy + cz * cz + cw * cw);
+        if (cNorm > 0.0001f) {
+            cx /= cNorm; cy /= cNorm; cz /= cNorm; cw /= cNorm;
+
+            // Inverse HMD quaternion: q_inv = (-qx, -qy, -qz, qw)
+            float invHmdX = -qx;
+            float invHmdY = -qy;
+            float invHmdZ = -qz;
+            float invHmdW = qw;
+
+            // Q_rel = Q_hmd^-1 * Q_ctrl
+            float relW = invHmdW * cw - invHmdX * cx - invHmdY * cy - invHmdZ * cz;
+            float relX = invHmdW * cx + invHmdX * cw + invHmdY * cz - invHmdZ * cy;
+            float relY = invHmdW * cy - invHmdX * cz + invHmdY * cw + invHmdZ * cx;
+            float relZ = invHmdW * cz + invHmdX * cy - invHmdY * cx + invHmdZ * cw;
+
+            float relNorm = sqrtf(relW * relW + relX * relX + relY * relY + relZ * relZ);
+            if (relNorm > 0.0001f) {
+                relW /= relNorm; relX /= relNorm; relY /= relNorm; relZ /= relNorm;
+
+                // Relative forward vector (rotating (0, 0, -1) by Q_rel):
+                // fwdX = -2(relW * relY + relX * relZ)
+                // fwdY =  2(relW * relX - relY * relZ)
+                // fwdZ = -(1 - 2(relX^2 + relY^2))
+                float fwdX = -2.0f * (relW * relY + relX * relZ);
+                float fwdY =  2.0f * (relW * relX - relY * relZ);
+                float fwdZ = -(1.0f - 2.0f * (relX * relX + relY * relY));
+
+                // Relative controller aim angles in HMD view space
+                float ctrlYaw = atan2f(2.0f * (relW * relY + relZ * relX), 1.0f - 2.0f * (relX * relX + relY * relY));
+                float sinCtrlPitch = fwdY;
+                float ctrlPitch = 0.0f;
+                if (fabsf(sinCtrlPitch) >= 1.0f) {
+                    ctrlPitch = copysignf(1.5707963f, sinCtrlPitch);
+                } else {
+                    ctrlPitch = asinf(sinCtrlPitch);
+                }
+
+                // ADR 0374: Quest Controller Ergonomic Barrel Pitch Calibration
+                // Natural wrist resting angle offsets the raw aim ray ~10.5 degrees downward
+                constexpr float ERGONOMIC_BARREL_PITCH_OFFSET = -0.1832f; // -10.5 deg in radians
+                ctrlPitch += ERGONOMIC_BARREL_PITCH_OFFSET;
+
+                // Apply transient muzzle climb recoil kick (exponential recovery over ~120ms)
+                ctrlPitch += st.recoilKickPitch;
+                st.recoilKickPitch *= 0.82f;
+
+                if (!st.hasPrevCtrlAim) {
+                    st.prevCtrlYaw = ctrlYaw;
+                    st.prevCtrlPitch = ctrlPitch;
+                    st.hasPrevCtrlAim = true;
+                } else {
+                    deltaCtrlYaw = ctrlYaw - st.prevCtrlYaw;
+                    while (deltaCtrlYaw > 3.14159265f) deltaCtrlYaw -= 6.2831853f;
+                    while (deltaCtrlYaw < -3.14159265f) deltaCtrlYaw += 6.2831853f;
+
+                    deltaCtrlPitch = ctrlPitch - st.prevCtrlPitch;
+
+                    st.prevCtrlYaw = ctrlYaw;
+                    st.prevCtrlPitch = ctrlPitch;
+
+                    // Center deadzone (~2.0 degrees) to prevent micro-drift when holding weapon steady
+                    constexpr float AIM_DEADZONE = 0.035f;
+                    if (fabsf(ctrlYaw) > AIM_DEADZONE) {
+                        pullYaw = (ctrlYaw > 0.0f) ? (ctrlYaw - AIM_DEADZONE) : (ctrlYaw + AIM_DEADZONE);
+                    }
+                    if (fabsf(ctrlPitch) > AIM_DEADZONE) {
+                        pullPitch = (ctrlPitch > 0.0f) ? (ctrlPitch - AIM_DEADZONE) : (ctrlPitch + AIM_DEADZONE);
+                    }
+
+                    // Aim weights: only pull aim when actively aiming (ADS or two-handed stabilization or aiming trigger)
+                    isActivelyAiming = (st.isPhysicalADS || twoHandedActive || aimHeld) && !physicalBlockEngaged && !isReloading;
+                    if (isActivelyAiming) {
+                        wPull = st.isPhysicalADS ? 0.12f : 0.08f;
+                    } else {
+                        wPull = 0.0f;
+                    }
+                }
+            }
+        }
+    } else {
+        st.hasPrevCtrlAim = false;
+    }
+
+    // ADR 0409: Singularity-Free Relative Quaternion Head Tracking Look & Controller Aim Deflection
+    // 1:1 Head tracking orientation in head-local space drives in-game heading and pitch smoothly
+    // without Euler gimbal lock or runaway spinning.
+    constexpr float HMD_LOOK_DEADZONE = 0.0004f; // ~0.02 deg deadband filter
+    float cleanDeltaYaw = (fabsf(deltaYaw) > HMD_LOOK_DEADZONE) ? deltaYaw : 0.0f;
+    float cleanDeltaPitch = (fabsf(deltaPitch) > HMD_LOOK_DEADZONE) ? deltaPitch : 0.0f;
+
+    constexpr float SENSITIVITY_YAW = 445.6f;
+    constexpr float SENSITIVITY_PITCH = 445.6f;
+
+    float mouseDeltaX = -cleanDeltaYaw * SENSITIVITY_YAW;
+    float mouseDeltaY = -cleanDeltaPitch * SENSITIVITY_PITCH;
+
+    if (isActivelyAiming && fabsf(wPull) > 0.001f) {
+        constexpr float CONTROLLER_AIM_SENSITIVITY = 120.0f;
+        mouseDeltaX += -pullYaw * wPull * CONTROLLER_AIM_SENSITIVITY;
+        mouseDeltaY += -pullPitch * wPull * CONTROLLER_AIM_SENSITIVITY;
+    }
+
+    // GH #23: NaN/Inf guard + clamp (ADR 0409 look deltas). A corrupt
+    // quaternion/velocity must never inject runaway mouse deltas.
+    bool badLook = (mouseDeltaX != mouseDeltaX) || (mouseDeltaY != mouseDeltaY) ||
+                   (fabsf(mouseDeltaX) > 1e6f) || (fabsf(mouseDeltaY) > 1e6f);
+    if (badLook) {
+        mouseDeltaX = 0.0f;
+        mouseDeltaY = 0.0f;
+        st.accumulatedLookX = 0.0f;
+        st.accumulatedLookY = 0.0f;
+    } else {
+        if (mouseDeltaX > 500.0f) mouseDeltaX = 500.0f;
+        if (mouseDeltaX < -500.0f) mouseDeltaX = -500.0f;
+        if (mouseDeltaY > 500.0f) mouseDeltaY = 500.0f;
+        if (mouseDeltaY < -500.0f) mouseDeltaY = -500.0f;
+    }
+
+    st.accumulatedLookX += mouseDeltaX;
+    st.accumulatedLookY += mouseDeltaY;
+    if (st.accumulatedLookX > 500.0f) st.accumulatedLookX = 500.0f;
+    if (st.accumulatedLookX < -500.0f) st.accumulatedLookX = -500.0f;
+    if (st.accumulatedLookY > 500.0f) st.accumulatedLookY = 500.0f;
+    if (st.accumulatedLookY < -500.0f) st.accumulatedLookY = -500.0f;
+
+    out.moveX = static_cast<int>(st.accumulatedLookX);
+    out.moveY = static_cast<int>(st.accumulatedLookY);
+    if (out.moveX != 0 || out.moveY != 0) {
+        st.accumulatedLookX -= out.moveX;
+        st.accumulatedLookY -= out.moveY;
+    }
+    return out;
+}
+
 void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (!m_initialized || !vrState.vrActive) return;
 
@@ -1138,269 +1414,25 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     vrState.cinemaMode = false;
 
     // 0. Singularity-Free Relative Quaternion Head Tracking Look Input (ADR 0409)
-    static bool s_hasPrevHmdOrientation = false;
-    static float s_prevHmdX = 0.0f;
-    static float s_prevHmdY = 0.0f;
-    static float s_prevHmdZ = 0.0f;
-    static float s_prevHmdW = 1.0f;
-    static bool s_hasPrevCtrlAim = false;
-    static float s_prevCtrlYaw = 0.0f;
-    static float s_prevCtrlPitch = 0.0f;
-    static float s_accumulatedLookX = 0.0f;
-    static float s_accumulatedLookY = 0.0f;
-    static float s_lastHmdYaw = 0.0f;
-    static float s_lastHmdPitch = 0.0f;
-    static float s_lastHmdDeltaYaw = 0.0f;
-    static float s_recoilKickPitch = 0.0f;
-
-    if (vrState.hmdPose.isValid) {
-        float qx = vrState.hmdPose.orientation.x;
-        float qy = vrState.hmdPose.orientation.y;
-        float qz = vrState.hmdPose.orientation.z;
-        float qw = vrState.hmdPose.orientation.w;
-
-        float norm = sqrtf(qx * qx + qy * qy + qz * qz + qw * qw);
-        if (norm > 0.0001f) {
-            qx /= norm;
-            qy /= norm;
-            qz /= norm;
-            qw /= norm;
-
-            float deltaYaw = 0.0f;
-            float deltaPitch = 0.0f;
-
-            if (!s_hasPrevHmdOrientation || recenterEdge) {
-                s_prevHmdX = qx;
-                s_prevHmdY = qy;
-                s_prevHmdZ = qz;
-                s_prevHmdW = qw;
-                s_hasPrevCtrlAim = false;
-                s_accumulatedLookX = 0.0f;
-                s_accumulatedLookY = 0.0f;
-                s_hasPrevHmdOrientation = true;
-            } else {
-                // ADR 0409: Compute relative rotation in head-local space: Delta Q = Q_prev^-1 * Q_curr
-                // Eliminates all gimbal lock singularities, division-by-zero, and runaway pitch divergence
-                float w1 = s_prevHmdW, x1 = s_prevHmdX, y1 = s_prevHmdY, z1 = s_prevHmdZ;
-                float w2 = qw, x2 = qx, y2 = qy, z2 = qz;
-
-                float dw = w1 * w2 + x1 * x2 + y1 * y2 + z1 * z2;
-                float dx = w1 * x2 - x1 * w2 - y1 * z2 + z1 * y2;
-                float dy = w1 * y2 + x1 * z2 - y1 * w2 - z1 * x2;
-                float dz = w1 * z2 - x1 * y2 + y1 * x2 - z1 * w2;
-
-                if (dw < 0.0f) {
-                    dx = -dx;
-                    dy = -dy;
-                    dz = -dz;
-                    dw = -dw;
-                }
-
-                // Small-angle approximation: theta â‰ˆ 2 * sin(theta/2)
-                deltaYaw = 2.0f * dy;   // Pure local neck yaw around Y
-                deltaPitch = 2.0f * dx; // Pure local head pitch around X
-                // deltaRoll = 2.0f * dz; // Pure local roll around Z (completely decoupled)
-
-                s_prevHmdX = qx;
-                s_prevHmdY = qy;
-                s_prevHmdZ = qz;
-                s_prevHmdW = qw;
-                s_lastHmdDeltaYaw = deltaYaw;
-
-                // Decoupled Motion Controller Aim Steering:
-                // Extract relative orientation between HMD and weapon aim controller: Q_rel = Q_hmd^-1 * Q_ctrl
-                const auto& ctrlPose = (s_twoHandedStabilizationActive && s_hasStabilizedPose) ?
-                    s_stabilizedAimPose : (domCtrl.aimPose.isValid ? domCtrl.aimPose : domCtrl.gripPose); // Track C #14
-
-                float deltaCtrlYaw = 0.0f;
-                float deltaCtrlPitch = 0.0f;
-                float pullYaw = 0.0f;
-                float pullPitch = 0.0f;
-                float wAim = 0.0f;
-                float wPull = 0.0f;
-                bool isActivelyAiming = false;
-
-                bool isReloading = (now - s_lastReloadGestureTime <= 1100);
-                bool isAiming = s_isAimingOrBlocking || (offCtrl.trigger > 0.5f); // Track C #14
-
-                // ADR 0383: Physical 6DOF Aim-Down-Sights (ADS) Eye-Relief Alignment & Parallax Mitigation
-                static DWORD s_adsEnterStartTime = 0;
-                static bool s_adsHapticFired = false;
-
-                RiddickVRVector3 ctrlLocal = WorldToHmdLocal(ctrlPose.position, vrState.hmdPose);
-                if (g_vrConfig.southpaw) ctrlLocal.x = -ctrlLocal.x; // Track C #14: mirror into right-eye corridor frame
-                // Dominant eye sight line corridor:
-                // Y: [-0.18m, 0.08m] (chin to eye level)
-                // Z: [-0.36m, -0.10m] (10cm to 36cm eye relief)
-                // X: [0.02m, 0.22m] (dominant right eye alignment corridor)
-                bool inAdsCorridor = (ctrlLocal.y >= -0.18f && ctrlLocal.y <= 0.08f) &&
-                                    (ctrlLocal.z >= -0.36f && ctrlLocal.z <= -0.10f) &&
-                                    (ctrlLocal.x >= 0.02f && ctrlLocal.x <= 0.22f);
-
-                if (inAdsCorridor && !isReloading && !s_physicalBlockEngaged) {
-                    if (s_adsEnterStartTime == 0) {
-                        s_adsEnterStartTime = now;
-                    } else if (now - s_adsEnterStartTime > 50) { // 50ms hold to confirm ADS
-                        s_isPhysicalADS = true;
-                        if (!s_adsHapticFired) {
-                            HapticRequest(1, (0.18f), kHapticUi); // Tactile detent on sight picture acquisition
-                            s_adsHapticFired = true;
-                        }
-                    }
-                } else {
-                    // Spatial exit hysteresis: requires moving clearly outside the corridor
-                    if (ctrlLocal.y < -0.24f || ctrlLocal.z < -0.42f || ctrlLocal.x < -0.05f || ctrlLocal.x > 0.28f) {
-                        s_isPhysicalADS = false;
-                        s_adsEnterStartTime = 0;
-                        s_adsHapticFired = false;
-                    }
-                }
-
-                if (ctrlPose.isValid && !s_physicalBlockEngaged && !isReloading) {
-                    float cx = ctrlPose.orientation.x;
-                    float cy = ctrlPose.orientation.y;
-                    float cz = ctrlPose.orientation.z;
-                    float cw = ctrlPose.orientation.w;
-                    float cNorm = sqrtf(cx * cx + cy * cy + cz * cz + cw * cw);
-                    if (cNorm > 0.0001f) {
-                        cx /= cNorm; cy /= cNorm; cz /= cNorm; cw /= cNorm;
-
-                        // Inverse HMD quaternion: q_inv = (-qx, -qy, -qz, qw)
-                        float invHmdX = -qx;
-                        float invHmdY = -qy;
-                        float invHmdZ = -qz;
-                        float invHmdW = qw;
-
-                        // Q_rel = Q_hmd^-1 * Q_ctrl
-                        float relW = invHmdW * cw - invHmdX * cx - invHmdY * cy - invHmdZ * cz;
-                        float relX = invHmdW * cx + invHmdX * cw + invHmdY * cz - invHmdZ * cy;
-                        float relY = invHmdW * cy - invHmdX * cz + invHmdY * cw + invHmdZ * cx;
-                        float relZ = invHmdW * cz + invHmdX * cy - invHmdY * cx + invHmdZ * cw;
-
-                        float relNorm = sqrtf(relW * relW + relX * relX + relY * relY + relZ * relZ);
-                        if (relNorm > 0.0001f) {
-                            relW /= relNorm; relX /= relNorm; relY /= relNorm; relZ /= relNorm;
-
-                            // Relative forward vector (rotating (0, 0, -1) by Q_rel):
-                            // fwdX = -2(relW * relY + relX * relZ)
-                            // fwdY =  2(relW * relX - relY * relZ)
-                            // fwdZ = -(1 - 2(relX^2 + relY^2))
-                            float fwdX = -2.0f * (relW * relY + relX * relZ);
-                            float fwdY =  2.0f * (relW * relX - relY * relZ);
-                            float fwdZ = -(1.0f - 2.0f * (relX * relX + relY * relY));
-
-                            // Relative controller aim angles in HMD view space
-                            float ctrlYaw = atan2f(2.0f * (relW * relY + relZ * relX), 1.0f - 2.0f * (relX * relX + relY * relY));
-                            float sinCtrlPitch = fwdY;
-                            float ctrlPitch = 0.0f;
-                            if (fabsf(sinCtrlPitch) >= 1.0f) {
-                                ctrlPitch = copysignf(1.5707963f, sinCtrlPitch);
-                            } else {
-                                ctrlPitch = asinf(sinCtrlPitch);
-                            }
-
-                            // ADR 0374: Quest Controller Ergonomic Barrel Pitch Calibration
-                            // Natural wrist resting angle offsets the raw aim ray ~10.5 degrees downward
-                            constexpr float ERGONOMIC_BARREL_PITCH_OFFSET = -0.1832f; // -10.5 deg in radians
-                            ctrlPitch += ERGONOMIC_BARREL_PITCH_OFFSET;
-
-                            // Apply transient muzzle climb recoil kick (exponential recovery over ~120ms)
-                            ctrlPitch += s_recoilKickPitch;
-                            s_recoilKickPitch *= 0.82f;
-
-                            if (!s_hasPrevCtrlAim) {
-                                s_prevCtrlYaw = ctrlYaw;
-                                s_prevCtrlPitch = ctrlPitch;
-                                s_hasPrevCtrlAim = true;
-                            } else {
-                                deltaCtrlYaw = ctrlYaw - s_prevCtrlYaw;
-                                while (deltaCtrlYaw > 3.14159265f) deltaCtrlYaw -= 6.2831853f;
-                                while (deltaCtrlYaw < -3.14159265f) deltaCtrlYaw += 6.2831853f;
-
-                                deltaCtrlPitch = ctrlPitch - s_prevCtrlPitch;
-
-                                s_prevCtrlYaw = ctrlYaw;
-                                s_prevCtrlPitch = ctrlPitch;
-
-                                // Center deadzone (~2.0 degrees) to prevent micro-drift when holding weapon steady
-                                constexpr float AIM_DEADZONE = 0.035f;
-                                if (fabsf(ctrlYaw) > AIM_DEADZONE) {
-                                    pullYaw = (ctrlYaw > 0.0f) ? (ctrlYaw - AIM_DEADZONE) : (ctrlYaw + AIM_DEADZONE);
-                                }
-                                if (fabsf(ctrlPitch) > AIM_DEADZONE) {
-                                    pullPitch = (ctrlPitch > 0.0f) ? (ctrlPitch - AIM_DEADZONE) : (ctrlPitch + AIM_DEADZONE);
-                                }
-
-                                // Aim weights: only pull aim when actively aiming (ADS or two-handed stabilization or aiming trigger)
-                                isActivelyAiming = (s_isPhysicalADS || s_twoHandedStabilizationActive || isAiming) && !s_physicalBlockEngaged && !isReloading;
-                                if (isActivelyAiming) {
-                                    wPull = s_isPhysicalADS ? 0.12f : 0.08f;
-                                } else {
-                                    wPull = 0.0f;
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    s_hasPrevCtrlAim = false;
-                }
-
-                // ADR 0409: Singularity-Free Relative Quaternion Head Tracking Look & Controller Aim Deflection
-                // 1:1 Head tracking orientation in head-local space drives in-game heading and pitch smoothly
-                // without Euler gimbal lock or runaway spinning.
-                constexpr float HMD_LOOK_DEADZONE = 0.0004f; // ~0.02 deg deadband filter
-                float cleanDeltaYaw = (fabsf(deltaYaw) > HMD_LOOK_DEADZONE) ? deltaYaw : 0.0f;
-                float cleanDeltaPitch = (fabsf(deltaPitch) > HMD_LOOK_DEADZONE) ? deltaPitch : 0.0f;
-
-                constexpr float SENSITIVITY_YAW = 445.6f;
-                constexpr float SENSITIVITY_PITCH = 445.6f;
-
-                float mouseDeltaX = -cleanDeltaYaw * SENSITIVITY_YAW;
-                float mouseDeltaY = -cleanDeltaPitch * SENSITIVITY_PITCH;
-
-                if (isActivelyAiming && fabsf(wPull) > 0.001f) {
-                    constexpr float CONTROLLER_AIM_SENSITIVITY = 120.0f;
-                    mouseDeltaX += -pullYaw * wPull * CONTROLLER_AIM_SENSITIVITY;
-                    mouseDeltaY += -pullPitch * wPull * CONTROLLER_AIM_SENSITIVITY;
-                }
-
-                // GH #23: NaN/Inf guard + clamp (ADR 0409 look deltas). A corrupt
-                // quaternion/velocity must never inject runaway mouse deltas.
-                bool badLook = (mouseDeltaX != mouseDeltaX) || (mouseDeltaY != mouseDeltaY) ||
-                               (fabsf(mouseDeltaX) > 1e6f) || (fabsf(mouseDeltaY) > 1e6f);
-                if (badLook) {
-                    mouseDeltaX = 0.0f;
-                    mouseDeltaY = 0.0f;
-                    s_accumulatedLookX = 0.0f;
-                    s_accumulatedLookY = 0.0f;
-                } else {
-                    if (mouseDeltaX > 500.0f) mouseDeltaX = 500.0f;
-                    if (mouseDeltaX < -500.0f) mouseDeltaX = -500.0f;
-                    if (mouseDeltaY > 500.0f) mouseDeltaY = 500.0f;
-                    if (mouseDeltaY < -500.0f) mouseDeltaY = -500.0f;
-                }
-
-                s_accumulatedLookX += mouseDeltaX;
-                s_accumulatedLookY += mouseDeltaY;
-                if (s_accumulatedLookX > 500.0f) s_accumulatedLookX = 500.0f;
-                if (s_accumulatedLookX < -500.0f) s_accumulatedLookX = -500.0f;
-                if (s_accumulatedLookY > 500.0f) s_accumulatedLookY = 500.0f;
-                if (s_accumulatedLookY < -500.0f) s_accumulatedLookY = -500.0f;
-
-                int moveX = static_cast<int>(s_accumulatedLookX);
-                int moveY = static_cast<int>(s_accumulatedLookY);
-
-                if (moveX != 0 || moveY != 0) {
-                    s_accumulatedLookX -= moveX;
-                    s_accumulatedLookY -= moveY;
-                    SendMouseMove(moveX, moveY); // GH #33: SendInput helper
-                }
-
-            }
+    // GH #17 step 7: math delegated to UpdateHeadLook (explicit HeadLookState,
+    // no behavior change); side effects (mouse move, ADS detent haptic) stay here.
+    {
+        const RiddickVRTrackedPose& ctrlAimPose =
+            (s_twoHandedStabilizationActive && s_hasStabilizedPose) ?
+            s_stabilizedAimPose : (domCtrl.aimPose.isValid ? domCtrl.aimPose : domCtrl.gripPose); // Track C #14
+        bool lookReloading = (now - s_lastReloadGestureTime <= 1100);
+        bool lookAimHeld = s_isAimingOrBlocking || (offCtrl.trigger > 0.5f); // Track C #14
+        HeadLookIntent lookIntent = UpdateHeadLook(s_headlook, now,
+            vrState.hmdPose, ctrlAimPose,
+            recenterEdge, lookReloading, lookAimHeld,
+            s_physicalBlockEngaged, s_twoHandedStabilizationActive,
+            g_vrConfig.southpaw);
+        if (lookIntent.moveX != 0 || lookIntent.moveY != 0) {
+            SendMouseMove(lookIntent.moveX, lookIntent.moveY); // GH #33: SendInput helper
         }
-    } else {
-        s_hasPrevHmdOrientation = false;
-        s_hasPrevCtrlAim = false;
+        if (lookIntent.adsAcquired) {
+            HapticRequest(1, (0.18f), kHapticUi); // Tactile detent on sight picture acquisition
+        }
     }
 
     // 1. Adaptive Physical Crouch Detection & Dynamic Height Calibration (ADR 0004 & 0005)
@@ -1410,7 +1442,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     PostureIntent postureIntent = UpdatePosture(s_posture, vrState.hmdPose.isValid,
         vrState.hmdPose.position.y, vrState.hmdPose.linearVelocity.y,
         vrState.hmdPose.position.x, vrState.hmdPose.position.z,
-        recenterEdge, g_vrConfig.seated, g_vrConfig.seatedEyeOffset, s_lastHmdYaw);
+        recenterEdge, g_vrConfig.seated, g_vrConfig.seatedEyeOffset, s_headlook.lastHmdYaw);
     if (postureIntent.recenterCalibrated) {
         VR_LOG_INFO("Standing eye height calibrated on recenter: %.2fm", s_posture.standingEyeHeight);
     }
@@ -1898,7 +1930,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                  (vrState.rightController.grip > 0.40f && vrState.leftController.grip > 0.40f);
 
             // Vent Duct Pipe Hang & Death-From-Above Aerial Drop Ambush (ADR 0033)
-            bool isLookingDown = (s_lastHmdPitch < -0.70f); // Looking steeply downward (< -40 deg) from ledge/duct
+            bool isLookingDown = (s_headlook.lastHmdPitch < -0.70f); // Looking steeply downward (< -40 deg) from ledge/duct
             bool isDownwardPlunge = (activeVel.y < -1.10f);
 
             // Two-Handed Overhead Pipe Slam / Heavy Club Crushing Strike (ADR 0026)
@@ -2404,7 +2436,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
             // Security Guard Stun Baton Forward High-Arc Overhead Vault Drop Strike (ADR 0202)
             static DWORD s_lastVaultDropTime = 0;
-            bool isLookingDownward = (s_lastHmdPitch < -0.436f); // < -25 deg downward look
+            bool isLookingDownward = (s_headlook.lastHmdPitch < -0.436f); // < -25 deg downward look
             bool batonOverheadVault = (rightLocal.y > 0.20f &&
                                        vrState.rightController.grip > 0.60f &&
                                        vrState.rightController.trigger > 0.65f);
@@ -6890,7 +6922,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 goto combat_gesture_done;
             }
             if (isLookingDown && isDownwardPlunge) {
-                VR_LOG_INFO("Physical Gesture: DEATH-FROM-ABOVE AERIAL TAKEDOWN / DROP AMBUSH (Pitch: %.2f rad, Vy: %.2f m/s)", s_lastHmdPitch, activeVel.y);
+                VR_LOG_INFO("Physical Gesture: DEATH-FROM-ABOVE AERIAL TAKEDOWN / DROP AMBUSH (Pitch: %.2f rad, Vy: %.2f m/s)", s_headlook.lastHmdPitch, activeVel.y);
                 SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
                 SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
                 HapticRequest(1, (0.95f), kHapticFinisher); // Bone-shattering ground impact shockwave (280 Hz)
@@ -7323,7 +7355,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_hasOneHandedPose = true;
             } else {
                 float rSpeed = sqrtf(rVel.x * rVel.x + rVel.y * rVel.y + rVel.z * rVel.z);
-                float baseAlpha = s_isPhysicalADS ? 0.15f : 0.22f;
+                float baseAlpha = s_headlook.isPhysicalADS ? 0.15f : 0.22f;
                 float alpha = baseAlpha;
                 if (rSpeed > 0.08f) {
                     float factor = (rSpeed - 0.08f) / 0.35f;
@@ -7847,7 +7879,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
 
             // Overhead Vent Hatch Dual-Palm Upward Shove (ADR 0067)
-            bool hmdLookingUp = (s_lastHmdPitch > 0.45f);
+            bool hmdLookingUp = (s_headlook.lastHmdPitch > 0.45f);
             bool bothOverheadHatch = (leftLocal.y > 0.25f && rightLocal.y > 0.25f) &&
                                      (leftLocal.z > -0.25f && leftLocal.z < 0.10f && rightLocal.z > -0.25f && rightLocal.z < 0.10f);
             bool bothPalmsUp = (vrState.leftController.grip < 0.60f && vrState.rightController.grip < 0.60f);
@@ -10736,27 +10768,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             // ADR 0376: Weapon Slot Recoil & Haptic Profile Calibration
             switch (s_activeWeaponSlot) {
                 case 3: // Melee / Shivs / Ulaks
-                    s_recoilKickPitch = 0.005f;
+                    s_headlook.recoilKickPitch = 0.005f;
                     HapticRequest(1, (0.45f), kHapticUi);
                     break;
                 case 2: // Sidearm / Pistol / Tranq Gun
-                    s_recoilKickPitch = s_twoHandedStabilizationActive ? 0.012f : 0.024f;
+                    s_headlook.recoilKickPitch = s_twoHandedStabilizationActive ? 0.012f : 0.024f;
                     HapticRequest(1, (s_twoHandedStabilizationActive ? 0.50f : 0.62f), kHapticLadder);
                     if (s_twoHandedStabilizationActive) HapticRequest(0, (0.35f), kHapticUi);
                     break;
                 case 1: // Primary Shotgun / Combat Long-Arm
-                    s_recoilKickPitch = s_twoHandedStabilizationActive ? 0.028f : 0.055f;
+                    s_headlook.recoilKickPitch = s_twoHandedStabilizationActive ? 0.028f : 0.055f;
                     HapticRequest(1, (s_twoHandedStabilizationActive ? 0.80f : 0.95f), kHapticFinisher);
                     if (s_twoHandedStabilizationActive) HapticRequest(0, (0.65f), kHapticLadder);
                     break;
                 case 4: // Tactical Assault Rifle / Ordnance
-                    s_recoilKickPitch = s_twoHandedStabilizationActive ? 0.015f : 0.028f;
+                    s_headlook.recoilKickPitch = s_twoHandedStabilizationActive ? 0.015f : 0.028f;
                     HapticRequest(1, (s_twoHandedStabilizationActive ? 0.60f : 0.72f), kHapticReload);
                     if (s_twoHandedStabilizationActive) HapticRequest(0, (0.45f), kHapticUi);
                     break;
                 case 5: // Heavy Weapon / SCAR Gun / Rotary Chaingun
                 default:
-                    s_recoilKickPitch = s_twoHandedStabilizationActive ? 0.025f : 0.065f;
+                    s_headlook.recoilKickPitch = s_twoHandedStabilizationActive ? 0.025f : 0.065f;
                     HapticRequest(1, (s_twoHandedStabilizationActive ? 0.85f : 0.98f), kHapticFinisher);
                     if (s_twoHandedStabilizationActive) HapticRequest(0, (0.75f), kHapticReload);
                     break;
@@ -10792,7 +10824,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             s_lastRecoilCompTime = now;
             HapticRequest(1, (0.65f), kHapticLadder); // Mechanical bolt cycling (160 Hz)
             HapticRequest(0, (0.70f), kHapticReload);  // Heavy hydraulic chassis counter-torque (110 Hz)
-            s_recoilKickPitch *= 0.35f;       // Active kinematic muzzle climb clamp
+            s_headlook.recoilKickPitch *= 0.35f;       // Active kinematic muzzle climb clamp
         }
     }
 
@@ -10854,7 +10886,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         isClimbingActive, s_twoHandedStabilizationActive, s_physicalBlockEngaged,
         meleeFiredThisFrame,
         s_posture.isPhysicallyCrouched, s_posture.isDeepProne, s_posture.isStealthPeeking,
-        s_lastHmdDeltaYaw);
+        s_headlook.lastHmdDeltaYaw);
 
     // Left Grip -> Grab / Secondary Interact ('E') / Physical Object Throwing / Body Dragging
     // (release evaluated at moment of release, ADR 0382: Forward Trajectory Vector Gating)
@@ -11060,7 +11092,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         // Gated by grip so toggling snap/smooth turn mode does not unintentionally reset view
         if (buttonsIntent.recenterPressed) {
             vrState.shouldRecenter = true;
-            s_hasPrevHmdOrientation = false;
+            s_headlook.hasPrevHmdOrientation = false;
             if (vrState.hmdPose.isValid) {
                 s_posture.standingEyeHeight = vrState.hmdPose.position.y + (g_vrConfig.seated ? g_vrConfig.seatedEyeOffset : 0.0f); // Track C #11 + GH #37 edge
                 VR_LOG_INFO("Right Stick Click: HMD recentered and standing eye height recalibrated to %.2fm", s_posture.standingEyeHeight);
