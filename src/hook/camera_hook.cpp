@@ -1490,6 +1490,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                             vrState.rightController.trigger > 0.65f);
             bool batonHammerfistPlunge = (batonHammerfistElevated && rVel.y < -1.35f && rVel.z < -0.80f);
 
+            // Inmate Pit Brawl Double Underhook Body Lock Foot Sweep & Hip Toss (ADR 0225)
+            static DWORD s_lastHipTossTime = 0;
+            static char s_hipTossDirKey = 'A';
+            bool underhookBodyLockGrip = (handsDistSledge < 0.22f &&
+                                          leftLocal.y > -0.20f && leftLocal.y < 0.15f &&
+                                          rightLocal.y > -0.20f && rightLocal.y < 0.15f &&
+                                          vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
+            bool hipTossRotation = (underhookBodyLockGrip && fabsf(rVel.x - lVel.x) > 1.20f &&
+                                    (rVel.y > 1.05f || lVel.y > 1.05f));
+            if (hipTossRotation && (now - s_lastHipTossTime > 2000)) {
+                s_hipTossDirKey = (rVel.x > 0.0f) ? 'D' : 'A';
+            }
+
+            // Security Guard Stun Baton Lateral Two-Handed Kinetic Shield Bash & Arc Burst (ADR 0226)
+            static DWORD s_lastBatonBashTime = 0;
+            bool batonShieldBashStance = (handsDistSledge > 0.18f && handsDistSledge < 0.35f &&
+                                          fabsf(rightLocal.x - leftLocal.x) > 0.20f &&
+                                          vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
+                                          vrState.rightController.trigger > 0.65f);
+            bool batonShieldBashThrust = (batonShieldBashStance && rVel.z < -1.35f && lVel.z < -1.15f);
+
             // Inmate Pit Brawl Outside Leg Hook Sweep & Ground Knee Drop (ADR 0209)
             static DWORD s_lastOutsideLegSweepTime = 0;
             static DWORD s_outsideLegSweepHookTime = 0;
@@ -1536,7 +1557,37 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_crossBlockHoldStart = 0;
             }
 
-            if (batonHammerfistPlunge && (now - s_lastHammerfistTime > 2000)) {
+            if (batonShieldBashThrust && (now - s_lastBatonBashTime > 2000)) {
+                s_lastBatonBashTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Tactical Melee: STUN BATON KINETIC SHIELD BASH & ARC BURST EXECUTED (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
+                SendKey(VK_SPACE, true);
+                SendKey('W', true);
+                SendKey('Q', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('Q', false);
+                SendKey('W', false);
+                SendKey(VK_SPACE, false);
+                vrState.rightHapticPulse = 0.98f; // Planar electrostatic blast (340 Hz)
+                vrState.leftHapticPulse = 0.98f;  // Blunt kinetic recoil (80 Hz)
+            } else if (hipTossRotation && (now - s_lastHipTossTime > 2000)) {
+                s_lastHipTossTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL DOUBLE UNDERHOOK HIP TOSS EXECUTED (Dir: %c, DeltaVx: %.2f)", s_hipTossDirKey, rVel.x - lVel.x);
+                SendKey('W', true);
+                SendKey(s_hipTossDirKey, true);
+                SendKey('C', true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, false);
+                SendKey('C', false);
+                SendKey(s_hipTossDirKey, false);
+                SendKey('W', false);
+                vrState.leftHapticPulse = 0.90f;  // Thoracic squeeze lift tension (230 Hz)
+                vrState.rightHapticPulse = 0.98f; // Hip toss deck impact blast (40 Hz)
+            } else if (batonHammerfistPlunge && (now - s_lastHammerfistTime > 2000)) {
                 s_lastHammerfistTime = now;
                 s_lastPunchTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON KINETIC HAMMERFIST DECK STRIKE EXECUTED (Ry: %.2f, Rz: %.2f)", rVel.y, rVel.z);
@@ -4580,6 +4631,42 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 vrState.rightHapticPulse = 0.85f; // Pneumatic vent surge (95 Hz)
                 vrState.leftHapticPulse = 0.55f;  // Knurled brass thread friction (150 Hz)
+            }
+
+            // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Axial Play Vernier Caliper Micrometer Verification (ADR 0223)
+            static DWORD s_lastVernierTime = 0;
+            bool handAtHingeGuideCollar = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
+                                           vrState.leftController.grip > 0.55f);
+            bool handHoldingVernierGauge = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
+                                            vrState.rightController.trigger < 0.35f);
+            bool vernierSlideStroke = (fabsf(rVel.z) > 0.45f);
+            if (handAtHingeGuideCollar && handHoldingVernierGauge && vernierSlideStroke && (now - s_lastVernierTime > 1800)) {
+                s_lastVernierTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA TRUSS VERNIER MICROMETER VERIFIED & LOCKED (Rz: %.2f)", rVel.z);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap(VK_TAB);
+                SendKeyTap('Q');
+                vrState.rightHapticPulse = 0.90f; // Optical tolerance confirmation chime (310 Hz)
+                vrState.leftHapticPulse = 0.50f;  // Vernier slide micro-clicks (210 Hz)
+            }
+
+            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Primary Air Plenum Cleanout Manhole Cover Dog Clamp (ADR 0224)
+            static DWORD s_lastPlenumClampTime = 0;
+            bool bothHandsAtPlenumCollar = (twoHandDist > 0.20f && twoHandDist < 0.40f &&
+                                            leftLocal.z > -0.42f && leftLocal.z < -0.16f &&
+                                            leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                            vrState.leftController.grip > 0.55f && vrState.rightController.grip > 0.55f);
+            bool plenumClampPull = (lVel.y < -0.75f && rVel.y < -0.75f);
+            if (bothHandsAtPlenumCollar && plenumClampPull && (now - s_lastPlenumClampTime > 1800)) {
+                s_lastPlenumClampTime = now;
+                VR_LOG_INFO("Environmental Gesture: HYDROPONICS PLENUM DOG CLAMPS LEVERED & DOGGED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
+                SendKeyTap('E');
+                SendKeyTap('Q');
+                SendKeyTap(VK_TAB);
+                SendKeyTap(VK_RETURN);
+                vrState.rightHapticPulse = 0.95f; // Forged dog-clamp seating thuds (270 Hz)
+                vrState.leftHapticPulse = 0.95f;  // Cast-iron clamp hinge swing (130 Hz)
             }
         }
     }
