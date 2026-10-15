@@ -976,6 +976,21 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             bool underhookRisingThrust = (rVel.y > 1.15f && rVel.z < -0.90f);
             bool isRibUnderhook = lowStanceForUnderhook && reverseBladeGrip && underhookRisingThrust;
 
+            // Security Guard Stun Dart Extraction & Counter-Jab (ADR 0126)
+            static DWORD s_dartExtractedTime = 0;
+            static DWORD s_lastDartCounterJabTime = 0;
+            bool handAtChestDart = (fabsf(rightLocal.x) < 0.16f && rightLocal.y > -0.25f && rightLocal.y < 0.05f && rightLocal.z > -0.25f && rightLocal.z < -0.06f);
+            bool dartRipYank = (rVel.z > 0.70f || fabsf(rVel.x) > 0.75f);
+            if (handAtChestDart && vrState.rightController.grip > 0.65f && dartRipYank && (now - s_lastDartCounterJabTime > 1500)) {
+                if (s_dartExtractedTime == 0) {
+                    s_dartExtractedTime = now;
+                    VR_LOG_INFO("Physical Combat: STUN DART RIPPED FROM CHEST (Rz: %.2f)", rVel.z);
+                    vrState.rightHapticPulse = 0.75f; // Barbed extraction snap (280 Hz)
+                }
+            }
+            bool dartCounterJabStrike = (s_dartExtractedTime > 0 && (now - s_dartExtractedTime < 800) &&
+                                        rVel.z < -1.15f && rightLocal.y > -0.10f && rightLocal.y < 0.22f);
+
             if (isDischargingArcWave) {
                 VR_LOG_INFO("Tactical Melee: STUN BATON OVERLOAD RADIAL ARC WAVE DISCHARGED (Lx: %.2f, Rx: %.2f)", lVel.x, rVel.x);
                 SendKey('S', true);
@@ -986,6 +1001,18 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 vrState.leftHapticPulse = 0.98f;  // High-voltage electrostatic arc ring shockwave (300 Hz)
                 vrState.rightHapticPulse = 0.98f;
+            } else if (dartCounterJabStrike && (now - s_lastDartCounterJabTime > 1500)) {
+                s_lastDartCounterJabTime = now;
+                s_dartExtractedTime = 0;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: STUN DART COUNTER-JAB DISPATCHED (Rz: %.2f)", rVel.z);
+                SendKey('E', true);
+                SendKey('3', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('3', false);
+                SendKey('E', false);
+                vrState.rightHapticPulse = 0.98f; // Bio-electric discharge shockwave (320 Hz)
             } else if (isRibUnderhook && (now - s_lastRibUnderhookTime > 1500)) {
                 s_lastRibUnderhookTime = now;
                 s_lastPunchTime = now;
@@ -2142,6 +2169,24 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 vrState.leftHapticPulse = 0.60f;  // Rail acoustic ring (85 Hz)
             }
 
+            // Mining Core Pneumatic Rock Bolter Sinking & Anchor Driver (ADR 0123)
+            static DWORD s_lastRockBolterTime = 0;
+            bool leftHoldingGuideSleeve = (leftLocal.z > -0.45f && leftLocal.z < -0.16f && leftLocal.y > -0.20f && leftLocal.y < 0.25f) &&
+                                          (vrState.leftController.grip > 0.60f);
+            bool rightBolterRamming = (twoHandDist > 0.18f && twoHandDist < 0.40f) &&
+                                      (vrState.rightController.grip > 0.60f && vrState.rightController.trigger > 0.65f) &&
+                                      (rVel.z < -1.05f);
+            if (leftHoldingGuideSleeve && rightBolterRamming && (now - s_lastRockBolterTime > 2000)) {
+                s_lastRockBolterTime = now;
+                VR_LOG_INFO("Environmental Gesture: MINING CORE PNEUMATIC ROCK BOLTER SUNK & LOCKED (Rz: %.2f m/s)", rVel.z);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                vrState.leftHapticPulse = 0.65f;  // High-frequency sleeve rattle (210 Hz)
+                vrState.rightHapticPulse = 0.98f; // Heavy pneumatic percussion impact (55 Hz)
+            }
+
             // Dark Athena EVA Airlock Manual Handwheel Decompression Dogging (ADR 0078)
             static DWORD s_lastAirlockCrankTime = 0;
             static int s_airlockCrankCount = 0;
@@ -2357,6 +2402,28 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 if (lVel.y > 0.65f) vrState.leftHapticPulse = 0.80f;
             }
 
+            // Subterranean Hydroponics Misting Manifold Handwheel Siphon (ADR 0124)
+            static DWORD s_lastMistingSiphonTime = 0;
+            static int s_mistingSiphonCrankCount = 0;
+            bool handAtMistingWheel = (rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > -0.22f && rightLocal.y < 0.16f) &&
+                                      (vrState.rightController.grip > 0.55f);
+            float mistingWheelSpeed = sqrtf(rVel.x * rVel.x + rVel.z * rVel.z);
+            if (handAtMistingWheel && mistingWheelSpeed > 0.48f && (now - s_lastMistingSiphonTime > 220)) {
+                s_lastMistingSiphonTime = now;
+                s_mistingSiphonCrankCount++;
+                VR_LOG_INFO("Environmental Gesture: HYDROPONICS MISTING SIPHON HANDWHEEL REVOLUTION #%d (Speed: %.2f m/s)", s_mistingSiphonCrankCount, mistingWheelSpeed);
+                vrState.rightHapticPulse = 0.55f; // Brass thread friction detent (120 Hz)
+                if (s_mistingSiphonCrankCount >= 3) {
+                    s_mistingSiphonCrankCount = 0;
+                    VR_LOG_INFO("Environmental Gesture: MISTING MANIFOLD PRESSURE SIPHON VENTED & FLUSHED");
+                    SendKeyTap('E');
+                    SendKeyTap('Q');
+                    SendKeyTap(VK_RETURN);
+                    vrState.rightHapticPulse = 0.85f; // Pressurized aerosol purge blast (190 Hz)
+                    vrState.leftHapticPulse = 0.40f;
+                }
+            }
+
             // Dark Athena Cargo Bay Magnetic Crane Remote Pendant Snatch (ADR 0106)
             static DWORD s_lastCranePendantTime = 0;
             bool handAtOverheadPendant = ((rightLocal.y > 0.18f && rightLocal.z > -0.32f && rightLocal.z < -0.05f && vrState.rightController.grip > 0.55f) ||
@@ -2401,6 +2468,29 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_RETURN);
                 vrState.leftHapticPulse = 0.95f;  // Pyrotechnic explosive pin severance shockwave (240 Hz)
                 vrState.rightHapticPulse = 0.95f;
+            }
+
+            // Dark Athena EVA Antenna Array Dipole Polarization Alignment (ADR 0125)
+            static DWORD s_lastAntennaAlignTime = 0;
+            static int s_antennaAlignStep = 0;
+            bool bothAtAntennaGimbal = (leftLocal.y > 0.16f && rightLocal.y > 0.16f && leftLocal.z > -0.36f && leftLocal.z < -0.06f && rightLocal.z > -0.36f && rightLocal.z < -0.06f) &&
+                                       (vrState.leftController.grip > 0.55f && vrState.rightController.grip > 0.55f);
+            float antennaSweepSpeed = sqrtf((rVel.x - lVel.x) * (rVel.x - lVel.x) + (rVel.y - lVel.y) * (rVel.y - lVel.y));
+            if (bothAtAntennaGimbal && antennaSweepSpeed > 0.45f && (now - s_lastAntennaAlignTime > 300)) {
+                s_lastAntennaAlignTime = now;
+                s_antennaAlignStep++;
+                VR_LOG_INFO("Environmental Gesture: EVA ANTENNA GIMBAL POLARIZATION SWEEP STEP #%d (Speed: %.2f)", s_antennaAlignStep, antennaSweepSpeed);
+                vrState.leftHapticPulse = 0.45f + 0.15f * s_antennaAlignStep;  // Ascending harmonic hum
+                vrState.rightHapticPulse = 0.45f + 0.15f * s_antennaAlignStep;
+                if (s_antennaAlignStep >= 3) {
+                    s_antennaAlignStep = 0;
+                    VR_LOG_INFO("Environmental Gesture: EVA ANTENNA ARRAY CARRIER WAVE POLARIZATION LOCKED");
+                    SendKeyTap('E');
+                    SendKeyTap('W');
+                    SendKeyTap(VK_TAB);
+                    vrState.leftHapticPulse = 0.85f;  // Magnetic phase lock detent (90 Hz)
+                    vrState.rightHapticPulse = 0.85f;
+                }
             }
         }
     }
