@@ -812,6 +812,121 @@ def test_cluster_info_detects_surface_index_out_of_range(tmp_dir):
         os.remove(path)
 
 
+def _keys_payload(pairs, count=None):
+    """Build a ``KEYS`` payload: u32 count + length-prefixed, NUL-terminated
+    key/value strings. An entry with an empty value stores no value bytes (the
+    loader's ``value_len == 0`` case)."""
+    out = bytearray()
+    out += struct.pack("<I", len(pairs) if count is None else count)
+    for key, value in pairs:
+        kb = key.encode("latin1")
+        out += struct.pack("<I", len(kb)) + kb + b"\x00"
+        vb = value.encode("latin1")
+        out += struct.pack("<I", len(vb))
+        if vb:
+            out += vb + b"\x00"
+    return bytes(out)
+
+
+def _keys_container(payload, count=0) -> bytes:
+    stride = mos_xmd.NODE_RECORD_LEN
+    nodes = [
+        ("EXTENDEDMODEL", 0, stride * 2, 0, 0, 0),      # @0x30 -> KEYS @0x60
+        ("KEYS", 0, 0, len(payload), count, 0),         # @0x60
+    ]
+    return build_container(nodes, [b"", payload])
+
+
+def test_keys_roundtrip(tmp_dir):
+    pairs = [("MODEL", "Characters\\Aliens\\Alien2_Big.xmd"),
+             ("OGR_RENDERFLAGS", "Triangles+PerPixel"),
+             ("NMSHAPE", ""),                      # empty value -> no bytes
+             ("XTXPATH", "S:\\Models\\x.xtx")]
+    blob = _keys_container(_keys_payload(pairs))
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        assert x.has_keys()
+        kvs = x.keys()
+        assert [(kv.key, kv.value) for kv in kvs] == pairs, kvs
+        assert x.key_map()["NMSHAPE"] == ""
+        assert x.key_map()["MODEL"] == pairs[0][1]
+        assert x.validate() == [], x.validate()
+    finally:
+        os.remove(path)
+
+
+def test_keys_absent_is_ok(tmp_dir):
+    nodes = [("EXTENDEDMODEL", 0, 0, 0, 0, 0)]
+    blob = build_container(nodes, [b""])
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        assert not x.has_keys()
+        assert x.keys() == []
+        assert x.key_map() == {}
+        assert x.validate() == [], x.validate()
+    finally:
+        os.remove(path)
+
+
+def test_keys_detects_bad_tiling(tmp_dir):
+    payload = _keys_payload([("MODEL", "x.xmd")]) + b"\xAA"   # stray byte
+    blob = _keys_container(payload)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        problems = x.validate()
+        assert any("keys:" in p for p in problems), problems
+    finally:
+        os.remove(path)
+
+
+def test_keys_detects_count_overrun(tmp_dir):
+    # Declared count larger than the entries actually present -> overrun.
+    payload = _keys_payload([("MODEL", "x.xmd")], count=3)
+    blob = _keys_container(payload)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        problems = x.validate()
+        assert any("keys:" in p for p in problems), problems
+    finally:
+        os.remove(path)
+
+
+def test_keys_detects_missing_terminator(tmp_dir):
+    # Key text without its NUL terminator must be rejected: the byte after the
+    # key is 'X', not the terminating NUL the loader expects.
+    payload = struct.pack("<I", 1) + struct.pack("<I", 5) + b"MODEL" + b"X" \
+        + struct.pack("<I", 0)
+    blob = _keys_container(payload)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        problems = x.validate()
+        assert any("not NUL terminated" in p for p in problems), problems
+    finally:
+        os.remove(path)
+
+
+def test_keys_decodes_latin1_binary_key(tmp_dir):
+    # The shipped corpus has one non-printable first key (dweller.xmd); the
+    # decoder must stay tolerant and round-trip it (latin1), not crash.
+    raw = b"\x9e\x0c\x90\x0c"
+    pairs = [(raw.decode("latin1"), "Characters\\Dwellers\\dweller.xmd")]
+    blob = _keys_container(_keys_payload(pairs))
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        kv = x.keys()[0]
+        assert kv.value == pairs[0][1]
+        assert kv.key == raw.decode("latin1")
+        assert x.validate() == [], x.validate()
+    finally:
+        os.remove(path)
+
+
 def main() -> int:
     tests = (test_roundtrip, test_rejects_bad_magic,
              test_geometry_roundtrip, test_geometry_detects_index_out_of_range,
@@ -834,7 +949,11 @@ def main() -> int:
              test_cluster_info_roundtrip,
              test_cluster_info_flags_match_uv,
              test_cluster_info_detects_flags_uv_mismatch,
-             test_cluster_info_detects_surface_index_out_of_range)
+             test_cluster_info_detects_surface_index_out_of_range,
+             test_keys_roundtrip, test_keys_absent_is_ok,
+             test_keys_detects_bad_tiling, test_keys_detects_count_overrun,
+             test_keys_detects_missing_terminator,
+             test_keys_decodes_latin1_binary_key)
     with tempfile.TemporaryDirectory() as d:
         for t in tests:
             t(d)

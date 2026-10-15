@@ -21,9 +21,11 @@ skeleton is **Z-up** (spine translations increase in Z); consumers convert to
 whatever convention their renderer wants. The manifest records this.
 
 Skinning caveat: ``.xmd`` stores only bind-pose node **translations** plus the
-parent/child hierarchy. Node **rotations** are not in the file (they live in the
-``KEYS``/animation data), so a consumer that poses the mesh must supply the bone
-rotations itself. The exporter states this explicitly in the ``.skin.json``.
+parent/child hierarchy. Node **rotations** are not in the file at all — ``KEYS``
+is a string metadata map (see ADR-0421), and animation lives in the
+``.xsa``/``.xag`` animation groups (or the engine's live skeleton), so a consumer
+that poses the mesh must supply the bone rotations itself. The exporter states
+this explicitly in the ``.skin.json``.
 
 Usage::
 
@@ -47,7 +49,9 @@ from mos_xmd import (  # noqa: E402  (path injected above)
 COORDINATE_SYSTEM = "engine model space (Z-up), unconverted"
 ROTATIONS_NOTE = (
     "NODES stores bind-pose translations only; bone rotations are not in the "
-    ".xmd (they live in KEYS/animation data) and must be supplied by the caller"
+    ".xmd at all (KEYS is a string metadata map; animation lives in the "
+    ".xsa/.xag groups or the engine's live skeleton) and must be supplied by "
+    "the caller"
 )
 
 

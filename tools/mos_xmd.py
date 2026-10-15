@@ -138,6 +138,32 @@ Geometry (recovered from MXR.dll ``CTriangleMeshCore::Read`` +
                  the load-time hierarchy builder ``FUN_1001e040`` walks the tree.
                  Validated by ``--check`` on all 249 shipped skeletons.
 
+  KEYS         : a flat **string metadata map** (build provenance, texture and
+                 render options) — **not** animation. The model reader
+                 ``FUN_10083060`` calls ``CDataFile::GetNext(...,"KEYS")`` and
+                 hands the payload to ``CKeyContainer::Read``
+                 (MCCDyn.dll @0x100195d0), which reads it as (see
+                 ``docs/adr/0421-xmd-keys-metadata-map.md``)::
+
+                     u32  count
+                     count * {
+                         u32  key_len
+                         char key[key_len + 1]       (NUL terminated)
+                         u32  value_len
+                         char value[value_len + 1]   (NUL terminated;
+                                                      zero bytes when value_len == 0)
+                     }
+
+                 Every shipped model carries exactly one ``KEYS`` chunk. Across
+                 all 631 models its **54 distinct keys** are asset/texture/render
+                 metadata (``MODEL``, ``XTXPATH``, ``OGR_RENDERFLAGS``,
+                 ``NORMALMAP_*``, ``GI_*``, ``VERTEXSPLITANGLE``, ...). It holds
+                 **no bone rotations**: ``.xmd`` stores bind-pose translations
+                 only, so a consumer that poses the mesh must obtain per-bone
+                 rotations from the ``.xsa``/``.xag`` animation groups or from
+                 the engine's live skeleton. Validated by ``--check`` on all 631
+                 shipped models.
+
 This parser is intentionally dependency-free and strictly read-only: it never
 writes next to the game install. It backs the native first-person hand/arm
 investigation (docs/adr/0413) and the REA track.
@@ -491,6 +517,67 @@ def decode_bonedeform(b: bytes, off: int,
     exact = size is None or consumed == size
     return BoneDeform(n, vertices, m, influences, matrix_map_id,
                       matrix_bones, consumed, exact), consumed
+
+
+class KeyValue:
+    """One ``KEYS`` entry: a metadata key and its string value."""
+
+    __slots__ = ("key", "value")
+
+    def __init__(self, key: str, value: str):
+        self.key = key
+        self.value = value
+
+    def as_dict(self):
+        return {"key": self.key, "value": self.value}
+
+
+def decode_keys(b: bytes, off: int,
+                size: int | None = None) -> tuple[list[KeyValue], int]:
+    """Decode a ``KEYS`` metadata map at ``off``.
+
+    Mirrors ``CKeyContainer::Read`` in MCCDyn.dll (0x100195d0): a ``u32`` entry
+    count, then per entry a length-prefixed, NUL-terminated key and a
+    length-prefixed, NUL-terminated value. The reader always consumes
+    ``key_len + 1`` bytes for the key; for the value it consumes ``value_len +
+    1`` bytes **except** when ``value_len == 0``, in which case it stores an
+    empty string and reads nothing. When ``size`` is given the payload must tile
+    exactly. Returns ``(entries, consumed_size)`` and raises ``GeometryError``
+    on any structural violation (overrun, missing NUL terminator)."""
+
+    def need(p: int, n: int, what: str):
+        if p + n > len(b):
+            raise GeometryError(f"KEYS {what} at 0x{p:X} runs past EOF")
+        if size is not None and p + n > off + size:
+            raise GeometryError(f"KEYS {what} at 0x{p:X} runs past chunk")
+
+    need(off, 4, "count")
+    count = _u32(b, off)
+    p = off + 4
+    entries: list[KeyValue] = []
+    for i in range(count):
+        need(p, 4, f"key {i} length")
+        klen = _u32(b, p)
+        p += 4
+        need(p, klen + 1, f"key {i} text")
+        key = b[p:p + klen]
+        if b[p + klen] != 0:
+            raise GeometryError(f"KEYS key {i} is not NUL terminated")
+        p += klen + 1
+
+        need(p, 4, f"value {i} length")
+        vlen = _u32(b, p)
+        p += 4
+        if vlen == 0:
+            value = b""
+        else:
+            need(p, vlen + 1, f"value {i} text")
+            value = b[p:p + vlen]
+            if b[p + vlen] != 0:
+                raise GeometryError(f"KEYS value {i} is not NUL terminated")
+            p += vlen + 1
+        entries.append(KeyValue(key.decode("latin1"), value.decode("latin1")))
+    return entries, p - off
 
 
 # CLUSTER/MISCELLANEOUS (the per-cluster header that precedes VERTEXFRAMES).
@@ -919,6 +1006,15 @@ class Xmd:
             skel.max_rotation_slot() if skel else None)
         summary["skeleton_max_movement_slot"] = (
             skel.max_movement_slot() if skel else None)
+        # KEYS is a string metadata map (no rotations) — see ADR-0421.
+        keys_node = self.chunk("KEYS")
+        summary["has_keys"] = keys_node is not None
+        try:
+            kv = self.keys()
+        except GeometryError:
+            kv = []
+        summary["keys_count"] = len(kv)
+        summary["key_names"] = [e.key for e in kv]
         return summary
 
     def surface_names(self) -> list[str]:
@@ -1180,6 +1276,26 @@ class Xmd:
                         f"skeleton node {nd.index}: parent field {nd.parent} "
                         f"!= child-table parent {derived.get(nd.index)}")
                     break
+
+        # KEYS cross-check (GH #46): the metadata map must tile its chunk
+        # exactly. Keys/values are length-prefixed, NUL-terminated C strings; a
+        # consumer that poses the mesh does NOT get bone rotations here (see
+        # docs/adr/0421-xmd-keys-metadata-map.md). The exact-tiling invariant
+        # holds on all 631 shipped models; the string-content invariants do not
+        # (dweller.xmd ships one corrupt binary first key), so they are recorded
+        # as a corpus observation rather than a hard failure.
+        keys_node = self.chunk("KEYS")
+        if keys_node is not None:
+            try:
+                _entries, consumed = decode_keys(
+                    self.data, keys_node.data_offset, keys_node.data_size)
+            except GeometryError as e:
+                problems.append(f"keys: {e}")
+            else:
+                if consumed != keys_node.data_size:
+                    problems.append(
+                        f"keys: decoded {consumed} bytes but chunk is "
+                        f"{keys_node.data_size}")
         return problems
 
     # -- geometry ---------------------------------------------------------
@@ -1269,6 +1385,25 @@ class Xmd:
             self.data, nd.data_offset, nd.data_size, nd.count,
             ni.data_offset if ni is not None else None,
             ni.data_size if ni is not None else 0)
+
+    def keys(self) -> list[KeyValue]:
+        """Decode the ``KEYS`` metadata map (see :func:`decode_keys`).
+
+        Returns an empty list when the file has no ``KEYS`` chunk. This is
+        build/texture/render provenance, **not** animation."""
+        node = self.chunk("KEYS")
+        if node is None:
+            return []
+        entries, _consumed = decode_keys(
+            self.data, node.data_offset, node.data_size)
+        return entries
+
+    def key_map(self) -> dict[str, str]:
+        """The ``KEYS`` map as a plain ``{key: value}`` dict (last wins)."""
+        return {kv.key: kv.value for kv in self.keys()}
+
+    def has_keys(self) -> bool:
+        return self.chunk("KEYS") is not None
 
     def _skin_owner_map(self) -> dict[int, Node]:
         """Map each ``VERTEXFRAMES`` node offset to its sibling ``BONEDEFORM``.
@@ -1457,7 +1592,8 @@ def _printable(b: bytes, minlen: int) -> list[str]:
 def report_file(path: str, want_json: bool, with_strings: bool,
                 with_tree: bool, with_mesh: bool = False,
                 cluster: int | None = None,
-                with_skeleton: bool = False) -> dict:
+                with_skeleton: bool = False,
+                with_keys: bool = False) -> dict:
     x = Xmd(path)
     rec = {
         "path": path,
@@ -1479,6 +1615,8 @@ def report_file(path: str, want_json: bool, with_strings: bool,
     if with_skeleton:
         skel = x.skeleton()
         rec["skeleton"] = skel.as_dict(with_nodes=True) if skel else None
+    if with_keys:
+        rec["keys"] = [kv.as_dict() for kv in x.keys()]
     if cluster is not None:
         vf_nodes = [n for n in x.walk_linked() if n.name == "VERTEXFRAMES"]
         if not 0 <= cluster < len(vf_nodes):
@@ -1532,6 +1670,10 @@ def report_file(path: str, want_json: bool, with_strings: bool,
             print("      node order: "
                   + " ".join(str(i) for i in skel.node_indices[:32])
                   + (" ..." if len(skel.node_indices) > 32 else ""))
+        if with_keys:
+            print(f"   keys({g['keys_count']}):")
+            for kv in rec.get("keys", []):
+                print(f"      {kv['key']} = {kv['value']}")
         if with_mesh:
             for c in rec.get("clusters", []):
                 fr = c["frames"][-1] if c["frames"] else {}
@@ -1639,6 +1781,8 @@ def main(argv=None) -> int:
                          "VERTEXFRAMES cluster N")
     ap.add_argument("--skeleton", action="store_true",
                     help="decode and print the SKELETON NODES/NODEINDICES tree")
+    ap.add_argument("--keys", action="store_true",
+                    help="decode and print the KEYS metadata map (not animation)")
     args = ap.parse_args(argv)
 
     if args.check:
@@ -1672,7 +1816,7 @@ def main(argv=None) -> int:
         ap.error("provide a .xmd path or --inventory DIR")
     rec = report_file(args.path, args.json, args.strings, args.tree,
                       with_mesh=args.mesh, cluster=args.cluster,
-                      with_skeleton=args.skeleton)
+                      with_skeleton=args.skeleton, with_keys=args.keys)
     if args.json:
         print(json.dumps(rec, indent=2))
     return 0

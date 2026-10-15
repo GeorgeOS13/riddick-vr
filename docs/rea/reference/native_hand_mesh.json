@@ -3,7 +3,7 @@
   "generated_from": "canonical hand set from C:\\Program Files (x86)\\Starbreeze Studios\\Riddick EFBB",
   "coordinate_system": "engine model space (Z-up), unconverted",
   "rotations_available": false,
-  "rotations_note": "NODES stores bind-pose translations only; bone rotations are not in the .xmd (they live in KEYS/animation data) and must be supplied by the caller",
+  "rotations_note": "NODES stores bind-pose translations only; bone rotations are not in the .xmd at all (KEYS is a string metadata map; animation lives in the .xsa/.xag groups or the engine's live skeleton) and must be supplied by the caller",
   "meshes": [
     {
       "name": "Riddick_LeftArm",

@@ -93,9 +93,10 @@ coordinate space as `VERTEXFRAMES`).
   partial-mesh models - e.g. head/gib models that ship the full skeleton but only
   a small mesh subset, so the test is conservative against the direct reading).
 - Consequence: the skeleton exposes bind-pose **positions** in model space but no
-  rotations (those live in `KEYS`/animation), so a consumer can build bind
-  translations directly and must still supply per-bone rotations. `mos_xmd.py`
-  docstrings corrected accordingly.
+  rotations (`.xmd` stores none at all — `KEYS` is a string metadata map, see
+  ADR-0421 — so rotations come from the `.xsa`/`.xag` groups or the engine's live
+  skeleton), so a consumer can build bind translations directly and must still
+  supply per-bone rotations. `mos_xmd.py` docstrings corrected accordingly.
 
 ## Unknowns / follow-ups
 - **Bone-index space.** The `BONEDEFORM` influence byte is `< 0x80` and every

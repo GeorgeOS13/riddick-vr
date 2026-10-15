@@ -2,6 +2,55 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 11 — 2026-10-16 00:47 (scheduled loop)
+- **Unit:** GH #46 — pin the `.xmd` `KEYS` chunk to the shipped loader and prove
+  it is a **string metadata map**, not bone rotations (ADR-0419/0420 and the
+  `xmd_export`/`xmd_bake` notes assumed rotations could be read from `KEYS`).
+- Finding (real evidence, read-only; Ghidra 12.1.4 via `rea`):
+  - `MXR.dll` model reader `FUN_10083060` @`0x10083ce9` calls
+    `CDataFile::GetNext(param_1,"KEYS")` then
+    `CKeyContainer::Read((CKeyContainer*)((int)this+0x54), (CCFile*)*GetFile())`.
+    `rea xrefs MXR.dll 0x10149df0` → `{0x100823d7 (writer FUN_10081f30),
+    0x10083cbe (reader FUN_10083060)}`.
+  - `MCCDyn.dll` `CKeyContainer::Read` @`0x100195d0` (found via
+    `rea search MCCDyn.dll "KeyContainer" --kind procedures`) reads: `u32 count`;
+    per entry `u32 key_len; char key[key_len+1] (NUL); u32 value_len; char
+    value[value_len+1] (NUL)`. A **zero-length value consumes no bytes** (the
+    loader stores "" and reads nothing), so a naive parse misaligns there.
+  - Across all 631 shipped models: **631** `KEYS` chunks (one each), **4634**
+    entries, **54 distinct keys** (`XTXPATH`, `MODEL`, `OGR_RENDERFLAGS`,
+    `NORMALMAP_*`, `GI_LIGHT_*`, `VERTEXSPLITANGLE`, ...), **319** empty values,
+    **0** control chars in values, `MODEL` == file relpath in **606** (18
+    aliases, 7 absent). No rotations/quaternions anywhere → metadata only.
+  - Shipped anomaly: `Characters\Dwellers\dweller.xmd` ships one corrupt
+    non-printable first key (13 bytes); so `validate()` enforces only the exact
+    tiling invariant, not printability.
+- Change:
+  - `tools/mos_xmd.py`: `KeyValue`, `decode_keys` (mirrors
+    `CKeyContainer::Read`), `Xmd.keys()/key_map()/has_keys()`,
+    `geometry_summary` `has_keys`/`keys_count`/`key_names`, `validate()` exact
+    tiling cross-check, `--keys` CLI, module docstring.
+  - `tools/test_mos_xmd.py`: +6 `KEYS` tests (round-trip incl. empty value,
+    absent, bad tiling, count overrun, missing NUL terminator, latin1 binary
+    key).
+  - Corrected the "rotations live in `KEYS`" claim in `tools/xmd_export.py`
+    (`ROTATIONS_NOTE`), `tools/xmd_bake.py`, `docs/rea/mos-xmd-format.md`,
+    ADR-0419/0420; cross-ref added in ADR-0413. New ADR-0421.
+  - Regenerated `docs/rea/reference/native_hand_mesh.json` (`rotations_note`).
+- Evidence: `mos_xmd.py --inventory <game>\Content\Models --check` → **631/631
+  `ok`, 0 failures** (with the new `KEYS` tiling cross-check). `xmd_bake.py
+  --verify` → `native_hand_mesh_data.h` still matches a fresh bake (4 meshes /
+  1548 verts). `test_mos_xmd.py`, `test_xmd_export.py`, `test_xmd_bake.py`,
+  `validate_addresses.py`, `verify_hook_init.py`, `verify_reported_fixes.py`,
+  `scenario_tests.py --check` all PASS. No C++ changed, so `build-all.ps1`/CTest
+  were not rerun (as in Wakes 3-9).
+- Blocker: none. **Next:** the native hand draw path still needs per-bone
+  rotations, which are **not** in `.xmd`; source them from the `.xsa`/`.xag`
+  animation groups (offline, decodable) or the engine's live skeleton
+  in-process (#34/#46) — new issue opened. Then wire `VRHandRenderer` behind a
+  config flag (procedural overlay retained as fallback).
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 10 — 2026-10-16 00:31 (scheduled loop)
 - **Unit:** GH #55 → #46 — bake the decoded arm/hand geometry into a native,
   compile-in C++ asset, and pin the `.xmd` **cluster→surface** mapping that

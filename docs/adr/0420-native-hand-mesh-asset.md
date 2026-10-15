@@ -113,7 +113,8 @@ models, so only the *index* mapping is proven; the names come from the
   index mapping is proven.
 - The `MISCELLANEOUS` +0x10.. block is not decoded (looks bounds-like but does
   not match the `VERTEXFRAMES` AABB).
-- The baked asset is **bind pose** (`.xmd` stores no rotations) and is not yet
-  consumed by `VRHandRenderer`. **Next:** add the native draw path behind a
-  config flag (rigid first, then skinned once bone rotations from `KEYS` are
-  decoded), keeping the procedural overlay as the fallback.
+- The baked asset is **bind pose** (`.xmd` stores no rotations anywhere — `KEYS`
+  is a string metadata map, see ADR-0421) and is not yet consumed by
+  `VRHandRenderer`. **Next:** add the native draw path behind a config flag
+  (rigid first, then skinned once per-bone rotations are obtained from the engine
+  or the `.xsa`/`.xag` groups), keeping the procedural overlay as the fallback.

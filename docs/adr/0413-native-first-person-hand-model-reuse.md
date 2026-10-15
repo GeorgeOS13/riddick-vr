@@ -57,6 +57,8 @@ procedural renderer is not mistaken for a native result.
   34 bytes/node) + `NODEINDICES` + `KEYS`.
 - `KEYS` holds build provenance only (e.g. `MODEL=Characters\Riddick\
   Riddick_B05.xmd`, `XTXPATH=S:\PB\Models\...`), **not** readable bone names.
+  (Confirmed and decoded from the loader in **ADR-0421**; it is a string
+  key/value map and stores no rotations.)
 - Hand/arm-relevant assets confirmed: `Riddick_B05.xmd` carries
   `RIDDICK_ARMSCAR_D/S/N` surfaces; `Content/Models/Characters/Pa2/
   Pa2_Hand_01.xmd` is a standalone hand mesh.

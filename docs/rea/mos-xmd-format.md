@@ -99,4 +99,6 @@ Container-level inventory without a decompiler: `python tools/mos_xmd.py --inven
    **Done:** OBJ/JSON export = ADR-0419; baked native C++ asset + cluster→surface
    mapping = ADR-0420 (`tools/xmd_export.py`, `tools/xmd_bake.py`,
    `src/hook/native_hand_mesh.h`). Remaining: the `VRHandRenderer` draw path
-   itself (rigid first, then skinned once bone rotations from `KEYS` are known).
+   itself (rigid first, then skinned once bone rotations are known — they must
+   come from the engine or the `.xsa`/`.xag` groups, **not** `KEYS`, which is a
+   metadata map; see ADR-0421).
