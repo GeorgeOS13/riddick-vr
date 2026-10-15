@@ -149,7 +149,7 @@ The script automatically produces:
 
 ### Configuration (`riddick_vr.ini`)
 Copy `tools/riddick_vr.ini.example` to `riddick_vr.ini` next to the game EXE to tune:
-turning (snap angle, smooth speed, locomotion/dialogue deadzones), head-look gain
+turning (snap angle, smooth speed, locomotion/dialogue deadzones, InteractButton), head-look gain
 (`LookSensitivityYaw/Pitch` - calibrate: a 90-degree head turn must turn the
 view 90 degrees; scale proportionally), comfort vignette, seated mode, world
 scale, southpaw, and gesture debounce. Missing file = built-in defaults.

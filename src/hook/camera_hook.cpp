@@ -3868,6 +3868,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         s_melee.guardPoseReleaseTimer = 0;
     }
     static uint32_t s_prevButtons = 0;
+    static bool s_prevLeftYButton = false;
+    bool leftYDown = (vrState.leftController.buttons & RIDDICK_VR_BTN_Y) != 0;
+    bool leftYPressed = leftYDown && !s_prevLeftYButton;
+    s_prevLeftYButton = leftYDown;
     static bool s_wasIn3D = false;
 
     // GH #37: edge-triggered recenter consume. The host emits a single-frame
@@ -3887,7 +3891,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
     // 1. Left Controller Button Y -> Riddick Eyeshine Night Vision ('Q') (ADR 0022 / ADR 0405)
     // Completely removed legacy cinema toggle: Button Y NEVER switches POV or introduces black bars.
-    if ((btns & RIDDICK_VR_BTN_Y) && !(s_prevButtons & RIDDICK_VR_BTN_Y)) {
+    if (g_vrConfig.interactButton == 0 && leftYPressed) {
         SendKeyTap('Q');
         s_eyeshineActive = !s_eyeshineActive; // GH #35: toggle single source (published once below)
         HapticRequest(0, 0.35f, kHapticUi); // GH #32
@@ -9008,10 +9012,17 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         vrState.leftController.grip, vrState.rightController.grip);
 
     // BUTTON A -> Primary Interact / Use / Talk / Climb / Open ('E') + Dialogue Confirm (VK_RETURN)
-    if (buttonsIntent.aChanged) {
+    if (g_vrConfig.interactButton == 0 && buttonsIntent.aChanged) {
         SendAction(VRAction::Interact, buttonsIntent.aDown);
         SendAction(VRAction::Confirm, buttonsIntent.aDown);
-        if (buttonsIntent.aDown) HapticRequest(1, (0.35f), kHapticUi);
+        if (buttonsIntent.aDown) HapticRequest(1, 0.35f, kHapticUi);
+    }
+    static bool s_prevInteractYLevel = false;
+    if (g_vrConfig.interactButton == 1 && leftYDown != s_prevInteractYLevel) {
+        s_prevInteractYLevel = leftYDown;
+        SendAction(VRAction::Interact, leftYDown);
+        SendAction(VRAction::Confirm, leftYDown);
+        if (leftYDown) HapticRequest(0, 0.35f, kHapticUi);
     }
 
     // BUTTON B -> Jump (Space) & Crouch-Jump Mantle Clearance (ADR 0025)

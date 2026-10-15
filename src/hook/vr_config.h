@@ -14,6 +14,7 @@ struct VRConfig {
     float moveDeadzone = 0.22f;      // left-stick radial deadzone
     float turnDeadzone = 0.20f;      // right-stick smooth-turn deadzone
     float dialogueDeadzone = 0.50f;  // dialogue/menu analog direction threshold
+    int interactButton = 0;           // 0 = face A, 1 = left Y (repurposes Eyeshine)
     float lookSensitivityYaw = 445.6f;   // GH #45: head-look mouse gain (calibrate!)
     float lookSensitivityPitch = 445.6f; // GH #45: head-look mouse gain (calibrate!)
     int comfortEnabled = 1;          // #9 comfort vignette proxy toggle

@@ -67,7 +67,9 @@ def main():
             "tracked hands must render constrained, frame-stable two-bone arms with analog fingers")
     require(all(f"VRAction::{name}" in action_map for name in
                 ("Interact", "DialogueUp", "DialogueDown", "DialogueLeft", "DialogueRight")) and
-            "dialogueDeadzone" in config and "navMagnitude < deadzone * 0.55f" in camera and
+            "dialogueDeadzone" in config and "interactButton" in config and
+            "g_vrConfig.interactButton == 1" in camera and
+            "navMagnitude < deadzone * 0.55f" in camera and
             "ChooseDialogueDirection" in camera and "ChooseDialogueDirection(" in dialogue and
             "dialogue_navigation_tests.cpp" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8"),
             "dialogue/navigation must route through the action map with an analog deadzone")

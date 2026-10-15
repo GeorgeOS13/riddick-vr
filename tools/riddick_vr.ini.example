@@ -6,6 +6,7 @@ SnapAngleDeg=45        ; snap-turn step (15-90)
 SmoothTurnSpeed=20.0   ; smooth-turn curve gain (1-60)
 TurnDeadzone=0.20      ; right-stick smooth deadzone (0.05-0.60)
 DialogueDeadzone=0.50  ; menu/dialogue direction deadzone (0.15-0.80)
+InteractButton=0       ; 0 = face A, 1 = left Y (repurposes Eyeshine)
 ; --- Head look (GH #45) ---
 ; Gain matching HMD degrees to engine degrees. CALIBRATION: stand in-game,
 ; turn your head exactly 90 deg right. If the view turned MORE, lower both
