@@ -290,7 +290,7 @@ void WINAPI OpenGLProxy::Hook_glLoadMatrixf(const GLfloat *m) {
             s_has3DGameplayProjection = true;
         }
 
-        if (isPerspective && !StereoRenderer::Instance().IsCinemaMode()) {
+        if (isPerspective) {
             // ADR 0403: Match 3D gameplay perspective projection aspect ratio to the VR eye buffer
             // Prevents geometry distortion and horizontal squishing in VR headset lenses
             uint32_t eyeW = StereoRenderer::Instance().GetEyeWidth();

@@ -378,6 +378,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 float pullPitch = 0.0f;
                 float wAim = 0.0f;
                 float wPull = 0.0f;
+                bool isActivelyAiming = false;
 
                 bool isReloading = (now - s_lastReloadGestureTime <= 1100);
                 bool isAiming = s_isAimingOrBlocking || (vrState.leftController.trigger > 0.5f);
@@ -490,7 +491,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                 }
 
                                 // Aim weights: only pull aim when actively aiming (ADS or two-handed stabilization or aiming trigger)
-                                bool isActivelyAiming = (s_isPhysicalADS || s_twoHandedStabilizationActive || isAiming) && !s_physicalBlockEngaged && !isReloading;
+                                isActivelyAiming = (s_isPhysicalADS || s_twoHandedStabilizationActive || isAiming) && !s_physicalBlockEngaged && !isReloading;
                                 if (isActivelyAiming) {
                                     wPull = s_isPhysicalADS ? 0.12f : 0.08f;
                                 } else {
@@ -503,20 +504,19 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     s_hasPrevCtrlAim = false;
                 }
 
-                // Pure 1:1 Head Tracking Look: map HMD yaw and pitch directly to in-game camera
-                // Center deadzone (~0.06 deg) filters high-frequency sensor noise / tremor
-                constexpr float HMD_LOOK_DEADZONE = 0.0010f;
-                float cleanDeltaYaw = (fabsf(deltaYaw) > HMD_LOOK_DEADZONE) ? deltaYaw : 0.0f;
-                float cleanDeltaPitch = (fabsf(deltaPitch) > HMD_LOOK_DEADZONE) ? deltaPitch : 0.0f;
+                // ADR 0408: Decoupled Head Tracking Look & Controller Aim Deflection
+                // Head orientation is rendered directly in 6DOF by OpenXR view matrices via StabilizeViewMatrix.
+                // NEVER inject HMD deltaYaw or deltaPitch into mouse_event, which creates double rotation
+                // and runaway spinning. mouse_event is reserved strictly for thumbstick turning and subtle
+                // controller aim deflection during active ADS/aiming.
+                float mouseDeltaX = 0.0f;
+                float mouseDeltaY = 0.0f;
 
-                // Motion controllers never steer the head camera (ZERO controller aim pull):
-                constexpr float SENSITIVITY_YAW = 445.6f;
-                constexpr float SENSITIVITY_PITCH = 445.6f;
-
-                float mouseDeltaX = -cleanDeltaYaw * SENSITIVITY_YAW;
-                float mouseDeltaY = -cleanDeltaPitch * SENSITIVITY_PITCH;
-
-                // Pure 1:1 head tracking look is uncompromised during ADS/aiming (aim stabilization is applied to controller aim pose)
+                if (isActivelyAiming && fabsf(wPull) > 0.001f) {
+                    constexpr float CONTROLLER_AIM_SENSITIVITY = 120.0f;
+                    mouseDeltaX = -pullYaw * wPull * CONTROLLER_AIM_SENSITIVITY;
+                    mouseDeltaY = -pullPitch * wPull * CONTROLLER_AIM_SENSITIVITY;
+                }
 
                 s_accumulatedLookX += mouseDeltaX;
                 s_accumulatedLookY += mouseDeltaY;
@@ -714,12 +714,12 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     static bool s_ladderClimbDown = false;
     static DWORD s_lastMantleTime = 0;
 
-    // Grab initiate: hand raised in front of chest/chin (Y > 0.15m, Z in [-0.55, -0.16]) and grip squeezed (> 0.5f)
+    // Grab initiate: hand raised overhead (Y > 0.32m, Z in [-0.55, -0.16]) and grip squeezed (> 0.5f)
     // ADR 0381: Spatial forward-cone depth filtering decouples ladder grabs from over-shoulder weapon drawing!
     // ADR 0386: Capacitive sensor disambiguation: ensure fingers are curled around rung rather than resting
     if (!s_leftHoldingRung) {
         bool leftTouchEngaged = (vrState.leftController.buttons & RIDDICK_VR_TOUCH_TRIGGER) != 0 || vrState.leftController.trigger > 0.20f;
-        if (leftLocal.y > 0.15f && (leftLocal.z >= -0.55f && leftLocal.z <= -0.16f) && vrState.leftController.grip > 0.5f && leftTouchEngaged) {
+        if (leftLocal.y > 0.32f && (leftLocal.z >= -0.55f && leftLocal.z <= -0.16f) && vrState.leftController.grip > 0.5f && leftTouchEngaged && !s_physicalBlockEngaged) {
             s_leftHoldingRung = true;
             VR_LOG_INFO("Physical Gesture: LADDER RUNG GRABBED (Left hand, Y: %.2fm, Z: %.2fm)", leftLocal.y, leftLocal.z);
             vrState.leftHapticPulse = 0.35f;
@@ -733,7 +733,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
     if (!s_rightHoldingRung) {
         bool rightTouchEngaged = (vrState.rightController.buttons & RIDDICK_VR_TOUCH_TRIGGER) != 0 || vrState.rightController.trigger > 0.20f;
-        if (rightLocal.y > 0.15f && (rightLocal.z >= -0.55f && rightLocal.z <= -0.16f) && vrState.rightController.grip > 0.5f && rightTouchEngaged) {
+        if (rightLocal.y > 0.32f && (rightLocal.z >= -0.55f && rightLocal.z <= -0.16f) && vrState.rightController.grip > 0.5f && rightTouchEngaged && !s_physicalBlockEngaged) {
             s_rightHoldingRung = true;
             VR_LOG_INFO("Physical Gesture: LADDER RUNG GRABBED (Right hand, Y: %.2fm, Z: %.2fm)", rightLocal.y, rightLocal.z);
             vrState.rightHapticPulse = 0.35f;
@@ -6737,9 +6737,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // - Hand at Ankle Boot (Y < -0.65m, grip > 0.50) while Crouched: Stashes / Retrieves Contraband (ADR 0038)
     static DWORD s_lastHolsterTime = 0;
     static int s_activeWeaponSlot = 1; // ADR 0376: 1: Primary, 2: Sidearm, 3: Melee/Blades, 4: Ordnance, 5: Heavy
-    if (!isClimbingActive && !s_physicalBlockEngaged && !s_twoHandedStabilizationActive && (now - s_lastHolsterTime > 900)) {
+    bool inGuardPose = (leftLocal.z < -0.10f && rightLocal.z < -0.10f && leftLocal.y > -0.38f && rightLocal.y > -0.38f && fabsf(leftLocal.x - rightLocal.x) < 0.50f);
+    if (!isClimbingActive && !s_physicalBlockEngaged && !inGuardPose && !s_twoHandedStabilizationActive && (now - s_lastHolsterTime > 900)) {
         bool rightOverShoulder = (rightLocal.y > 0.15f && rightLocal.z > -0.05f && vrState.rightController.grip > 0.50f);
-        bool rightAtChest = (rightLocal.y >= -0.22f && rightLocal.y <= 0.05f && fabsf(rightLocal.x) < 0.14f && rightLocal.z > -0.25f && vrState.rightController.grip > 0.50f);
+        bool rightAtChest = (rightLocal.y >= -0.45f && rightLocal.y <= -0.22f && fabsf(rightLocal.x) < 0.14f && rightLocal.z > -0.16f && vrState.rightController.grip > 0.50f);
         bool rightLowSpine = (rightLocal.y < -0.30f && rightLocal.z > -0.05f && fabsf(rightLocal.x) < 0.15f && vrState.rightController.grip > 0.50f);
         bool rightAtHip = (rightLocal.y < -0.32f && rightLocal.x > 0.14f && vrState.rightController.grip > 0.50f);
         bool leftAtHip = (leftLocal.y < -0.32f && leftLocal.x < -0.14f && vrState.leftController.grip > 0.50f);

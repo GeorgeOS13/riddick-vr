@@ -419,10 +419,16 @@ void StereoRenderer::UnlockSharedTextures() {
 }
 
 void StereoRenderer::OnViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
-    // Only capture full-screen game window viewports, not small shadow map or reflection viewports
-    if (x == 0 && y == 0 && width >= 640 && height >= 480) {
-        m_windowWidth = width;
-        m_windowHeight = height;
+    // Capture the primary game viewport, including pillarbox/letterbox active regions
+    if (width >= 640 && height >= 480) {
+        m_viewportX = x;
+        m_viewportY = y;
+        m_viewportWidth = width;
+        m_viewportHeight = height;
+        if (x == 0 && y == 0) {
+            m_windowWidth = width;
+            m_windowHeight = height;
+        }
     }
 }
 
@@ -491,8 +497,17 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
 
         // 2. Capture the game's rendered backbuffer and blit into Left & Right eye FBOs
         if (OpenGLProxy::real_glBindFramebuffer && OpenGLProxy::glBlitFramebuffer) {
+            GLint srcX = 0;
+            GLint srcY = 0;
             GLint srcW = (m_windowWidth > 0) ? m_windowWidth : 1920;
             GLint srcH = (m_windowHeight > 0) ? m_windowHeight : 1080;
+
+            if (m_viewportWidth >= 640 && m_viewportHeight >= 480) {
+                srcX = m_viewportX;
+                srcY = m_viewportY;
+                srcW = m_viewportWidth;
+                srcH = m_viewportHeight;
+            }
 
             GLint dstX = 0;
             GLint dstY = 0;
@@ -534,7 +549,7 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
             // this fills the entire buffer with 100% immersion and ZERO black bars.
             OpenGLProxy::real_glBindFramebuffer(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, m_leftFbo);
             OpenGLProxy::glBlitFramebuffer(
-                0, srcH, srcW, 0,
+                srcX, srcY + srcH, srcX + srcW, srcY,
                 dstX, dstY, dstX + dstW, dstY + dstH,
                 GL_COLOR_BUFFER_BIT, GL_LINEAR
             );
@@ -545,7 +560,7 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
             // Blit into Right Eye FBO (vertically flipped: srcY goes from srcH down to 0)
             OpenGLProxy::real_glBindFramebuffer(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, m_rightFbo);
             OpenGLProxy::glBlitFramebuffer(
-                0, srcH, srcW, 0,
+                srcX, srcY + srcH, srcX + srcW, srcY,
                 dstX, dstY, dstX + dstW, dstY + dstH,
                 GL_COLOR_BUFFER_BIT, GL_LINEAR
             );

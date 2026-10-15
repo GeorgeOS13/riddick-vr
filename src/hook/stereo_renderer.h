@@ -91,9 +91,13 @@ private:
     // HUD virtual depth offset in normalized coordinates
     float m_hudConvergenceOffset = 0.015f; // ~1.5% screen offset = ~1.8m convergence
 
-    // Window dimensions for spectator mirror
+    // Window dimensions and viewport origin for spectator mirror and backbuffer blit
     GLsizei m_windowWidth = 1920;
     GLsizei m_windowHeight = 1080;
+    GLint m_viewportX = 0;
+    GLint m_viewportY = 0;
+    GLsizei m_viewportWidth = 0;
+    GLsizei m_viewportHeight = 0;
 
     IpcBridgeClient m_ipcClient;
     RiddickVRSharedState m_sharedState{};
