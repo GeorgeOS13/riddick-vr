@@ -1310,11 +1310,12 @@ static HeadLookIntent UpdateHeadLook(HeadLookState& st, DWORD now,
     float cleanDeltaYaw = (fabsf(deltaYaw) > HMD_LOOK_DEADZONE) ? deltaYaw : 0.0f;
     float cleanDeltaPitch = (fabsf(deltaPitch) > HMD_LOOK_DEADZONE) ? deltaPitch : 0.0f;
 
-    constexpr float SENSITIVITY_YAW = 445.6f;
-    constexpr float SENSITIVITY_PITCH = 445.6f;
+    constexpr float SENSITIVITY_YAW = 445.6f;   // fallback; live value from INI below
+    constexpr float SENSITIVITY_PITCH = 445.6f; // fallback; live value from INI below
 
-    float mouseDeltaX = -cleanDeltaYaw * SENSITIVITY_YAW;
-    float mouseDeltaY = -cleanDeltaPitch * SENSITIVITY_PITCH;
+    float mouseDeltaX = -cleanDeltaYaw * g_vrConfig.lookSensitivityYaw;   // GH #45: INI-calibrated gain
+    float mouseDeltaY = -cleanDeltaPitch * g_vrConfig.lookSensitivityPitch; // (default preserves legacy feel)
+    (void)SENSITIVITY_YAW; (void)SENSITIVITY_PITCH;
 
     if (isActivelyAiming && fabsf(wPull) > 0.001f) {
         constexpr float CONTROLLER_AIM_SENSITIVITY = 120.0f;
@@ -3368,6 +3369,10 @@ struct LadderState {
     bool climbUp = false;
     bool climbDown = false;
     DWORD lastMantleTime = 0;
+    // GH #47: mantle grace window - first pull opens a 180ms window so the
+    // second hand may land slightly late instead of requiring simultaneity.
+    DWORD firstPullTime = 0;
+    bool firstPullLeft = false;
 };
 static LadderState s_ladder;
 
@@ -3379,6 +3384,8 @@ struct LadderIntent {
     float rightGrabY = 0.0f;
     float rightGrabZ = 0.0f;
     bool mantle = false;       // edge: log + SPACE tap + 0.6 haptics
+    bool mantleWindow = false;   // level: first pull down, waiting for second (ready cue)
+    bool mantleWindowOpened = false; // edge: window just opened (single ready double-pulse)
     bool climbUp = false;      // level: mirrors st (drives 'W')
     bool climbDown = false;    // level: mirrors st (drives 'S')
     bool lPullDown = false;
@@ -3437,11 +3444,35 @@ static LadderIntent UpdateLadder(LadderState& st, DWORD now,
     out.lPushUp = st.leftHoldingRung && (lVelY > 0.25f);
     out.rPushUp = st.rightHoldingRung && (rVelY > 0.25f);
 
-    // Two-handed mantle / ledge pull: both hands pulling down simultaneously.
-    if (out.lPullDown && out.rPullDown && (now - st.lastMantleTime > 1000)) {
-        st.lastMantleTime = now;
-        out.mantle = true;
+    // Two-handed mantle / ledge pull (GH #47: 180ms grace window for the
+    // second hand - pull down with one hand, then the other, to mantle).
+    constexpr DWORD MANTLE_GRACE_MS = 180;
+    if ((now - st.lastMantleTime > 1000)) {
+        if (out.lPullDown && out.rPullDown) {
+            st.lastMantleTime = now;
+            st.firstPullTime = 0;
+            out.mantle = true;
+        } else if (out.lPullDown || out.rPullDown) {
+            bool thisLeft = out.lPullDown;
+            if (st.firstPullTime == 0 || (now - st.firstPullTime > MANTLE_GRACE_MS) ||
+                st.firstPullLeft == thisLeft) {
+                // (re)open window on first pull or side change
+                if (st.firstPullTime == 0) out.mantleWindowOpened = true;
+                st.firstPullTime = now;
+                st.firstPullLeft = thisLeft;
+            } else if (st.firstPullLeft != thisLeft) {
+                // Second hand landed inside the grace window.
+                st.lastMantleTime = now;
+                st.firstPullTime = 0;
+                out.mantle = true;
+            }
+        } else if (st.firstPullTime != 0 && (now - st.firstPullTime > MANTLE_GRACE_MS)) {
+            st.firstPullTime = 0; // window expired with no second hand
+        }
+    } else {
+        st.firstPullTime = 0;
     }
+    out.mantleWindow = (st.firstPullTime != 0);
 
     // Pull-to-climb motion translation (alternating hands = hand-over-hand).
     st.climbUp = (out.lPullDown || out.rPullDown);
@@ -3793,7 +3824,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             recenterEdge, lookReloading, lookAimHeld,
             s_physicalBlockEngaged, s_twoHandedStabilizationActive,
             g_vrConfig.southpaw);
-        if (lookIntent.moveX != 0 || lookIntent.moveY != 0) {
+        // GH #45: never inject look deltas while menus/cinematics own the
+        // screen (engine ignores them there; queue flooding only adds lag).
+        if ((lookIntent.moveX != 0 || lookIntent.moveY != 0) && OpenGLProxy::Has3DThisFrame()) {
             SendMouseMove(lookIntent.moveX, lookIntent.moveY); // GH #33: SendInput helper
         }
         if (lookIntent.adsAcquired) {
@@ -3905,7 +3938,14 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         SendKeyTap('E');
     }
 
-    // Two-Handed Mantle / Ledge Pull: Both hands pulling downward simultaneously
+    // Two-Handed Mantle / Ledge Pull (GH #47): pull down with one hand, then
+    // the other within the grace window (or both at once). The ready cue
+    // below teaches the sequence: first pull -> double-pulse + log hint.
+    if (ladderIntent.mantleWindowOpened) {
+        VR_LOG_INFO("Climb Hint: MANTLE READY - pull DOWN with your other hand now!");
+        HapticRequest(0, 0.30f, kHapticUi);
+        HapticRequest(1, 0.30f, kHapticUi);
+    }
     if (ladderIntent.mantle) {
         VR_LOG_INFO("Physical Gesture: TWO-HANDED MANTLE / LEDGE PULL executed");
         SendKeyTap(VK_SPACE);

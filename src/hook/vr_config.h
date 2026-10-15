@@ -13,6 +13,8 @@ struct VRConfig {
     float smoothTurnSpeed = 20.0f;   // smooth-turn curve gain
     float moveDeadzone = 0.22f;      // left-stick radial deadzone
     float turnDeadzone = 0.20f;      // right-stick smooth-turn deadzone
+    float lookSensitivityYaw = 445.6f;   // GH #45: head-look mouse gain (calibrate!)
+    float lookSensitivityPitch = 445.6f; // GH #45: head-look mouse gain (calibrate!)
     int comfortEnabled = 1;          // #9 comfort vignette proxy toggle
     float comfortStrength = 1.0f;    // vignette proxy gain multiplier
     float comfortMaxDim = 0.45f;     // GH #9: peripheral dimming ceiling (0=off, max alpha)

@@ -1,0 +1,28 @@
+; Riddick VR settings. Copy to riddick_vr.ini next to opengl32.dll / DarkAthena.exe
+; (game folder or dist/). Missing file = built-in defaults. [VR] section only.
+[VR]
+; --- Turning ---
+SnapAngleDeg=45        ; snap-turn step (15-90)
+SmoothTurnSpeed=20.0   ; smooth-turn curve gain (1-60)
+TurnDeadzone=0.20      ; right-stick smooth deadzone (0.05-0.60)
+; --- Head look (GH #45) ---
+; Gain matching HMD degrees to engine degrees. CALIBRATION: stand in-game,
+; turn your head exactly 90 deg right. If the view turned MORE, lower both
+; values proportionally (e.g. turned ~100 deg -> multiply by 0.9). If LESS,
+; raise them. Repeat for pitch (nod 45 deg). Defaults = legacy feel.
+LookSensitivityYaw=445.6    ; (50-2000)
+LookSensitivityPitch=445.6  ; (50-2000)
+; --- Locomotion ---
+MoveDeadzone=0.22      ; left-stick radial deadzone (0.05-0.60)
+; --- Comfort (#9) ---
+ComfortEnabled=1       ; locomotion vignette proxy on/off
+ComfortStrength=1.0    ; vignette gain (0-2)
+ComfortMaxDim=0.45     ; peripheral dimming ceiling, 0 disables (0-1)
+; --- Body (#11, #13, #14) ---
+Seated=0               ; seated play: height compensation, no auto-crouch
+SeatedEyeOffset=0.15   ; seated eye height compensation meters (0-0.60)
+StandingEyeHeight=0.0  ; baseline override meters (0 = auto-calibrate)
+WorldScale=1.0         ; tracking-space scale (0.5-2.0)
+Southpaw=0             ; left-dominant mapping
+; --- Gestures (#15) ---
+GestureDebounceMs=180  ; per-action debounce (120-250)
