@@ -36,7 +36,42 @@ investigation (docs/adr/0413) and the REA track.
 
 Usage:
     python tools/mos_xmd.py <file.xmd> [--json] [--strings] [--tree]
+    python tools/mos_xmd.py <file.xmd> --mesh [--cluster N] [--json]
     python tools/mos_xmd.py --inventory <root-dir> [--json]
+    python tools/mos_xmd.py <file.xmd> --check
+    python tools/mos_xmd.py --inventory <root-dir> --check
+
+Geometry (recovered from MXR.dll ``CTriangleMeshCore::Read`` +
+``CVertexFrame::Read`` + ``CVertexFrame204::Read``, see
+``docs/adr/0415-xmd-vertex-frame-geometry.md``):
+
+  VERTEXFRAMES : ``u32 frame_count`` (only when the model version is > 0x100),
+                 then ``frame_count`` frames. Each decoded frame (version 0x204,
+                 used by every shipped model) is::
+
+                     u32  version            = 0x204
+                     u32  header20           (unknown; likely a scale/flag)
+                     f32  bounds_min[3]      (quantization lower bound)
+                     f32  bounds_max[3]      (quantization upper bound)
+                     f32  aux[3]             (third header vector, unread by paths)
+                     u32  header30           (unknown; likely a scale/flag)
+                     u32  vertex_count  n
+                     u16  positions[n][3]    (x,y,z in 0..65535)
+                     s8   normals[n][3]      (components in -127..127)
+
+                 positions are dequantized with
+                 ``min + q * (max - min) / 65535`` and normals with
+                 ``c / 127`` re-normalized (exactly as the loader does).
+
+  TRIANGLES    : ``u32 triangle_count`` then ``triangle_count`` *u16* triplets.
+
+  Clusters     : one ``VERTEXFRAMES``/``TRIANGLES`` pair per submesh, in
+                 traversal order; every index must be < the paired frame's
+                 vertex count (validated by ``--check``).
+
+This parser is intentionally dependency-free and strictly read-only: it never
+writes next to the game install. It backs the native first-person hand/arm
+investigation (docs/adr/0413) and the REA track.
 """
 
 from __future__ import annotations
@@ -56,9 +91,124 @@ NAME_RE = re.compile(rb"^[A-Za-z][A-Za-z0-9_ ]{1,23}$")
 # Chunks whose payload we know how to sanity-check (first u32 == element count).
 COUNT_PREFIX_CHUNKS = {"TRIANGLES", "PRIMITIVES", "EDGES", "EDGETRIS", "TRIEDGES"}
 
+# VERTEXFRAMES payload versions (recovered from MXR.dll, see ADR-0415). Every
+# shipped model uses 0x204 (quantized u16 positions + i8 normals); 0x202/0x203
+# share its shape but store raw (unpacked) records, and are implemented from the
+# same decompilation though no shipped asset exercises them.
+VERTEX_FRAME_VERSIONS = (0x200, 0x201, 0x202, 0x203, 0x204)
+# Quantized-position readers we can fully decode from the decompiled loader.
+QUANTIZED_VF_VERSIONS = (0x202, 0x203, 0x204)
+# 1/65535: u16 position component -> fraction of the bounding-box extent.
+_Q16_SCALE = 1.0 / 65535.0
+# 1/127: i8 normal component scale (re-normalized after decode).
+_I8_NORMAL_SCALE = 1.0 / 127.0
+
 
 class XmdError(Exception):
     pass
+
+
+class GeometryError(XmdError):
+    pass
+
+
+class VertexFrame:
+    """One decoded ``VERTEXFRAMES`` frame (a static pose / blend target)."""
+
+    __slots__ = ("version", "count", "bounds_min", "bounds_max", "aux",
+                 "header_extra", "positions", "normals", "size", "exact")
+
+    def __init__(self, version, count, bounds_min, bounds_max, aux,
+                 header_extra, positions, normals, size, exact):
+        self.version = version
+        self.count = count
+        self.bounds_min = bounds_min
+        self.bounds_max = bounds_max
+        self.aux = aux
+        self.header_extra = header_extra
+        self.positions = positions
+        self.normals = normals
+        self.size = size
+        self.exact = exact
+
+    def as_dict(self, with_geometry=False):
+        d = {
+            "version": self.version,
+            "vertex_count": self.count,
+            "bounds_min": list(self.bounds_min),
+            "bounds_max": list(self.bounds_max),
+            "size": self.size,
+            "exact": self.exact,
+        }
+        if with_geometry:
+            d["positions"] = [list(p) for p in self.positions]
+            d["normals"] = [list(n) for n in self.normals]
+        return d
+
+
+def decode_vertex_frame(b: bytes, off: int) -> tuple[VertexFrame, int]:
+    """Decode one ``VERTEXFRAMES`` frame at ``off``.
+
+    Returns ``(frame, size)`` where ``size`` is the frame's byte length. Raises
+    ``GeometryError`` for unsupported versions (0x200/0x201 store unquantized
+    float data and are not exercised by any shipped asset)."""
+    ver = _u32(b, off)
+    if ver not in QUANTIZED_VF_VERSIONS:
+        raise GeometryError(
+            f"VERTEXFRAMES version 0x{ver:04x} not decodable (only 0x202-0x204)")
+    p = off + 4
+    extra20 = _u32(b, p)
+    p += 4
+    mn = struct.unpack_from("<3f", b, p)
+    p += 12
+    mx = struct.unpack_from("<3f", b, p)
+    p += 12
+    extra = None
+    if ver == 0x202:
+        extra = _u32(b, p)
+        p += 4
+    aux = struct.unpack_from("<3f", b, p)
+    p += 12
+    extra30 = _u32(b, p)
+    p += 4
+    n = _u32(b, p)
+    p += 4
+    pos_end = p + n * 6
+    nrm_end = pos_end + n * 3
+    size = nrm_end - off
+    if nrm_end > len(b):
+        raise GeometryError(
+            f"VERTEXFRAMES frame at 0x{off:X} runs past EOF "
+            f"(needs {size} bytes)")
+    sx = (mx[0] - mn[0]) * _Q16_SCALE
+    sy = (mx[1] - mn[1]) * _Q16_SCALE
+    sz = (mx[2] - mn[2]) * _Q16_SCALE
+    positions = []
+    for i in range(n):
+        qx, qy, qz = struct.unpack_from("<3H", b, p + i * 6)
+        positions.append((mn[0] + qx * sx, mn[1] + qy * sy, mn[2] + qz * sz))
+    normals = []
+    for i in range(n):
+        qx, qy, qz = struct.unpack_from("<3b", b, pos_end + i * 3)
+        vx = qx * _I8_NORMAL_SCALE
+        vy = qy * _I8_NORMAL_SCALE
+        vz = qz * _I8_NORMAL_SCALE
+        ln = (vx * vx + vy * vy + vz * vz) ** 0.5
+        normals.append((0.0, 0.0, 0.0) if ln == 0.0
+                       else (vx / ln, vy / ln, vz / ln))
+    frame = VertexFrame(ver, n, mn, mx, aux, (extra20, extra, extra30),
+                        positions, normals, size, exact=True)
+    return frame, size
+
+
+def decode_triangles(b: bytes, off: int, size: int) -> tuple[int, tuple[int, ...]]:
+    """Decode a ``TRIANGLES`` payload: ``u32 count`` + ``count`` *u16* triplets."""
+    cnt = _u32(b, off)
+    need = 4 + cnt * 3 * 2
+    if need != size:
+        raise GeometryError(
+            f"TRIANGLES size {size} != 4 + {cnt}*6 = {need}")
+    return cnt, struct.unpack_from("<%dH" % (cnt * 3), b, off + 4)
 
 
 def _u32(b: bytes, off: int) -> int:
@@ -173,6 +323,11 @@ class Xmd:
             declared = _u32(self.data, tri.data_offset)
             summary["triangle_count"] = declared
             summary["triangle_count_matches_header"] = (declared == tri.count)
+        dec = self.geometry_stats()
+        summary["clusters"] = dec["cluster_count"]
+        summary["decoded_vertices"] = dec["decoded_vertices"]
+        summary["decoded_triangles"] = dec["decoded_triangles"]
+        summary["bad_clusters"] = dec["bad_clusters"]
         return summary
 
     def surface_names(self) -> list[str]:
@@ -279,7 +434,122 @@ class Xmd:
         if regions and prev != len(self.data):
             problems.append(
                 f"payloads end at 0x{prev:X}, file is 0x{len(self.data):X}")
+
+        # Geometry cross-check (GH #55): each decoded VERTEXFRAMES/TRIANGLES
+        # cluster pair must agree - triangle indices inside the vertex range.
+        for c in self.cluster_meshes():
+            if c.get("error_kind") == "corrupt":
+                problems.append(f"cluster {c['index']}: {c['error']}")
+            elif c["index_in_range"] is False:
+                problems.append(
+                    f"cluster {c['index']}: triangle index {c['max_index']} "
+                    f">= decoded vertex count")
         return problems
+
+    # -- geometry ---------------------------------------------------------
+    def vertex_frames(self, node: Node | None = None) -> list[VertexFrame]:
+        """Decode the frames of one ``VERTEXFRAMES`` chunk.
+
+        Mirrors ``CTriangleMeshCore::Read`` + ``CVertexFrame::Read`` in MXR.dll:
+        when the model version is > 0x100 a single ``u32`` frame-count word is
+        read before the per-frame payloads, so a leading word that is not itself
+        a known frame version is treated as that header."""
+        if node is None:
+            node = self.chunk("VERTEXFRAMES")
+        if node is None:
+            return []
+        b = self.data
+        off, end = node.data_offset, node.data_offset + node.data_size
+        if _u32(b, off) not in VERTEX_FRAME_VERSIONS:
+            off += 4  # per-model frame-count word (model version > 0x100)
+        frames: list[VertexFrame] = []
+        while off < end:
+            frame, size = decode_vertex_frame(b, off)
+            if size <= 0 or off + size > end:
+                raise GeometryError(
+                    f"{node.name}@0x{node.offset:X}: frame tiling overflow")
+            frames.append(frame)
+            off += size
+        if off != end:
+            raise GeometryError(
+                f"{node.name}@0x{node.offset:X}: frames end at 0x{off:X}, "
+                f"chunk ends at 0x{end:X}")
+        return frames
+
+    def triangle_indices(self, node: Node | None = None):
+        if node is None:
+            node = self.chunk("TRIANGLES")
+        if node is None:
+            return 0, ()
+        return decode_triangles(self.data, node.data_offset, node.data_size)
+
+    def cluster_meshes(self) -> list[dict]:
+        """Pair ``VERTEXFRAMES`` and ``TRIANGLES`` chunks in traversal order.
+
+        Each model stores one ``VERTEXFRAMES``/``TRIANGLES`` pair per cluster
+        (submesh). Decoding geometrically cross-checks the two: every triangle
+        index must fall inside the paired frame's vertex range."""
+        order = self.walk_linked()
+        vf_nodes = [n for n in order if n.name == "VERTEXFRAMES"]
+        tri_nodes = [n for n in order if n.name == "TRIANGLES"]
+        clusters = []
+        for i, vn in enumerate(vf_nodes):
+            entry: dict = {
+                "index": i,
+                "vertex_chunk": vn.as_dict(),
+                "frames": [],
+                "triangle_chunk": None,
+                "triangle_count": None,
+                "max_index": None,
+                "index_in_range": None,
+                "error": None,
+                "error_kind": None,
+            }
+            try:
+                frames = self.vertex_frames(vn)
+                entry["frames"] = [f.as_dict() for f in frames]
+            except GeometryError as e:
+                entry["error"] = str(e)
+                entry["error_kind"] = ("unsupported" if "not decodable" in str(e)
+                                       else "corrupt")
+                frames = []
+            if i < len(tri_nodes):
+                tn = tri_nodes[i]
+                entry["triangle_chunk"] = tn.as_dict()
+                try:
+                    cnt, idx = self.triangle_indices(tn)
+                    entry["triangle_count"] = cnt
+                    if idx:
+                        entry["max_index"] = max(idx)
+                    if frames:
+                        n = frames[-1].count
+                        entry["index_in_range"] = (
+                            entry["max_index"] is None or entry["max_index"] < n)
+                except GeometryError as e:
+                    entry["error"] = (entry["error"] or "") + f"; {e}"
+                    entry["error_kind"] = "corrupt"
+            clusters.append(entry)
+        return clusters
+
+    def geometry_stats(self) -> dict:
+        """Aggregate decoded-geometry totals + a pass/fail cross-check."""
+        clusters = self.cluster_meshes()
+        total_verts = 0
+        total_tris = 0
+        bad = 0
+        for c in clusters:
+            if c["frames"]:
+                total_verts += c["frames"][-1]["vertex_count"]
+            if c["triangle_count"] is not None:
+                total_tris += c["triangle_count"]
+            if c["error"] or c["index_in_range"] is False:
+                bad += 1
+        return {
+            "cluster_count": len(clusters),
+            "decoded_vertices": total_verts,
+            "decoded_triangles": total_tris,
+            "bad_clusters": bad,
+        }
 
 
 def _printable(b: bytes, minlen: int) -> list[str]:
@@ -297,7 +567,8 @@ def _printable(b: bytes, minlen: int) -> list[str]:
 
 
 def report_file(path: str, want_json: bool, with_strings: bool,
-                with_tree: bool) -> dict:
+                with_tree: bool, with_mesh: bool = False,
+                cluster: int | None = None) -> dict:
     x = Xmd(path)
     rec = {
         "path": path,
@@ -313,6 +584,15 @@ def report_file(path: str, want_json: bool, with_strings: bool,
     }
     if with_strings:
         rec["strings"] = x.text_strings()
+    if with_mesh or cluster is not None:
+        rec["clusters"] = x.cluster_meshes()
+    if cluster is not None:
+        vf_nodes = [n for n in x.walk_linked() if n.name == "VERTEXFRAMES"]
+        if not 0 <= cluster < len(vf_nodes):
+            raise XmdError(f"cluster {cluster} out of range "
+                           f"(0..{len(vf_nodes) - 1})")
+        rec["cluster_detail"] = [
+            f.as_dict(with_geometry=True) for f in x.vertex_frames(vf_nodes[cluster])]
     if not want_json:
         print(f"== {os.path.basename(path)}  ({len(x.data)} bytes, "
               f"{len(x.nodes)} nodes, data@0x{x.data_start:X})")
@@ -323,6 +603,24 @@ def report_file(path: str, want_json: bool, with_strings: bool,
               f"skeleton_nodes={g['skeleton_node_count']}  "
               f"skinned_verts={g['bone_deform_vertices']}  "
               f"skinning={g['has_skinning']}")
+        print(f"   clusters={g['clusters']}  decoded_verts={g['decoded_vertices']}"
+              f"  decoded_tris={g['decoded_triangles']}"
+              f"  bad_clusters={g['bad_clusters']}")
+        if with_mesh:
+            for c in rec.get("clusters", []):
+                fr = c["frames"][-1] if c["frames"] else {}
+                print(f"   cluster {c['index']}: verts={fr.get('vertex_count')} "
+                      f"ver={fr.get('version') and hex(fr['version'])} "
+                      f"tris={c['triangle_count']} max_index={c['max_index']} "
+                      f"in_range={c['index_in_range']}"
+                      + (f"  ERR {c['error']}" if c["error"] else ""))
+        if cluster is not None:
+            for d in rec["cluster_detail"]:
+                print(f"   cluster {cluster} frame ver=0x{d['version']:x} "
+                      f"verts={d['vertex_count']} bounds=({d['bounds_min']} .. "
+                      f"{d['bounds_max']})")
+                for p in d["positions"][:8]:
+                    print("      pos %8.3f %8.3f %8.3f" % tuple(p))
         if with_tree:
             for line in x.tree_lines():
                 print("   " + line)
@@ -384,6 +682,12 @@ def main(argv=None) -> int:
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--strings", action="store_true")
     ap.add_argument("--tree", action="store_true")
+    ap.add_argument("--mesh", action="store_true",
+                    help="decode VERTEXFRAMES/TRIANGLES cluster pairs and "
+                         "print per-cluster geometry")
+    ap.add_argument("--cluster", type=int, metavar="N",
+                    help="print the decoded frames (with positions) of "
+                         "VERTEXFRAMES cluster N")
     args = ap.parse_args(argv)
 
     if args.check:
@@ -415,7 +719,8 @@ def main(argv=None) -> int:
 
     if not args.path:
         ap.error("provide a .xmd path or --inventory DIR")
-    rec = report_file(args.path, args.json, args.strings, args.tree)
+    rec = report_file(args.path, args.json, args.strings, args.tree,
+                      with_mesh=args.mesh, cluster=args.cluster)
     if args.json:
         print(json.dumps(rec, indent=2))
     return 0

@@ -116,8 +116,113 @@ def test_rejects_bad_magic(tmp_dir):
         os.remove(path)
 
 
+def _vf204_frame(verts, normals, mn=(0.0, 0.0, 0.0), mx=(100.0, 200.0, 300.0),
+                 lead=1) -> bytes:
+    """Build a VERTEXFRAMES payload: one version-0x204 frame + leading count."""
+    n = len(verts)
+    out = bytearray()
+    out += struct.pack("<I", lead)
+    out += struct.pack("<I", 0x204)          # frame version
+    out += struct.pack("<I", 0)              # header20
+    out += struct.pack("<3f", *mn)           # bounds_min
+    out += struct.pack("<3f", *mx)           # bounds_max
+    out += struct.pack("<3f", 0.0, 0.0, 0.0)  # aux
+    out += struct.pack("<I", 0)              # header30
+    out += struct.pack("<I", n)              # vertex count
+    for (x, y, z) in verts:
+        out += struct.pack("<3H", x, y, z)
+    for (x, y, z) in normals:
+        out += struct.pack("<3b", x, y, z)
+    assert len(out) == 56 + 9 * n, len(out)
+    return bytes(out)
+
+
+def _triangles(indices) -> bytes:
+    out = bytearray(struct.pack("<I", len(indices) // 3))
+    for i in indices:
+        out += struct.pack("<H", i)
+    return bytes(out)
+
+
+def _geometry_container(vf_payload, tri_payload, tri_count):
+    stride = mos_xmd.NODE_RECORD_LEN
+    node1 = stride * 2  # VERTEXFRAMES @0x60 when preceded by a 0x30 root
+    nodes = [
+        ("VERTEXFRAMES", node1, 0, len(vf_payload), 1, 0),
+        ("TRIANGLES", 0, 0, len(tri_payload), tri_count, 0),
+    ]
+    return build_container(nodes, [vf_payload, tri_payload])
+
+
+def test_geometry_roundtrip(tmp_dir):
+    verts = [(0, 0, 0), (65535, 0, 0), (0, 65535, 0), (0, 0, 65535)]
+    normals = [(127, 0, 0), (0, 127, 0), (0, 0, -127), (0, 0, 0)]
+    blob = _geometry_container(_vf204_frame(verts, normals),
+                               _triangles([0, 1, 2, 0, 2, 3]), 2)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        frames = x.vertex_frames()
+        assert len(frames) == 1, frames
+        f = frames[0]
+        assert f.version == 0x204 and f.count == 4, (f.version, f.count)
+        assert f.bounds_min == (0.0, 0.0, 0.0)
+        assert f.bounds_max == (100.0, 200.0, 300.0)
+        # q=65535 -> max, q=0 -> min
+        assert f.positions[0] == (0.0, 0.0, 0.0), f.positions[0]
+        assert f.positions[1] == (100.0, 0.0, 0.0), f.positions[1]
+        assert f.positions[2] == (0.0, 200.0, 0.0), f.positions[2]
+        assert abs(f.positions[3][2] - 300.0) < 1e-3, f.positions[3]
+        # normals are re-normalized to unit length (or zeroed)
+        assert abs(f.normals[0][0] - 1.0) < 1e-6, f.normals[0]
+        assert f.normals[3] == (0.0, 0.0, 0.0), f.normals[3]
+        cnt, idx = x.triangle_indices()
+        assert cnt == 2 and max(idx) == 3, (cnt, idx)
+        clusters = x.cluster_meshes()
+        assert len(clusters) == 1 and clusters[0]["index_in_range"] is True
+        assert x.validate() == [], x.validate()
+        assert x.geometry_stats()["decoded_vertices"] == 4
+        assert x.geometry_stats()["decoded_triangles"] == 2
+    finally:
+        os.remove(path)
+
+
+def test_geometry_detects_index_out_of_range(tmp_dir):
+    verts = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)]
+    normals = [(0, 0, 0)] * 4
+    # index 4 is one past the last vertex (count 4)
+    blob = _geometry_container(_vf204_frame(verts, normals),
+                               _triangles([0, 1, 4]), 1)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        problems = x.validate()
+        assert any(">= decoded vertex count" in p for p in problems), problems
+    finally:
+        os.remove(path)
+
+
+def test_geometry_detects_size_mismatch(tmp_dir):
+    verts = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+    normals = [(0, 0, 0)] * 3
+    # declare 2 triangles but only supply 1
+    good = _triangles([0, 1, 2, 0, 1, 2])
+    bad = bytearray(good)
+    struct.pack_into("<I", bad, 0, 5)
+    blob = _geometry_container(_vf204_frame(verts, normals), bytes(bad), 1)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        problems = x.validate()
+        assert any("TRIANGLES size" in p for p in problems), problems
+    finally:
+        os.remove(path)
+
+
 def main() -> int:
-    tests = (test_roundtrip, test_rejects_bad_magic)
+    tests = (test_roundtrip, test_rejects_bad_magic,
+             test_geometry_roundtrip, test_geometry_detects_index_out_of_range,
+             test_geometry_detects_size_mismatch)
     with tempfile.TemporaryDirectory() as d:
         for t in tests:
             t(d)

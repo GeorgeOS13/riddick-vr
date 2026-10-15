@@ -2,6 +2,50 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 4 — 2026-10-15 22:40 (scheduled loop)
+- **Unit:** GH #55 → #46 — decode the `.xmd` `VERTEXFRAMES`/`TRIANGLES`
+  geometry payloads from the shipped `MXR.dll` loader.
+- Observation (real evidence, read-only; Ghidra 12.1.4 via `rea`): the geometry
+  chunk-name strings + readers live in **`MXR.dll`** (sha256 `06424f55…`, PDB
+  `Dll_XR.pdb`), not `MCCDyn.dll`. `FUN_10080f50` = `CTriangleMeshCore::Read`;
+  `FUN_1007fed0` = `CVertexFrame::Read` (switches on version `0x200`..`0x204`,
+  else throws `"Unsupported vertex-frame version %.4x"`); positions are decoded
+  by `FUN_1007c6c0`, normals by `FUN_1007ca20`; `FUN_10006620` = read `u32`,
+  `FUN_10019390` = read 3 floats.
+- Recovered (all shipped models use VF **version `0x204`**): frame =
+  `u32 version; u32; f32 min[3]; f32 max[3]; f32 aux[3]; u32; u32 n;
+  u16 pos[n][3]; s8 nrm[n][3]`; positions dequantized
+  `min + q*(max-min)/65535` (`1.5259022e-05 == 1/65535`), normals `c/127`
+  (`0.007874016 == 1/127`) re-normalized; frame size **`52 + 9n`**; when the
+  model version is > `0x100` the chunk starts with one `u32` frame-count word
+  (read + discarded). `TRIANGLES` = `u32 count` + `count` *u16* triplets.
+- Change:
+  - `tools/mos_xmd.py`: added `VertexFrame`, `decode_vertex_frame`,
+    `decode_triangles`; `Xmd.vertex_frames()/triangle_indices()/
+    cluster_meshes()/geometry_stats()`; `validate()` now cross-checks every
+    `VERTEXFRAMES`/`TRIANGLES` cluster pair (index range + payload tiling);
+    `--mesh`/`--cluster N` CLI; docstring documents the layout.
+  - `tools/test_mos_xmd.py`: +3 headless synthetic-container geometry tests
+    (round-trip, out-of-range index, triangle-size mismatch).
+  - `docs/adr/0415-xmd-vertex-frame-geometry.md` (new); ADR-0414 follow-up
+    marked done.
+- Evidence: `mos_xmd.py --inventory <game>\Content\Models --check` → **631/631
+  `ok`** (geometry cross-check on); aggregate decode → **4662/4662 cluster
+  pairs** with every triangle index in range *and* `max(index) == n-1` exactly
+  (0 unsupported, 0 corrupt); totals **1,242,285 vertices / 1,860,184
+  triangles**; the `52+9n` frame size tiles every chunk with no remainder;
+  `test_mos_xmd.py` PASS; `validate_addresses.py`, `verify_reported_fixes.py`,
+  `scenario_tests.py --check`, `verify_hook_init.py` all pass. No C++ changed, so
+  `build-all.ps1`/CTest were not rerun (as in Wake 3).
+- Blocker: none. Next: decode `TVERTEXFRAMES` (UV; node flags `0x201`) and
+  `BONEDEFORM`/`BONEINFLUENCE`/`BONEMATRIXMAP` (skinning), then extract the
+  Riddick hand/forearm surfaces (`RIDDICK_ARMSCAR_*`, `Pa2_Hand_01`) and add a
+  native mesh path behind a flag, keeping `VRHandRenderer` as fallback.
+- Branch: committed on `docs/rea-mos-loader-layout` (single-writer mode — no new
+  branch; not pushed; `main` untouched).
+  - Note: `rea --snapshot <name>` writes `<name>` into the CWD — do **not**
+    commit it (the `mxr` snapshot was removed from the tree).
+
 ## Wake 3 — 2026-10-15 21:47 (scheduled loop)
 - **Unit:** GH #55 (→ #46) — recover the `MOS DATAFILE2.0` loader layout from
   the shipped engine and reconcile the parser with it.

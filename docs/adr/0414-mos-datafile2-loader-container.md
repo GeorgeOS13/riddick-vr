@@ -89,7 +89,9 @@ previously read as raw header `u32`s are just `root.next_sibling` /
 - No engine-offset behaviour changes; target build still to be pinned (GH #56).
 
 ## Follow-ups
-- Decompile the chunk payload readers (`CDF_Node` accessors + the `VERTEXFRAMES`
-  / `BONEDEFORM` decoders) to finalise vertex/skinning formats.
+- **Done — ADR-0415.** The chunk payload readers were decompiled: the
+  `VERTEXFRAMES` (positions/normals) and `TRIANGLES` layouts are recovered and
+  validated across all 631 models. `TVERTEXFRAMES` (UVs) and
+  `BONEDEFORM`/`BONEINFLUENCE`/`BONEMATRIXMAP` (skinning) remain.
 - Keep the procedural `VRHandRenderer` as the fallback until a native mesh is
   tested in-headset (GH #46).
