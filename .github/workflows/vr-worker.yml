@@ -4,6 +4,8 @@
 name: vr-worker
 
 on:
+  push:
+    branches: [main, 'fix/**', 'docs/**']
   schedule:
     - cron: '*/15 * * * *'
   workflow_dispatch:
