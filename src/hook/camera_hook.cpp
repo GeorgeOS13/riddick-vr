@@ -1024,6 +1024,61 @@ static GripsIntent UpdateGrips(GripsState& st, DWORD now,
     return out;
 }
 
+// GH #17 step 6: buttons/menus detection extracted (section 10: face buttons,
+// dual-stick ejection, right-stick recenter gate, menu edge).
+// Pure detection: no SendKey/SendMouseClick/HapticRequest/logs/vrState writes;
+// Update owns all side effects plus the s_prevButtons assignment and the
+// haptic arbiter publish block (both untouched). Same edges/gates as the
+// inline block this replaces.
+struct ButtonsState {
+};
+static ButtonsState s_buttons;
+
+struct ButtonsIntent {
+    bool aChanged = false;
+    bool aDown = false;
+    bool bChanged = false;
+    bool bDown = false;
+    bool xPressed = false;
+    bool menuEdge = false;
+    bool dualStickPressed = false;
+    bool dualGrip = false;
+    bool recenterPressed = false;
+};
+
+static ButtonsIntent UpdateButtons(ButtonsState& st, uint32_t btns, uint32_t prevBtns,
+                                   float leftGrip, float rightGrip) {
+    (void)st;
+    ButtonsIntent out;
+    bool btnA = (btns & RIDDICK_VR_BTN_A) != 0;
+    bool prevBtnA = (prevBtns & RIDDICK_VR_BTN_A) != 0;
+    out.aChanged = (btnA != prevBtnA);
+    out.aDown = btnA;
+    bool btnB = (btns & RIDDICK_VR_BTN_B) != 0;
+    bool prevBtnB = (prevBtns & RIDDICK_VR_BTN_B) != 0;
+    out.bChanged = (btnB != prevBtnB);
+    out.bDown = btnB;
+    bool btnX = (btns & RIDDICK_VR_BTN_X) != 0;
+    bool prevBtnX = (prevBtns & RIDDICK_VR_BTN_X) != 0;
+    out.xPressed = (btnX && !prevBtnX);
+    // GH #20: single edge-triggered Menu handler (computed once here); a Menu
+    // edge in the same frame suppresses the dual-stick ESC so VK_ESCAPE fires once.
+    out.menuEdge = ((btns & RIDDICK_VR_BTN_MENU) != 0) && ((prevBtns & RIDDICK_VR_BTN_MENU) == 0);
+    bool stickLeft = (btns & RIDDICK_VR_BTN_STICK_LEFT) != 0;
+    bool stickRight = (btns & RIDDICK_VR_BTN_STICK_RIGHT) != 0;
+    bool prevStickLeft = (prevBtns & RIDDICK_VR_BTN_STICK_LEFT) != 0;
+    bool prevStickRight = (prevBtns & RIDDICK_VR_BTN_STICK_RIGHT) != 0;
+    bool dualStick = stickLeft && stickRight;
+    bool prevDualStick = prevStickLeft && prevStickRight;
+    out.dualStickPressed = dualStick && !prevDualStick && !out.menuEdge;
+    out.dualGrip = (leftGrip > 0.55f && rightGrip > 0.55f);
+    // Right Thumbstick Click recenter gate: grip held means the click toggles
+    // snap/smooth turn mode instead of resetting the view.
+    bool recenterGripHeld = leftGrip > 0.5f;
+    out.recenterPressed = stickRight && !prevStickRight && !recenterGripHeld;
+    return out;
+}
+
 void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (!m_initialized || !vrState.vrActive) return;
 
@@ -10948,54 +11003,41 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     }
 
     // 10. Face Buttons Mapping (ADR 0410: Unified Action & Dialogue Confirmation)
-    bool btnA = (btns & RIDDICK_VR_BTN_A) != 0;
-    bool prevBtnA = (s_prevButtons & RIDDICK_VR_BTN_A) != 0;
-    bool btnB = (btns & RIDDICK_VR_BTN_B) != 0;
-    bool prevBtnB = (s_prevButtons & RIDDICK_VR_BTN_B) != 0;
-    bool btnX = (btns & RIDDICK_VR_BTN_X) != 0;
-    bool prevBtnX = (s_prevButtons & RIDDICK_VR_BTN_X) != 0;
+    // GH #17 step 6: detection delegated to UpdateButtons (explicit ButtonsState, no behavior change).
+    ButtonsIntent buttonsIntent = UpdateButtons(s_buttons, btns, s_prevButtons,
+        vrState.leftController.grip, vrState.rightController.grip);
 
     // BUTTON A -> Primary Interact / Use / Talk / Climb / Open ('E') + Dialogue Confirm (VK_RETURN)
-    if (btnA != prevBtnA) {
-        SendKey('E', btnA);
-        SendKey(VK_RETURN, btnA);
-        if (btnA) HapticRequest(1, (0.35f), kHapticUi);
+    if (buttonsIntent.aChanged) {
+        SendKey('E', buttonsIntent.aDown);
+        SendKey(VK_RETURN, buttonsIntent.aDown);
+        if (buttonsIntent.aDown) HapticRequest(1, (0.35f), kHapticUi);
     }
 
     // BUTTON B -> Jump (Space) & Crouch-Jump Mantle Clearance (ADR 0025)
-    if (btnB != prevBtnB) {
-        if (btnB && s_posture.isPhysicallyCrouched) {
+    if (buttonsIntent.bChanged) {
+        if (buttonsIntent.bDown && s_posture.isPhysicallyCrouched) {
             VR_LOG_INFO("Movement Stance: PHYSICAL CROUCH-JUMP / MANTLE CLEARANCE executed");
             SendKey('C', true);
             SendKey(VK_SPACE, true);
             HapticRequest(1, (0.45f), kHapticUi);
         } else {
-            SendKey(VK_SPACE, btnB);
+            SendKey(VK_SPACE, buttonsIntent.bDown);
         }
-        if (btnB && !s_posture.isPhysicallyCrouched) HapticRequest(1, (0.30f), kHapticAmbient);
+        if (buttonsIntent.bDown && !s_posture.isPhysicallyCrouched) HapticRequest(1, (0.30f), kHapticAmbient);
     }
 
     // BUTTON X -> Crouch Toggle ('C')
-    if (btnX && !prevBtnX) {
+    if (buttonsIntent.xPressed) {
         SendKeyTap('C');
         HapticRequest(0, (0.30f), kHapticUi);
     }
 
     // Dual Thumbstick Click -> Emergency Ejection / Drone Neural Disconnect (ADR 0031)
-    // GH #20: single edge-triggered Menu handler (computed once here); a Menu
+    // GH #20: single edge-triggered Menu handler (computed once in UpdateButtons); a Menu
     // edge in the same frame suppresses the dual-stick ESC so VK_ESCAPE fires once.
-    bool menuEdge = ((btns & RIDDICK_VR_BTN_MENU) != 0) && ((s_prevButtons & RIDDICK_VR_BTN_MENU) == 0);
-    bool stickLeft = (btns & RIDDICK_VR_BTN_STICK_LEFT) != 0;
-    bool stickRight = (btns & RIDDICK_VR_BTN_STICK_RIGHT) != 0;
-    bool prevStickLeft = (s_prevButtons & RIDDICK_VR_BTN_STICK_LEFT) != 0;
-    bool prevStickRight = (s_prevButtons & RIDDICK_VR_BTN_STICK_RIGHT) != 0;
-
-    bool dualStick = stickLeft && stickRight;
-    bool prevDualStick = prevStickLeft && prevStickRight;
-
-    if (dualStick && !prevDualStick && !menuEdge) {
-        bool dualGrip = (vrState.leftController.grip > 0.55f && vrState.rightController.grip > 0.55f);
-        if (dualGrip) {
+    if (buttonsIntent.dualStickPressed) {
+        if (buttonsIntent.dualGrip) {
             // Emergency Mech Cockpit Purge / Canopy Blow (ADR 0049)
             VR_LOG_INFO("Cockpit Systems: EMERGENCY MECH CANOPY BOLTS BLOWN / PILOT EJECTION");
             SendKeyTap(VK_ESCAPE);
@@ -11016,8 +11058,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
         // Right Thumbstick Click -> Recenter HMD & Reset Standing Eye Height (GH #18: no cinema)
         // Gated by grip so toggling snap/smooth turn mode does not unintentionally reset view
-        bool recenterGripHeld = vrState.leftController.grip > 0.5f;
-        if (stickRight && !prevStickRight && !recenterGripHeld) {
+        if (buttonsIntent.recenterPressed) {
             vrState.shouldRecenter = true;
             s_hasPrevHmdOrientation = false;
             if (vrState.hmdPose.isValid) {
@@ -11030,7 +11071,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
     // Left Controller Menu Button -> Clean Pause / Resume Menu Toggle (Escape)
     // GH #18/#20: the single Menu handler (edge-triggered, logs once).
-    if (menuEdge) {
+    if (buttonsIntent.menuEdge) {
         SendKeyTap(VK_ESCAPE);
         HapticRequest(0, 0.40f, kHapticUi); // GH #32
         VR_LOG_INFO("Menu Button tapped (VK_ESCAPE)");
