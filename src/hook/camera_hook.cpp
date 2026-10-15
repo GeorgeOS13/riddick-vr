@@ -18,7 +18,18 @@ CameraHook& CameraHook::Instance() {
 }
 
 // Adaptive physical crouching, two-handed stabilization, and decoupled aim state (ADR 0004, 0005, 0008)
-static float s_standingEyeHeight = 0.0f;
+// Track C #17 step 2: posture state (standing height, crouch/prone, lean base)
+// hoisted out of CameraHook::Update into an explicit struct.
+struct PostureState {
+    float standingEyeHeight = 0.0f;
+    bool isPhysicallyCrouched = false;
+    bool isDeepProne = false;
+    float torsoBaseX = 0.0f;
+    float torsoBaseZ = 0.0f;
+    bool hasTorsoBase = false;
+    bool isStealthPeeking = false;
+};
+static PostureState s_posture;
 static bool s_twoHandedStabilizationActive = false;
 static bool s_physicalBlockEngaged = false;
 static DWORD s_lastReloadGestureTime = 0;
@@ -37,8 +48,8 @@ bool CameraHook::Initialize() {
 
     LoadVRConfig(); // Track C #10: riddick_vr.ini (snap/deadzone/comfort/seated/scale/southpaw/debounce)
     if (g_vrConfig.standingEyeHeight > 0.2f) {
-        s_standingEyeHeight = g_vrConfig.standingEyeHeight;
-        VR_LOG_INFO("Standing eye height overridden from INI: %.2fm", s_standingEyeHeight);
+        s_posture.standingEyeHeight = g_vrConfig.standingEyeHeight;
+        VR_LOG_INFO("Standing eye height overridden from INI: %.2fm", s_posture.standingEyeHeight);
     }
 
     if (ScanForCameraSignature()) {
@@ -94,9 +105,48 @@ static void SendMouseClick(bool leftButton, bool isDown) {
     SendInput(1, &in, sizeof(INPUT));
 }
 
-// GH #32: Max-merge haptic helper. Concurrent gestures in one frame keep the
-// strongest pulse instead of last-writer-wins clobbering (client WriteState
-// also max-merges; full dispatch-queue conversion is follow-up).
+// GH #32: central haptic dispatch queue (frame-local arbiter). Gestures
+// request pulses via HapticRequest(side, amplitude, priority, tag) instead
+// of writing vrState directly; Update() publishes once at the end: per
+// side the highest-priority request wins, ties break to max amplitude.
+// Decay applies to the published (carried) values only, at the top of
+// Update. This ends hook-side last-writer-wins clobbering.
+enum : int {
+    kHapticAmbient = 30,   // ambient / crouch / footstep beds
+    kHapticUi = 50,        // UI / menu clicks + general mechanical feedback
+    kHapticLadder = 70,    // ladder / mantle / climb
+    kHapticReload = 80,    // reload / NanoMED scanner
+    kHapticFinisher = 100  // finisher / melee impacts
+};
+
+struct HapticArbiter {
+    int prio[2];
+    float amp[2];
+    void Reset() { prio[0] = prio[1] = -1; amp[0] = amp[1] = 0.0f; }
+    void Request(int side, float a, int p) {
+        if (side < 0 || side > 1) return;
+        if (a < 0.0f) a = 0.0f;
+        if (a > 1.0f) a = 1.0f;
+        if (p > prio[side] || (p == prio[side] && a > amp[side])) {
+            prio[side] = p;
+            amp[side] = a;
+        }
+    }
+    bool HasRequest(int side) const { return side >= 0 && side <= 1 && prio[side] >= 0; }
+    float Winner(int side) const { return amp[side]; }
+};
+
+static HapticArbiter s_hapticArbiter;
+
+// GH #32: frame-local dispatch entry point. `side`: 0 = left, 1 = right.
+// `tag` is an optional call-site label for future diagnostics.
+inline void HapticRequest(int side, float amplitude, int priority, const char* tag = nullptr) {
+    (void)tag;
+    s_hapticArbiter.Request(side, amplitude, priority);
+}
+
+// GH #32: legacy max-merge helper, superseded by the arbiter above.
+// Retained so any out-of-Update writers still max-merge instead of clobbering.
 inline void MergeHaptic(float& slot, float v) {
     if (v > slot) slot = v;
 }
@@ -396,6 +446,144 @@ static NanoMedVolumes DetectNanoMEDContact(const RiddickVRVector3& domLocal,
     return out;
 }
 
+// Track C #17 step 2: posture/crouch/height/recenter + lean/peek detection.
+// Pure detection: updates st, returns edge intents; Update owns logs/keys/haptics.
+struct PostureIntent {
+    bool recenterCalibrated = false;
+    bool initialCalibrated = false;
+    bool crouchChanged = false;
+    bool crouchEngaged = false;
+    float crouchY = 0.0f;
+    float crouchStandingY = 0.0f;
+    float crouchDrop = 0.0f;
+    bool proneChanged = false;
+    bool proneEngaged = false;
+    float proneY = 0.0f;
+    float proneDrop = 0.0f;
+    bool peekChanged = false;
+    bool peekEngaged = false;
+    float leanRight = 0.0f;
+    float leanForward = 0.0f;
+};
+
+static PostureIntent UpdatePosture(PostureState& st, bool hmdValid,
+                                   float currentY, float hmdVelY,
+                                   float hmdX, float hmdZ,
+                                   bool recenterEdge, bool seated, float seatedEyeOffset,
+                                   float lastHmdYaw) {
+    PostureIntent out;
+    // Reset calibration on recenter edge (GH #37) + seated offset (Track C #11).
+    if (recenterEdge && hmdValid) {
+        st.standingEyeHeight = currentY + (seated ? seatedEyeOffset : 0.0f); // Track C #11 + GH #37 edge
+        out.recenterCalibrated = true;
+    }
+
+    if (hmdValid) {
+        // Initial calibration
+        if (st.standingEyeHeight <= 0.001f && currentY > 0.1f) {
+            st.standingEyeHeight = currentY + (seated ? seatedEyeOffset : 0.0f); // Track C #11
+            out.initialCalibrated = true;
+        }
+
+        // ADR 0377: Peak tracking with Jump Immunity & Vertical Velocity Gating
+        // Only adapt standing height when stationary and upright (|Vy| < 0.12 m/s).
+        // Adapt gradually via exponential smoothing so jumping or head bob never latches a false floor!
+        if (!st.isPhysicallyCrouched && currentY > st.standingEyeHeight && fabsf(hmdVelY) < 0.12f) {
+            st.standingEyeHeight += 0.002f * (currentY - st.standingEyeHeight);
+        }
+
+        // Calculate height drop from calibrated standing height
+        float heightDrop = st.standingEyeHeight - currentY;
+        float heightRatio = (st.standingEyeHeight > 0.2f) ? (currentY / st.standingEyeHeight) : 1.0f;
+
+        // Crouch activation criteria:
+        // Ducks > 28cm below standing height OR falls below 78% of standing height
+        bool wantCrouch = false;
+        if (st.standingEyeHeight > 0.2f) {
+            if (st.isPhysicallyCrouched) {
+                // Hysteresis release buffer: remain crouched until rising within 18cm of standing height
+                wantCrouch = (heightDrop > 0.18f);
+            } else {
+                wantCrouch = (heightDrop > 0.28f) || (heightRatio < 0.78f);
+            }
+        } else {
+            // Fallback for zero-baseline tracking spaces
+            constexpr float FALLBACK_CROUCH_THRESHOLD = -0.28f;
+            constexpr float FALLBACK_RELEASE_THRESHOLD = -0.18f;
+            wantCrouch = st.isPhysicallyCrouched ? (currentY < FALLBACK_RELEASE_THRESHOLD) : (currentY < FALLBACK_CROUCH_THRESHOLD);
+        }
+        if (seated) wantCrouch = false; // Track C #11: no physical auto-crouch while seated
+
+        if (wantCrouch != st.isPhysicallyCrouched) {
+            st.isPhysicallyCrouched = wantCrouch;
+            out.crouchChanged = true;
+            out.crouchEngaged = wantCrouch;
+            out.crouchY = currentY;
+            out.crouchStandingY = st.standingEyeHeight;
+            out.crouchDrop = heightDrop;
+        }
+
+        // Deep Prone / Laser Tripwire Limbo Evasion (ADR 0030)
+        bool wantProne = false;
+        if (st.standingEyeHeight > 0.2f) {
+            wantProne = (heightDrop > 0.48f) || (heightRatio < 0.65f);
+        } else {
+            wantProne = (currentY < -0.45f);
+        }
+        if (seated) wantProne = false; // Track C #11: seated players never auto-prone
+
+        if (wantProne != st.isDeepProne) {
+            st.isDeepProne = wantProne;
+            out.proneChanged = true;
+            out.proneEngaged = wantProne;
+            out.proneY = currentY;
+            out.proneDrop = heightDrop;
+        }
+    }
+
+    if (hmdValid) {
+        if (!st.hasTorsoBase || recenterEdge) {
+            st.torsoBaseX = hmdX;
+            st.torsoBaseZ = hmdZ;
+            st.hasTorsoBase = true;
+            st.isStealthPeeking = false;
+        } else {
+            // Horizontal displacement from torso base
+            float dispX = hmdX - st.torsoBaseX;
+            float dispZ = hmdZ - st.torsoBaseZ;
+            float horizDist = sqrtf(dispX * dispX + dispZ * dispZ);
+
+            // Decompose into lateral (right/left) and longitudinal (forward/back) lean using stabilized heading
+            float cosY = cosf(lastHmdYaw);
+            float sinY = sinf(lastHmdYaw);
+            // Right vector is (cosY, -sinY), Forward vector is (-sinY, -cosY)
+            float leanRight = dispX * cosY - dispZ * sinY;
+            float leanForward = -dispX * sinY - dispZ * cosY;
+
+            // Lateral corner peek detection threshold: 15cm lateral head shift
+            bool wantPeek = (fabsf(leanRight) > 0.15f);
+            if (wantPeek != st.isStealthPeeking) {
+                st.isStealthPeeking = wantPeek;
+                out.peekChanged = true;
+                out.peekEngaged = wantPeek;
+                out.leanRight = leanRight;
+                out.leanForward = leanForward;
+            }
+
+            // Exceeding 38cm roomscale lean: softly slide torso origin along with player
+            constexpr float MAX_LEAN_RADIUS = 0.38f;
+            if (horizDist > MAX_LEAN_RADIUS) {
+                float excess = horizDist - MAX_LEAN_RADIUS;
+                float dirX = dispX / horizDist;
+                float dirZ = dispZ / horizDist;
+                st.torsoBaseX += dirX * excess;
+                st.torsoBaseZ += dirZ * excess;
+            }
+        }
+    }
+    return out;
+}
+
 void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (!m_initialized || !vrState.vrActive) return;
 
@@ -409,6 +597,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     vrState.rightHapticPulse *= 0.70f;
     if (vrState.leftHapticPulse < 0.05f) vrState.leftHapticPulse = 0.0f;
     if (vrState.rightHapticPulse < 0.05f) vrState.rightHapticPulse = 0.0f;
+    s_hapticArbiter.Reset(); // GH #32: start a fresh dispatch frame (decay already applied to the carry above)
 
     // Detect if Windows mouse cursor is visible (Menus, Loading, Dialogue UI)
     CURSORINFO ci{ sizeof(CURSORINFO) };
@@ -445,7 +634,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     if ((btns & RIDDICK_VR_BTN_Y) && !(s_prevButtons & RIDDICK_VR_BTN_Y)) {
         SendKeyTap('Q');
         s_eyeshineActive = !s_eyeshineActive; // GH #35: toggle single source (published once below)
-        MergeHaptic(vrState.leftHapticPulse, 0.35f); // GH #32
+        HapticRequest(0, 0.35f, kHapticUi); // GH #32
         VR_LOG_INFO("Button Y: RIDDICK EYESHINE NIGHT VISION TOGGLED ('Q')");
     }
 
@@ -560,7 +749,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     } else if (now - s_adsEnterStartTime > 50) { // 50ms hold to confirm ADS
                         s_isPhysicalADS = true;
                         if (!s_adsHapticFired) {
-                            vrState.rightHapticPulse = 0.18f; // Tactile detent on sight picture acquisition
+                            HapticRequest(1, (0.18f), kHapticUi); // Tactile detent on sight picture acquisition
                             s_adsHapticFired = true;
                         }
                     }
@@ -721,82 +910,35 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     }
 
     // 1. Adaptive Physical Crouch Detection & Dynamic Height Calibration (ADR 0004 & 0005)
-    static bool s_isPhysicallyCrouched = false;
-    static bool s_isDeepProne = false;
+    // Track C #17 step 2: detection delegated to UpdatePosture (explicit
+    // PostureState); side effects (keys/haptics/logs) stay at call site.
     static bool s_flashlightActive = false;
-
-    // Reset calibration on recenter edge (GH #37) + seated offset (Track C #11).
-    if (recenterEdge && vrState.hmdPose.isValid) {
-        s_standingEyeHeight = vrState.hmdPose.position.y + (g_vrConfig.seated ? g_vrConfig.seatedEyeOffset : 0.0f); // Track C #11 + GH #37 edge
-        VR_LOG_INFO("Standing eye height calibrated on recenter: %.2fm", s_standingEyeHeight);
+    PostureIntent postureIntent = UpdatePosture(s_posture, vrState.hmdPose.isValid,
+        vrState.hmdPose.position.y, vrState.hmdPose.linearVelocity.y,
+        vrState.hmdPose.position.x, vrState.hmdPose.position.z,
+        recenterEdge, g_vrConfig.seated, g_vrConfig.seatedEyeOffset, s_lastHmdYaw);
+    if (postureIntent.recenterCalibrated) {
+        VR_LOG_INFO("Standing eye height calibrated on recenter: %.2fm", s_posture.standingEyeHeight);
+    }
+    if (postureIntent.initialCalibrated) {
+        VR_LOG_INFO("Initial standing eye height calibrated: %.2fm", s_posture.standingEyeHeight);
+    }
+    if (postureIntent.crouchChanged) {
+        VR_LOG_INFO("Adaptive physical crouch %s (Current Y: %.2fm, Standing Y: %.2fm, Drop: %.2fm)",
+            postureIntent.crouchEngaged ? "ENGAGED" : "DISENGAGED",
+            postureIntent.crouchY, postureIntent.crouchStandingY, postureIntent.crouchDrop);
+        SendKey('C', postureIntent.crouchEngaged);
+        if (postureIntent.crouchEngaged) {
+            HapticRequest(0, (0.2f), kHapticAmbient);
+        }
     }
 
-    if (vrState.hmdPose.isValid) {
-        float currentY = vrState.hmdPose.position.y;
-
-        // Initial calibration
-        if (s_standingEyeHeight <= 0.001f && currentY > 0.1f) {
-            s_standingEyeHeight = currentY + (g_vrConfig.seated ? g_vrConfig.seatedEyeOffset : 0.0f); // Track C #11
-            VR_LOG_INFO("Initial standing eye height calibrated: %.2fm", s_standingEyeHeight);
-        }
-
-        // ADR 0377: Peak tracking with Jump Immunity & Vertical Velocity Gating
-        // Only adapt standing height when stationary and upright (|Vy| < 0.12 m/s).
-        // Adapt gradually via exponential smoothing so jumping or head bob never latches a false floor!
-        float hmdVelY = vrState.hmdPose.linearVelocity.y;
-        if (!s_isPhysicallyCrouched && currentY > s_standingEyeHeight && fabsf(hmdVelY) < 0.12f) {
-            s_standingEyeHeight += 0.002f * (currentY - s_standingEyeHeight);
-        }
-
-        // Calculate height drop from calibrated standing height
-        float heightDrop = s_standingEyeHeight - currentY;
-        float heightRatio = (s_standingEyeHeight > 0.2f) ? (currentY / s_standingEyeHeight) : 1.0f;
-
-        // Crouch activation criteria:
-        // Ducks > 28cm below standing height OR falls below 78% of standing height
-        bool wantCrouch = false;
-        if (s_standingEyeHeight > 0.2f) {
-            if (s_isPhysicallyCrouched) {
-                // Hysteresis release buffer: remain crouched until rising within 18cm of standing height
-                wantCrouch = (heightDrop > 0.18f);
-            } else {
-                wantCrouch = (heightDrop > 0.28f) || (heightRatio < 0.78f);
-            }
+    if (postureIntent.proneChanged) {
+        if (postureIntent.proneEngaged) {
+            VR_LOG_INFO("Stealth Stance: DEEP PRONE / LASER TRIPWIRE LIMBO engaged (Current Y: %.2fm, Drop: %.2fm)", postureIntent.proneY, postureIntent.proneDrop);
+            HapticRequest(0, (0.25f), kHapticUi);
         } else {
-            // Fallback for zero-baseline tracking spaces
-            constexpr float FALLBACK_CROUCH_THRESHOLD = -0.28f;
-            constexpr float FALLBACK_RELEASE_THRESHOLD = -0.18f;
-            wantCrouch = s_isPhysicallyCrouched ? (currentY < FALLBACK_RELEASE_THRESHOLD) : (currentY < FALLBACK_CROUCH_THRESHOLD);
-        }
-        if (g_vrConfig.seated) wantCrouch = false; // Track C #11: no physical auto-crouch while seated
-
-        if (wantCrouch != s_isPhysicallyCrouched) {
-            s_isPhysicallyCrouched = wantCrouch;
-            VR_LOG_INFO("Adaptive physical crouch %s (Current Y: %.2fm, Standing Y: %.2fm, Drop: %.2fm)",
-                s_isPhysicallyCrouched ? "ENGAGED" : "DISENGAGED", currentY, s_standingEyeHeight, heightDrop);
-            SendKey('C', s_isPhysicallyCrouched);
-            if (s_isPhysicallyCrouched) {
-                vrState.leftHapticPulse = 0.2f;
-            }
-        }
-
-        // Deep Prone / Laser Tripwire Limbo Evasion (ADR 0030)
-        bool wantProne = false;
-        if (s_standingEyeHeight > 0.2f) {
-            wantProne = (heightDrop > 0.48f) || (heightRatio < 0.65f);
-        } else {
-            wantProne = (currentY < -0.45f);
-        }
-        if (g_vrConfig.seated) wantProne = false; // Track C #11: seated players never auto-prone
-
-        if (wantProne != s_isDeepProne) {
-            s_isDeepProne = wantProne;
-            if (s_isDeepProne) {
-                VR_LOG_INFO("Stealth Stance: DEEP PRONE / LASER TRIPWIRE LIMBO engaged (Current Y: %.2fm, Drop: %.2fm)", currentY, heightDrop);
-                vrState.leftHapticPulse = 0.25f;
-            } else {
-                VR_LOG_INFO("Stealth Stance: DEEP PRONE disengaged");
-            }
+            VR_LOG_INFO("Stealth Stance: DEEP PRONE disengaged");
         }
     }
 
@@ -805,55 +947,14 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // - Deadband [0, 0.38m]: Riddick's floor collision capsule remains safely behind wall cover while head peeks around corners
     // - Lateral lean detection (|Lean_right| > 0.15m): Signals stealth corner peek stance with subtle tactile haptic cue (0.15)
     // - Displacement > 0.38m: Torso origin smoothly tracks player translation to prevent roomscale detachment
-    static float s_torsoBaseX = 0.0f;
-    static float s_torsoBaseZ = 0.0f;
-    static bool s_hasTorsoBase = false;
-    static bool s_isStealthPeeking = false;
-
-    if (vrState.hmdPose.isValid) {
-        float hmdX = vrState.hmdPose.position.x;
-        float hmdZ = vrState.hmdPose.position.z;
-
-        if (!s_hasTorsoBase || recenterEdge) {
-            s_torsoBaseX = hmdX;
-            s_torsoBaseZ = hmdZ;
-            s_hasTorsoBase = true;
-            s_isStealthPeeking = false;
+    // (state + detection in UpdatePosture; edge side effects below at call site)
+    if (postureIntent.peekChanged) {
+        if (postureIntent.peekEngaged) {
+            VR_LOG_INFO("Stealth Stance: CORNER WALL-PEEK engaged (LeanRight: %.2fm, LeanFwd: %.2fm, Crouched: %s)",
+                postureIntent.leanRight, postureIntent.leanForward, s_posture.isPhysicallyCrouched ? "YES" : "NO");
+            HapticRequest(0, (0.15f), kHapticAmbient); // Subtle stealth confirmation pulse
         } else {
-            // Horizontal displacement from torso base
-            float dispX = hmdX - s_torsoBaseX;
-            float dispZ = hmdZ - s_torsoBaseZ;
-            float horizDist = sqrtf(dispX * dispX + dispZ * dispZ);
-
-            // Decompose into lateral (right/left) and longitudinal (forward/back) lean using stabilized heading
-            float cosY = cosf(s_lastHmdYaw);
-            float sinY = sinf(s_lastHmdYaw);
-            // Right vector is (cosY, -sinY), Forward vector is (-sinY, -cosY)
-            float leanRight = dispX * cosY - dispZ * sinY;
-            float leanForward = -dispX * sinY - dispZ * cosY;
-
-            // Lateral corner peek detection threshold: 15cm lateral head shift
-            bool wantPeek = (fabsf(leanRight) > 0.15f);
-            if (wantPeek != s_isStealthPeeking) {
-                s_isStealthPeeking = wantPeek;
-                if (s_isStealthPeeking) {
-                    VR_LOG_INFO("Stealth Stance: CORNER WALL-PEEK engaged (LeanRight: %.2fm, LeanFwd: %.2fm, Crouched: %s)",
-                        leanRight, leanForward, s_isPhysicallyCrouched ? "YES" : "NO");
-                    vrState.leftHapticPulse = 0.15f; // Subtle stealth confirmation pulse
-                } else {
-                    VR_LOG_INFO("Stealth Stance: CORNER WALL-PEEK disengaged");
-                }
-            }
-
-            // Exceeding 38cm roomscale lean: softly slide torso origin along with player
-            constexpr float MAX_LEAN_RADIUS = 0.38f;
-            if (horizDist > MAX_LEAN_RADIUS) {
-                float excess = horizDist - MAX_LEAN_RADIUS;
-                float dirX = dispX / horizDist;
-                float dirZ = dispZ / horizDist;
-                s_torsoBaseX += dirX * excess;
-                s_torsoBaseZ += dirZ * excess;
-            }
+            VR_LOG_INFO("Stealth Stance: CORNER WALL-PEEK disengaged");
         }
     }
 
@@ -872,7 +973,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     bool handsTuckedIn = (fabsf(leftLocal.x) < 0.14f && fabsf(rightLocal.x) < 0.14f) &&
                          (leftLocal.z > -0.20f && rightLocal.z > -0.20f) &&
                          (vrState.leftController.grip > 0.50f && vrState.rightController.grip > 0.50f);
-    bool wantSolarShadowTuck = (s_isPhysicallyCrouched || s_isDeepProne) && handsTuckedIn;
+    bool wantSolarShadowTuck = (s_posture.isPhysicallyCrouched || s_posture.isDeepProne) && handsTuckedIn;
     if (wantSolarShadowTuck != s_isSolarShadowTuck) {
         s_isSolarShadowTuck = wantSolarShadowTuck;
         if (s_isSolarShadowTuck && (now - s_lastSolarShadowTuckTime > 1500)) {
@@ -881,8 +982,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             SendKeyTap('C');
             SendKeyTap(VK_SPACE);
             SendKeyTap('Q');
-            vrState.leftHapticPulse = 0.35f;  // Cardiovascular shadow stabilization pulse (60 Hz)
-            vrState.rightHapticPulse = 0.35f;
+            HapticRequest(0, (0.35f), kHapticUi);  // Cardiovascular shadow stabilization pulse (60 Hz)
+            HapticRequest(1, (0.35f), kHapticUi);
         }
     }
 
@@ -906,7 +1007,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         if (leftLocal.y > 0.32f && (leftLocal.z >= -0.55f && leftLocal.z <= -0.16f) && vrState.leftController.grip > 0.5f && leftTouchEngaged && !s_physicalBlockEngaged) {
             s_leftHoldingRung = true;
             VR_LOG_INFO("Physical Gesture: LADDER RUNG GRABBED (Left hand, Y: %.2fm, Z: %.2fm)", leftLocal.y, leftLocal.z);
-            MergeHaptic(vrState.leftHapticPulse, 0.35f); // GH #32
+            HapticRequest(0, 0.35f, kHapticUi); // GH #32
             SendKeyTap('E');
         }
     } else {
@@ -920,7 +1021,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         if (rightLocal.y > 0.32f && (rightLocal.z >= -0.55f && rightLocal.z <= -0.16f) && vrState.rightController.grip > 0.5f && rightTouchEngaged && !s_physicalBlockEngaged) {
             s_rightHoldingRung = true;
             VR_LOG_INFO("Physical Gesture: LADDER RUNG GRABBED (Right hand, Y: %.2fm, Z: %.2fm)", rightLocal.y, rightLocal.z);
-            MergeHaptic(vrState.rightHapticPulse, 0.35f); // GH #32
+            HapticRequest(1, 0.35f, kHapticUi); // GH #32
             SendKeyTap('E');
         }
     } else {
@@ -940,8 +1041,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         s_lastMantleTime = now;
         VR_LOG_INFO("Physical Gesture: TWO-HANDED MANTLE / LEDGE PULL executed");
         SendKeyTap(VK_SPACE);
-        MergeHaptic(vrState.leftHapticPulse, 0.60f); // GH #32
-        MergeHaptic(vrState.rightHapticPulse, 0.60f); // GH #32
+        HapticRequest(0, 0.60f, kHapticLadder); // GH #32
+        HapticRequest(1, 0.60f, kHapticLadder); // GH #32
     }
 
     // Inmate Bunk Overhead Pipe Chin-Up & Ledge Pull Stance (ADR 0090)
@@ -954,8 +1055,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         VR_LOG_INFO("Physical Gesture: INMATE BUNK OVERHEAD PIPE CHIN-UP & LEDGE PULL (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
         SendKeyTap(VK_SPACE);
         SendKeyTap('C'); // Hoist body into suspended ceiling tuck
-        vrState.leftHapticPulse = 0.70f; // Iron pipe flex strain (75 Hz)
-        vrState.rightHapticPulse = 0.70f;
+        HapticRequest(0, (0.70f), kHapticReload); // Iron pipe flex strain (75 Hz)
+        HapticRequest(1, (0.70f), kHapticReload);
     }
 
     // Pull-to-climb motion translation (alternating hands gives hand-over-hand climbing)
@@ -964,11 +1065,11 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
     // Subtle tactile haptic pulse during active climbing strokes
     if (s_ladderClimbUp) {
-        if (lPullDown) vrState.leftHapticPulse = 0.20f;
-        if (rPullDown) vrState.rightHapticPulse = 0.20f;
+        if (lPullDown) HapticRequest(0, (0.20f), kHapticAmbient);
+        if (rPullDown) HapticRequest(1, (0.20f), kHapticAmbient);
     } else if (s_ladderClimbDown) {
-        if (lPushUp) vrState.leftHapticPulse = 0.20f;
-        if (rPushUp) vrState.rightHapticPulse = 0.20f;
+        if (lPushUp) HapticRequest(0, (0.20f), kHapticAmbient);
+        if (rPushUp) HapticRequest(1, (0.20f), kHapticAmbient);
     }
 
     bool isClimbingActive = s_leftHoldingRung || s_rightHoldingRung || s_ladderClimbUp || s_ladderClimbDown;
@@ -999,14 +1100,14 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         if (domHandLocal.y < -0.38f && domCtrl.grip > 0.60f && (now - s_lastCartridgeDrawTime > 1200)) {
             s_holdingNanoMedCartridge = true;
             s_lastCartridgeDrawTime = now;
-            vrState.rightHapticPulse = 0.50f; // Firm cartridge draw snap
+            HapticRequest(1, (0.50f), kHapticReload); // Firm cartridge draw snap
             VR_LOG_INFO("Diegetic Interaction: NANOMED CARTRIDGE DRAWN FROM WAIST HOLSTER");
         }
     } else {
         // Return cartridge to holster if grip released away from station
         if (domCtrl.grip < 0.30f && (domHandLocal.z > -0.20f || domHandLocal.y < 0.0f)) {
             s_holdingNanoMedCartridge = false;
-            vrState.rightHapticPulse = 0.20f;
+            HapticRequest(1, (0.20f), kHapticAmbient);
             VR_LOG_INFO("Diegetic Interaction: NANOMED CARTRIDGE RETURNED TO HOLSTER");
         }
     }
@@ -1018,7 +1119,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             s_holdingNanoMedCartridge = false;
             s_lastCartridgeInsertTime = now;
             SendGestureTap('E', "nanomed/cartridge-insert"); // Track C #15
-            vrState.rightHapticPulse = 0.85f; // Heavy mechanical locking latch impact
+            HapticRequest(1, (0.85f), kHapticReload); // Heavy mechanical locking latch impact
             VR_LOG_INFO("Diegetic Interaction: NANOMED CARTRIDGE INSERTED INTO STATION RECEIVER (MSG_TRIGGERREFILL)");
         }
     }
@@ -1038,8 +1139,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         s_nanoMedPalmActive = true;
         // Continuous restorative nanite injection haptic cadence (120 Hz pulse oscillation)
         float pulseAmp = 0.35f + 0.15f * sinf(static_cast<float>(now) * 0.015f);
-        if (leftScannerContact) MergeHaptic(vrState.leftHapticPulse, pulseAmp); // GH #32: NanoMED
-        if (rightScannerContact) MergeHaptic(vrState.rightHapticPulse, pulseAmp); // GH #32: NanoMED
+        if (leftScannerContact) HapticRequest(0, pulseAmp, kHapticReload); // GH #32: NanoMED
+        if (rightScannerContact) HapticRequest(1, pulseAmp, kHapticReload); // GH #32: NanoMED
     } else {
         s_nanoMedPalmActive = false;
     }
@@ -1079,13 +1180,13 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (stickLeftClick && !s_prevStickLeftClick && wantW) {
         s_sprintActive = !s_sprintActive;
         if (s_sprintActive) {
-            vrState.leftHapticPulse = 0.25f; // Crisp tactile click on sprint engage
+            HapticRequest(0, (0.25f), kHapticUi); // Crisp tactile click on sprint engage
         }
     }
     s_prevStickLeftClick = stickLeftClick;
 
     // Disengage sprint if player stops moving forward or enters crouch/prone
-    if (!wantW || s_isPhysicallyCrouched || s_isDeepProne || isClimbingActive) {
+    if (!wantW || s_posture.isPhysicallyCrouched || s_posture.isDeepProne || isClimbingActive) {
         s_sprintActive = false;
     }
 
@@ -1097,9 +1198,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
     // Prone crawl pacing (ADR 0030): rhythmic tactile crawl heartbeat in deep prone
     static DWORD s_lastPronePulseTime = 0;
-    if (s_isDeepProne && (wantW || wantS || wantA || wantD) && (now - s_lastPronePulseTime > 600)) {
+    if (s_posture.isDeepProne && (wantW || wantS || wantA || wantD) && (now - s_lastPronePulseTime > 600)) {
         s_lastPronePulseTime = now;
-        vrState.leftHapticPulse = 0.12f; // Subtle stealth crawl pulse (85 Hz)
+        HapticRequest(0, (0.12f), kHapticAmbient); // Subtle stealth crawl pulse (85 Hz)
     }
 
     // Refined Locomotion Footstep Cadence (ADR 0392):
@@ -1107,14 +1208,14 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     static DWORD s_lastStepPulseTime = 0;
     static bool s_stepLeftFoot = false;
     DWORD stepInterval = isSprinting ? 360 : 540;
-    if (!s_isPhysicallyCrouched && !s_isDeepProne && !isClimbingActive && (wantW || wantS || wantA || wantD) && (now - s_lastStepPulseTime > stepInterval)) {
+    if (!s_posture.isPhysicallyCrouched && !s_posture.isDeepProne && !isClimbingActive && (wantW || wantS || wantA || wantD) && (now - s_lastStepPulseTime > stepInterval)) {
         s_lastStepPulseTime = now;
         s_stepLeftFoot = !s_stepLeftFoot;
         float stepPulse = isSprinting ? 0.12f : 0.06f;
         if (s_stepLeftFoot) {
-            vrState.leftHapticPulse = stepPulse;
+            HapticRequest(0, (stepPulse), kHapticAmbient);
         } else {
-            vrState.rightHapticPulse = stepPulse;
+            HapticRequest(1, (stepPulse), kHapticAmbient);
         }
     }
 
@@ -1133,7 +1234,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (stickRightClick && leftGripHeld && !s_prevStickClickToggle) {
         s_turnMode = (s_turnMode == VR_TURN_SNAP) ? VR_TURN_SMOOTH : VR_TURN_SNAP;
         VR_LOG_INFO("Turning Mode Toggled: %s", (s_turnMode == VR_TURN_SNAP) ? "SNAP TURN (45 deg)" : "SMOOTH TURN (Cubic Curve)");
-        vrState.rightHapticPulse = (s_turnMode == VR_TURN_SNAP) ? 0.40f : 0.25f;
+        HapticRequest(1, ((s_turnMode == VR_TURN_SNAP) ? 0.40f : 0.25f), kHapticUi);
     }
     s_prevStickClickToggle = (stickRightClick && leftGripHeld);
 
@@ -1150,7 +1251,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_snapTurnArmed = false;
                 int snapDelta = static_cast<int>(350.0f * (g_vrConfig.snapAngleDeg / 45.0f)) * ((stickX > 0.0f) ? 1 : -1); // Track C #10 INI angle
                 SendMouseMove(snapDelta, 0); // GH #33: SendInput helper
-                MergeHaptic(vrState.rightHapticPulse, 0.25f); // GH #32: crisp tactile click on snap
+                HapticRequest(1, 0.25f, kHapticUi); // GH #32: crisp tactile click on snap
             }
         } else if (fabsf(stickX) < RESET_THRESHOLD) {
             s_snapTurnArmed = true;
@@ -1203,13 +1304,13 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (s_stickYUpArmed) {
                 s_stickYUpArmed = false;
                 SendKeyTap(VK_UP);
-                vrState.rightHapticPulse = 0.20f;
+                HapticRequest(1, (0.20f), kHapticAmbient);
             }
         } else if (navY < -MENU_STICK_THRESHOLD) {
             if (s_stickYDownArmed) {
                 s_stickYDownArmed = false;
                 SendKeyTap(VK_DOWN);
-                vrState.rightHapticPulse = 0.20f;
+                HapticRequest(1, (0.20f), kHapticAmbient);
             }
         } else if (fabsf(navY) < 0.25f) {
             s_stickYUpArmed = true;
@@ -1299,8 +1400,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
             SendGestureTap('R', "melee/rifle-strip-eject"); // Track C #15
             SendGestureTap('1', "melee/rifle-strip-equip");
-            vrState.rightHapticPulse = 0.95f; // Receiver wrenching shockwave (280 Hz)
-            vrState.leftHapticPulse = 0.95f;
+            HapticRequest(1, (0.95f), kHapticFinisher); // Receiver wrenching shockwave (280 Hz)
+            HapticRequest(0, (0.95f), kHapticFinisher);
         } else if (isPocketAshRiposte && (now - s_lastPocketAshRiposteTime > 1600)) {
             s_lastPocketAshRiposteTime = now;
             s_lastPunchTime = now;
@@ -1311,7 +1412,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
             mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
             SendKey('W', false);
-            vrState.rightHapticPulse = 0.85f; // Particulate scatter & strike snap (220 Hz)
+            HapticRequest(1, (0.85f), kHapticReload); // Particulate scatter & strike snap (220 Hz)
         } else if (isShieldPryDisarm) {
             s_lastPunchTime = now;
             VR_LOG_INFO("Physical Counter: RIOT SHIELD WEDGE PRY & DISARM (Lx: %.2f, Rx: %.2f)", lVel.x, rVel.x);
@@ -1319,8 +1420,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
             mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
             SendGestureTap('1', "melee/shield-seize");
-            vrState.leftHapticPulse = 0.95f; // Metallic shear crack (280 Hz)
-            vrState.rightHapticPulse = 0.95f;
+            HapticRequest(0, (0.95f), kHapticFinisher); // Metallic shear crack (280 Hz)
+            HapticRequest(1, (0.95f), kHapticFinisher);
         } else if (isEyeGougeRiposte) {
             s_lastPunchTime = now;
             VR_LOG_INFO("Physical Counter: INMATE SHIV EYE-GOUGE RIPOSTE (Rz: %.2f, Ry: %.2f, Ey: %.2f)", rVel.z, rVel.y, rightLocal.y);
@@ -1328,13 +1429,13 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
             mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
             SendKey('W', false);
-            vrState.rightHapticPulse = 0.95f; // Perforation & orbital bone crunch (280 Hz)
+            HapticRequest(1, (0.95f), kHapticFinisher); // Perforation & orbital bone crunch (280 Hz)
         } else if (isForwardParry) {
             s_lastPunchTime = now;
             VR_LOG_INFO("Physical Gesture: PARRY / COUNTER-STRIKE THRUST (Rz: %.2f, Lz: %.2f while Blocking)", rVel.z, lVel.z);
             mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
             mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-            vrState.rightHapticPulse = 0.95f; // High-frequency bone-cracking parry shockwave (280 Hz)
+            HapticRequest(1, (0.95f), kHapticFinisher); // High-frequency bone-cracking parry shockwave (280 Hz)
         } else if (isMeleeStrike) {
             // Immediately disengage block if currently blocking so attacks are not canceled or stuck
             if (s_currentBlockEngaged) {
@@ -1419,8 +1520,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 if (s_arcWaveChargeStart == 0) s_arcWaveChargeStart = now;
                 DWORD chargeTime = now - s_arcWaveChargeStart;
                 float chargeRatio = (chargeTime < 400) ? (chargeTime / 400.0f) : 1.0f;
-                vrState.leftHapticPulse = 0.30f + 0.45f * chargeRatio;
-                vrState.rightHapticPulse = 0.30f + 0.45f * chargeRatio;
+                HapticRequest(0, (0.30f + 0.45f * chargeRatio), kHapticUi);
+                HapticRequest(1, (0.30f + 0.45f * chargeRatio), kHapticUi);
             } else {
                 if (s_arcWaveChargeStart != 0 && (now - s_arcWaveChargeStart >= 250)) {
                     bool explosiveRadialThrust = (lVel.x < -1.05f && rVel.x > 1.05f) || (lVel.z < -1.10f && rVel.z < -1.10f);
@@ -1432,7 +1533,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_arcWaveChargeStart = 0;
             }
 
-            bool crouchedForStealth = (s_isPhysicallyCrouched || s_isDeepProne);
+            bool crouchedForStealth = (s_posture.isPhysicallyCrouched || s_posture.isDeepProne);
             bool atThroatCorridor = (rightLocal.y > -0.12f && rightLocal.y < 0.16f) &&
                                     (rightLocal.z > -0.34f && rightLocal.z < -0.10f) &&
                                     (vrState.rightController.grip > 0.50f);
@@ -1441,7 +1542,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
             // Inmate Shiv Rib-Cage Underhook Puncture & Lift (ADR 0122)
             static DWORD s_lastRibUnderhookTime = 0;
-            bool lowStanceForUnderhook = (s_isPhysicallyCrouched || s_isDeepProne) || (rightLocal.y < -0.15f);
+            bool lowStanceForUnderhook = (s_posture.isPhysicallyCrouched || s_posture.isDeepProne) || (rightLocal.y < -0.15f);
             bool reverseBladeGrip = (vrState.rightController.grip > 0.55f && vrState.rightController.trigger < 0.40f);
             bool underhookRisingThrust = (rVel.y > 1.15f && rVel.z < -0.90f);
             bool isRibUnderhook = lowStanceForUnderhook && reverseBladeGrip && underhookRisingThrust;
@@ -1455,7 +1556,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 if (s_dartExtractedTime == 0) {
                     s_dartExtractedTime = now;
                     VR_LOG_INFO("Physical Combat: STUN DART RIPPED FROM CHEST (Rz: %.2f)", rVel.z);
-                    vrState.rightHapticPulse = 0.75f; // Barbed extraction snap (280 Hz)
+                    HapticRequest(1, (0.75f), kHapticReload); // Barbed extraction snap (280 Hz)
                 }
             }
             bool dartCounterJabStrike = (s_dartExtractedTime > 0 && (now - s_dartExtractedTime < 800) &&
@@ -1493,7 +1594,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 if (s_eyeRubWipeTime == 0) {
                     s_eyeRubWipeTime = now;
                     VR_LOG_INFO("Physical Combat: EYES CLEARED OF DIRT/ASH WITH OFF-ARM (Lx: %.2f)", lVel.x);
-                    vrState.leftHapticPulse = 0.40f; // Corneal wipe friction rasp (190 Hz)
+                    HapticRequest(0, (0.40f), kHapticUi); // Corneal wipe friction rasp (190 Hz)
                 }
             }
             bool blindRiposteStrike = (s_eyeRubWipeTime > 0 && (now - s_eyeRubWipeTime < 600) && rVel.z < -1.15f);
@@ -1501,7 +1602,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
             // Inmate Pit Brawl Shin Kick & Knee Stomp Hyper-Extension (ADR 0141)
             static DWORD s_lastKneeStompTime = 0;
-            bool kneeStompPosture = (s_currentBlockEngaged || s_isPhysicallyCrouched || s_isDeepProne);
+            bool kneeStompPosture = (s_currentBlockEngaged || s_posture.isPhysicallyCrouched || s_posture.isDeepProne);
             bool kneeStompStrike = (rVel.y < -1.10f && lVel.z < -0.70f);
             bool isKneeStomp = kneeStompPosture && kneeStompStrike;
 
@@ -1516,8 +1617,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 if (s_inductionOverheatStart == 0) s_inductionOverheatStart = now;
                 DWORD overchargeTime = now - s_inductionOverheatStart;
                 float rampRatio = (overchargeTime < 350) ? (overchargeTime / 350.0f) : 1.0f;
-                vrState.leftHapticPulse = 0.35f + 0.55f * rampRatio; // Ascending electrostatic buzz (90 -> 280 Hz)
-                vrState.rightHapticPulse = 0.35f + 0.55f * rampRatio;
+                HapticRequest(0, (0.35f + 0.55f * rampRatio), kHapticLadder); // Ascending electrostatic buzz (90 -> 280 Hz)
+                HapticRequest(1, (0.35f + 0.55f * rampRatio), kHapticLadder);
                 if (overchargeTime >= 350 && (now - s_lastInductionOverheatTime > 2500)) {
                     s_lastInductionOverheatTime = now;
                     s_inductionOverheatStart = 0;
@@ -1535,7 +1636,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 if (s_liverHookTime == 0) {
                     s_liverHookTime = now;
                     VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL LIVER HOOK CONNECTED (Ry: %.2f, Rx: %.2f)", rVel.y, rVel.x);
-                    vrState.rightHapticPulse = 0.95f; // Soft-tissue concussive shockwave (220 Hz)
+                    HapticRequest(1, (0.95f), kHapticFinisher); // Soft-tissue concussive shockwave (220 Hz)
                 }
             }
             bool sternumElbowSmash = (s_liverHookTime > 0 && (now - s_liverHookTime < 500) && rVel.y < -1.20f);
@@ -1556,7 +1657,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
             // Security Guard Stun Baton Ground Pin & Taser Kneel (ADR 0150)
             static DWORD s_lastBatonGroundPinTime = 0;
-            bool lowGroundPosture = (s_isPhysicallyCrouched || s_isDeepProne || rightLocal.y < -0.35f);
+            bool lowGroundPosture = (s_posture.isPhysicallyCrouched || s_posture.isDeepProne || rightLocal.y < -0.35f);
             bool batonGroundEnergized = (vrState.rightController.grip > 0.60f && vrState.rightController.trigger > 0.65f);
             bool verticalGroundPlunge = (rVel.y < -1.15f);
             bool isBatonGroundPin = lowGroundPosture && batonGroundEnergized && verticalGroundPlunge;
@@ -1578,14 +1679,14 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (isCrossChestArcWall) {
                 if (now - s_lastArcWallPulse > 180) {
                     s_lastArcWallPulse = now;
-                    vrState.leftHapticPulse = 0.65f;  // Electrostatic repulsion barrier hum (240 Hz)
-                    vrState.rightHapticPulse = 0.65f;
+                    HapticRequest(0, (0.65f), kHapticLadder);  // Electrostatic repulsion barrier hum (240 Hz)
+                    HapticRequest(1, (0.65f), kHapticLadder);
                 }
             }
 
             // Inmate Pit Brawl Duck-Under Kidney Liver Counter-Jab (ADR 0157)
             static DWORD s_lastKidneyCounterTime = 0;
-            bool duckUnderCrouch = (s_isPhysicallyCrouched || s_isDeepProne);
+            bool duckUnderCrouch = (s_posture.isPhysicallyCrouched || s_posture.isDeepProne);
             bool kidneyStrikeCorridor = (rightLocal.y > -0.35f && rightLocal.y < -0.05f);
             bool kidneyCounterPunch = (fabsf(rVel.x) > 0.85f && rVel.z < -1.05f);
             bool isDuckUnderKidneyCounter = duckUnderCrouch && kidneyStrikeCorridor && kidneyCounterPunch;
@@ -1602,8 +1703,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 if (s_batonArcTrapStart == 0) s_batonArcTrapStart = now;
                 DWORD chargeDwell = now - s_batonArcTrapStart;
                 float dwellRatio = (chargeDwell < 400) ? (chargeDwell / 400.0f) : 1.0f;
-                vrState.leftHapticPulse = 0.40f + 0.50f * dwellRatio; // Capacitive transfer buzz (280 Hz)
-                vrState.rightHapticPulse = 0.40f + 0.50f * dwellRatio;
+                HapticRequest(0, (0.40f + 0.50f * dwellRatio), kHapticUi); // Capacitive transfer buzz (280 Hz)
+                HapticRequest(1, (0.40f + 0.50f * dwellRatio), kHapticUi);
                 if (chargeDwell >= 400 && (now - s_lastBatonArcTrapTime > 2000)) {
                     s_lastBatonArcTrapTime = now;
                     s_batonArcTrapStart = 0;
@@ -1621,7 +1722,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 if (s_palmChinStrikeTime == 0) {
                     s_palmChinStrikeTime = now;
                     VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL UPWARD PALM CHIN-STRIKE CONNECTED (Ry: %.2f, Rz: %.2f)", rVel.y, rVel.z);
-                    vrState.rightHapticPulse = 0.98f; // Mandibular percussion shockwave (240 Hz)
+                    HapticRequest(1, (0.98f), kHapticFinisher); // Mandibular percussion shockwave (240 Hz)
                 }
             }
             bool cervicalSnapWhip = (s_palmChinStrikeTime > 0 && (now - s_palmChinStrikeTime < 500) && fabsf(lVel.x) > 1.10f);
@@ -1644,7 +1745,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 if (s_snapdownStartTime == 0) {
                     s_snapdownStartTime = now;
                     VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL COLLAR TIE SNAP-DOWN INITIATED (Ly: %.2f)", lVel.y);
-                    vrState.leftHapticPulse = 0.90f; // Cervical snap-down jerk (210 Hz)
+                    HapticRequest(0, (0.90f), kHapticFinisher); // Cervical snap-down jerk (210 Hz)
                 }
             }
             bool guillotineWrapStrike = (s_snapdownStartTime > 0 && (now - s_snapdownStartTime < 500) && rVel.y > 1.05f && rVel.z < -0.75f);
@@ -1671,7 +1772,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 if (s_shinTrapTime == 0) {
                     s_shinTrapTime = now;
                     VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL SHIN TRAP DEFLECTED (Ly: %.2f)", lVel.y);
-                    vrState.leftHapticPulse = 0.75f; // Shin trap deflection impact (180 Hz)
+                    HapticRequest(0, (0.75f), kHapticReload); // Shin trap deflection impact (180 Hz)
                 }
             }
             bool hammerfistStrike = (s_shinTrapTime > 0 && (now - s_shinTrapTime < 500) && rVel.y < -1.30f);
@@ -1686,8 +1787,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 if (s_suplexHoistTime == 0) {
                     s_suplexHoistTime = now;
                     VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL DOUBLE UNDERHOOK HOIST INITIATED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
-                    vrState.leftHapticPulse = 0.90f;  // Torso lift resistance (220 Hz)
-                    vrState.rightHapticPulse = 0.90f;
+                    HapticRequest(0, (0.90f), kHapticFinisher);  // Torso lift resistance (220 Hz)
+                    HapticRequest(1, (0.90f), kHapticFinisher);
                 }
             }
             bool suplexSpineSlam = (s_suplexHoistTime > 0 && (now - s_suplexHoistTime < 500) && lVel.y < -1.20f && rVel.y < -1.20f);
@@ -1704,8 +1805,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (crossWristFrame) {
                 if (s_crossArcStartTime == 0) s_crossArcStartTime = now;
                 if (now - s_crossArcStartTime >= 300) {
-                    vrState.leftHapticPulse = 0.60f;  // Pre-charge hum (240 Hz)
-                    vrState.rightHapticPulse = 0.60f;
+                    HapticRequest(0, (0.60f), kHapticLadder);  // Pre-charge hum (240 Hz)
+                    HapticRequest(1, (0.60f), kHapticLadder);
                     if (rVel.z < -1.15f || lVel.z < -1.15f) {
                         isCrossArcBurstReady = true;
                     }
@@ -1772,7 +1873,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
             // Inmate Pit Brawl Single-Leg Takedown & Ankle Pick Slam (ADR 0189)
             static DWORD s_lastSingleLegTakedownTime = 0;
-            bool singleLegLowStance = (s_isPhysicallyCrouched || s_isDeepProne || leftLocal.y < -0.30f);
+            bool singleLegLowStance = (s_posture.isPhysicallyCrouched || s_posture.isDeepProne || leftLocal.y < -0.30f);
             bool anklePickGrip = (leftLocal.y < -0.40f && vrState.leftController.grip > 0.60f && lVel.y > 0.85f);
             bool shoulderDriveThrough = (rVel.z < -1.10f);
             bool isSingleLegTakedown = singleLegLowStance && anklePickGrip && shoulderDriveThrough;
@@ -1786,7 +1887,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 if (s_batonJabTime == 0) {
                     s_batonJabTime = now;
                     VR_LOG_INFO("Tactical Melee: STUN BATON HIGH-VOLTAGE DISCHARGE JAB CONNECTED (Rz: %.2f)", rVel.z);
-                    vrState.rightHapticPulse = 0.98f; // Direct contact discharge (310 Hz)
+                    HapticRequest(1, (0.98f), kHapticFinisher); // Direct contact discharge (310 Hz)
                 }
             }
             bool batonTripSweep = (s_batonJabTime > 0 && (now - s_batonJabTime < 500) &&
@@ -1796,7 +1897,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             // Inmate Pit Brawl Double-Leg Takedown & High-Amplitude Mat Slam (ADR 0193)
             static DWORD s_lastDoubleLegSlamTime = 0;
             static DWORD s_doubleLegLiftTime = 0;
-            bool doubleLegLowStance = (s_isPhysicallyCrouched || s_isDeepProne || leftLocal.y < -0.30f);
+            bool doubleLegLowStance = (s_posture.isPhysicallyCrouched || s_posture.isDeepProne || leftLocal.y < -0.30f);
             bool doubleLegThighWrap = (handsDistSledge < 0.25f &&
                                        vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
                                        lVel.y > 1.15f && rVel.y > 1.15f);
@@ -1804,8 +1905,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 if (s_doubleLegLiftTime == 0) {
                     s_doubleLegLiftTime = now;
                     VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL DOUBLE-LEG LIFT INITIATED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
-                    vrState.leftHapticPulse = 0.90f;  // Heavy body lift strain (210 Hz)
-                    vrState.rightHapticPulse = 0.90f;
+                    HapticRequest(0, (0.90f), kHapticFinisher);  // Heavy body lift strain (210 Hz)
+                    HapticRequest(1, (0.90f), kHapticFinisher);
                 }
             }
             bool doubleLegSpikeSlam = (s_doubleLegLiftTime > 0 && (now - s_doubleLegLiftTime < 500) &&
@@ -1824,8 +1925,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 if (s_pistolTrapTime == 0) {
                     s_pistolTrapTime = now;
                     VR_LOG_INFO("Tactical Melee: ENEMY FIREARM TRAPPED & WEDGED WITH STUN BATON (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
-                    vrState.rightHapticPulse = 0.95f; // Electrostatic disarm arc snap (280 Hz)
-                    vrState.leftHapticPulse = 0.70f;
+                    HapticRequest(1, (0.95f), kHapticFinisher); // Electrostatic disarm arc snap (280 Hz)
+                    HapticRequest(0, (0.70f), kHapticReload);
                 }
             }
             bool batonThroatThrustStrike = (s_pistolTrapTime > 0 && (now - s_pistolTrapTime < 500) && rVel.z < -1.20f);
@@ -1834,7 +1935,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             // Inmate Pit Brawl Fireman's Carry & Deck Body-Spike Slam (ADR 0197)
             static DWORD s_lastFiremansCarryTime = 0;
             static DWORD s_firemansLoadTime = 0;
-            bool firemansLowDuck = (s_isPhysicallyCrouched || s_isDeepProne || leftLocal.y < -0.25f);
+            bool firemansLowDuck = (s_posture.isPhysicallyCrouched || s_posture.isDeepProne || leftLocal.y < -0.25f);
             bool firemansUnderhookLoad = (handsDistSledge < 0.25f &&
                                           vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
                                           rVel.y > 1.10f && lVel.z > 0.70f);
@@ -1842,8 +1943,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 if (s_firemansLoadTime == 0) {
                     s_firemansLoadTime = now;
                     VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL FIREMAN'S CARRY LOADED (Ry: %.2f, Lz: %.2f)", rVel.y, lVel.z);
-                    vrState.leftHapticPulse = 0.90f;  // Heavy shoulder load strain (220 Hz)
-                    vrState.rightHapticPulse = 0.90f;
+                    HapticRequest(0, (0.90f), kHapticFinisher);  // Heavy shoulder load strain (220 Hz)
+                    HapticRequest(1, (0.90f), kHapticFinisher);
                 }
             }
             bool firemansWhipThrow = (s_firemansLoadTime > 0 && (now - s_firemansLoadTime < 500) &&
@@ -1870,8 +1971,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     s_crossParryDeflectTime = now;
                     s_crossParryDirKey = (rVel.x > 0.0f || lVel.x > 0.0f) ? 'D' : 'A';
                     VR_LOG_INFO("Tactical Melee: STUN BATON CROSS-CHEST PARRY DEFLECTED (Dir: %c, Vx: %.2f)", s_crossParryDirKey, rVel.x);
-                    vrState.leftHapticPulse = 0.85f;  // Parry deflection shockwave (300 Hz)
-                    vrState.rightHapticPulse = 0.85f;
+                    HapticRequest(0, (0.85f), kHapticFinisher);  // Parry deflection shockwave (300 Hz)
+                    HapticRequest(1, (0.85f), kHapticReload);
                 }
             }
             bool crossParryRiposte = (s_crossParryDeflectTime > 0 && (now - s_crossParryDeflectTime < 500) && rVel.z < -1.25f);
@@ -1879,7 +1980,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
             // Inmate Pit Brawl Suloev Stretch Hamstring Submission Lock (ADR 0201)
             static DWORD s_lastSuloevTime = 0;
-            bool suloevLowCrouch = (s_isPhysicallyCrouched || s_isDeepProne || leftLocal.y < -0.30f);
+            bool suloevLowCrouch = (s_posture.isPhysicallyCrouched || s_posture.isDeepProne || leftLocal.y < -0.30f);
             bool suloevHookHold = (handsDistSledge < 0.25f && leftLocal.y < -0.35f &&
                                    vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
             bool suloevArchPull = (lVel.y > 1.05f && rVel.y > 1.05f);
@@ -1895,7 +1996,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             // Inmate Pit Brawl Duck-Under Back-Clinch Belly-to-Back Suplex Slam (ADR 0213)
             static DWORD s_lastBackSuplexTime = 0;
             static DWORD s_backSuplexClinchTime = 0;
-            bool duckUnderLow = (s_isPhysicallyCrouched || s_isDeepProne || leftLocal.y < -0.25f);
+            bool duckUnderLow = (s_posture.isPhysicallyCrouched || s_posture.isDeepProne || leftLocal.y < -0.25f);
             bool duckUnderRearSlip = (duckUnderLow && handsDistSledge < 0.24f &&
                                       fabsf(rVel.x) > 0.85f &&
                                       vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
@@ -1903,8 +2004,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 if (s_backSuplexClinchTime == 0) {
                     s_backSuplexClinchTime = now;
                     VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL REAR WAIST CLINCH LOCKED (Rx: %.2f)", rVel.x);
-                    vrState.leftHapticPulse = 0.90f;  // Abdominal lift strain (220 Hz)
-                    vrState.rightHapticPulse = 0.90f;
+                    HapticRequest(0, (0.90f), kHapticFinisher);  // Abdominal lift strain (220 Hz)
+                    HapticRequest(1, (0.90f), kHapticFinisher);
                 }
             }
             bool backSuplexHoistSlam = (s_backSuplexClinchTime > 0 && (now - s_backSuplexClinchTime < 500) &&
@@ -1923,8 +2024,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     s_radialDisarmTwistTime = now;
                     s_radialDisarmDirKey = (rVel.x > 0.0f) ? 'D' : 'A';
                     VR_LOG_INFO("Tactical Melee: STUN BATON RADIAL DISARM TWIST EXECUTED (Dir: %c, DeltaVx: %.2f)", s_radialDisarmDirKey, rVel.x - lVel.x);
-                    vrState.leftHapticPulse = 0.95f;  // Torque disarm snap (310 Hz)
-                    vrState.rightHapticPulse = 0.95f;
+                    HapticRequest(0, (0.95f), kHapticFinisher);  // Torque disarm snap (310 Hz)
+                    HapticRequest(1, (0.95f), kHapticFinisher);
                 }
             }
             bool radialDisarmThrust = (s_radialDisarmTwistTime > 0 && (now - s_radialDisarmTwistTime < 500) && rVel.z < -1.35f);
@@ -1939,8 +2040,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 if (s_thaiPlumClinchTime == 0) {
                     s_thaiPlumClinchTime = now;
                     VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL THAI PLUM COLLAR TIE LOCKED (Ly: %.2f, Ry: %.2f)", leftLocal.y, rightLocal.y);
-                    vrState.leftHapticPulse = 0.90f;  // Cervical collar drag tension (220 Hz)
-                    vrState.rightHapticPulse = 0.90f;
+                    HapticRequest(0, (0.90f), kHapticFinisher);  // Cervical collar drag tension (220 Hz)
+                    HapticRequest(1, (0.90f), kHapticFinisher);
                 }
             }
             bool thaiPlumKneeDrive = (s_thaiPlumClinchTime > 0 && (now - s_thaiPlumClinchTime < 600) &&
@@ -2006,7 +2107,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
             // Security Guard Stun Baton Forward High-Voltage Grounding Thrust & Arc Discharge Ring (ADR 0230)
             static DWORD s_lastGroundingThrustTime = 0;
-            bool groundingThrustStance = ((leftLocal.y < -0.25f || s_isPhysicallyCrouched) &&
+            bool groundingThrustStance = ((leftLocal.y < -0.25f || s_posture.isPhysicallyCrouched) &&
                                           handsDistSledge < 0.24f &&
                                           vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
                                           vrState.rightController.trigger > 0.65f);
@@ -2752,7 +2853,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     s_outsideLegSweepHookTime = now;
                     s_outsideLegSweepDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
                     VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL OUTSIDE LEG HOOKED (Dir: %c, Lx: %.2f)", s_outsideLegSweepDirKey, lVel.x);
-                    vrState.leftHapticPulse = 0.85f; // Sweep trip torque (200 Hz)
+                    HapticRequest(0, (0.85f), kHapticReload); // Sweep trip torque (200 Hz)
                 }
             }
             bool outsideLegKneeDrop = (s_outsideLegSweepHookTime > 0 && (now - s_outsideLegSweepHookTime < 500) && rVel.y < -1.25f);
@@ -2773,14 +2874,14 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 if (s_crossBlockHoldStart == 0) s_crossBlockHoldStart = now;
                 DWORD crossHoldDuration = now - s_crossBlockHoldStart;
                 if (crossHoldDuration >= 500) {
-                    vrState.leftHapticPulse = 0.90f;  // Escalating supercharge hum (340 Hz)
-                    vrState.rightHapticPulse = 0.90f;
+                    HapticRequest(0, (0.90f), kHapticFinisher);  // Escalating supercharge hum (340 Hz)
+                    HapticRequest(1, (0.90f), kHapticFinisher);
                     if (rVel.z < -1.30f && lVel.z < -1.10f) {
                         isCrossThrustOvercharged = true;
                     }
                 } else if (crossHoldDuration >= 300) {
-                    vrState.leftHapticPulse = 0.65f;  // Electrostatic barrier hum (240 Hz)
-                    vrState.rightHapticPulse = 0.65f;
+                    HapticRequest(0, (0.65f), kHapticLadder);  // Electrostatic barrier hum (240 Hz)
+                    HapticRequest(1, (0.65f), kHapticLadder);
                     if (rVel.z < -1.25f && lVel.z < -1.05f) {
                         isCrossThrustReady = true;
                     }
@@ -2903,8 +3004,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 // Track C #15: release folded into debounced tap above.
                 SendKey('W', false);
                 // Track C #15: release folded into debounced tap above.
-                vrState.rightHapticPulse = 0.98f; // Resonant cataclysm universal singularity overdrive shockwave (550 Hz)
-                vrState.leftHapticPulse = 0.98f;  // Structural deck universal recoil (480 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Resonant cataclysm universal singularity overdrive shockwave (550 Hz)
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck universal recoil (480 Hz)
                 goto combat_gesture_done;
             }
 
@@ -2950,8 +3051,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_cranialFulcrumZygomaticPinDirKey, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Concussive zygomatic fracture shockwave (540 Hz)
-                vrState.leftHapticPulse = 0.95f;  // Whizzer overhook drag torque (470 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Concussive zygomatic fracture shockwave (540 Hz)
+                HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer overhook drag torque (470 Hz)
                 goto combat_gesture_done;
             }
 
@@ -3065,8 +3166,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 // Track C #15: release folded into debounced tap above.
                 SendKey('W', false);
                 // Track C #15: release folded into debounced tap above.
-                vrState.rightHapticPulse = 0.98f; // Resonant cataclysm macrocosm singularity overdrive shockwave (540 Hz)
-                vrState.leftHapticPulse = 0.98f;  // Structural deck macrocosm recoil (470 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Resonant cataclysm macrocosm singularity overdrive shockwave (540 Hz)
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck macrocosm recoil (470 Hz)
                 goto combat_gesture_done;
             }
 
@@ -3110,8 +3211,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_cranialFulcrumMandiblePinDirKey, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Concussive mandible fracture shockwave (530 Hz)
-                vrState.leftHapticPulse = 0.95f;  // Whizzer overhook drag torque (460 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Concussive mandible fracture shockwave (530 Hz)
+                HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer overhook drag torque (460 Hz)
                 goto combat_gesture_done;
             }
 
@@ -3221,8 +3322,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 // Track C #15: release folded into debounced tap above.
                 SendKey('W', false);
                 // Track C #15: release folded into debounced tap above.
-                vrState.rightHapticPulse = 0.98f; // Resonant cataclysm trans-cosmic singularity overdrive shockwave (530 Hz)
-                vrState.leftHapticPulse = 0.98f;  // Structural deck trans-cosmic recoil (460 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Resonant cataclysm trans-cosmic singularity overdrive shockwave (530 Hz)
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck trans-cosmic recoil (460 Hz)
                 goto combat_gesture_done;
             }
 
@@ -3264,8 +3365,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_cranialFulcrumSternumPinDirKey, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Concussive sternum fracture shockwave (520 Hz)
-                vrState.leftHapticPulse = 0.95f;  // Whizzer overhook drag torque (450 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Concussive sternum fracture shockwave (520 Hz)
+                HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer overhook drag torque (450 Hz)
                 goto combat_gesture_done;
             }
 
@@ -3369,8 +3470,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 // Track C #15: release folded into debounced tap above.
                 SendKey('W', false);
                 // Track C #15: release folded into debounced tap above.
-                vrState.rightHapticPulse = 0.98f; // Resonant cataclysm omniverse singularity overdrive shockwave (520 Hz)
-                vrState.leftHapticPulse = 0.98f;  // Structural deck omniverse recoil (450 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Resonant cataclysm omniverse singularity overdrive shockwave (520 Hz)
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck omniverse recoil (450 Hz)
                 goto combat_gesture_done;
             }
             if (cranialFulcrumScapulaPinPlunge && (now - s_lastCranialFulcrumScapulaPinTime > 2000)) {
@@ -3409,8 +3510,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_cranialFulcrumScapulaPinDirKey, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Concussive scapula fracture shockwave (510 Hz)
-                vrState.leftHapticPulse = 0.95f;  // Whizzer overhook drag torque (440 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Concussive scapula fracture shockwave (510 Hz)
+                HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer overhook drag torque (440 Hz)
                 goto combat_gesture_done;
             }
 
@@ -3506,8 +3607,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 // Track C #15: release folded into debounced tap above.
                 SendKey('W', false);
                 // Track C #15: release folded into debounced tap above.
-                vrState.rightHapticPulse = 0.98f; // Resonant cataclysm multiverse singularity overdrive shockwave (510 Hz)
-                vrState.leftHapticPulse = 0.98f;  // Structural deck multiverse recoil (440 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Resonant cataclysm multiverse singularity overdrive shockwave (510 Hz)
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck multiverse recoil (440 Hz)
                 goto combat_gesture_done;
             }
             if (cranialFulcrumClaviclePinPlunge && (now - s_lastCranialFulcrumClaviclePinTime > 2000)) {
@@ -3544,8 +3645,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_cranialFulcrumClaviclePinDirKey, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Concussive clavicle fracture shockwave (510 Hz)
-                vrState.leftHapticPulse = 0.95f;  // Whizzer overhook drag torque (440 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Concussive clavicle fracture shockwave (510 Hz)
+                HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer overhook drag torque (440 Hz)
                 goto combat_gesture_done;
             }
 
@@ -3633,8 +3734,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 // Track C #15: release folded into debounced tap above.
                 SendKey('W', false);
                 // Track C #15: release folded into debounced tap above.
-                vrState.rightHapticPulse = 0.98f; // Resonant cataclysm continuum singularity overdrive shockwave (500 Hz)
-                vrState.leftHapticPulse = 0.98f;  // Structural deck continuum recoil (430 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Resonant cataclysm continuum singularity overdrive shockwave (500 Hz)
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck continuum recoil (430 Hz)
                 goto combat_gesture_done;
             }
             if (cranialFulcrumRibSlamPlunge && (now - s_lastCranialFulcrumRibSlamTime > 2000)) {
@@ -3669,8 +3770,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_cranialFulcrumRibSlamDirKey, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Concussive ribcage fracture shockwave (500 Hz)
-                vrState.leftHapticPulse = 0.95f;  // Whizzer overhook drag torque (430 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Concussive ribcage fracture shockwave (500 Hz)
+                HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer overhook drag torque (430 Hz)
                 goto combat_gesture_done;
             }
 
@@ -3752,8 +3853,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 // Track C #15: release folded into debounced tap above.
                 SendKey('W', false);
                 // Track C #15: release folded into debounced tap above.
-                vrState.rightHapticPulse = 0.98f; // Resonant cataclysm Interdimensional overdrive shockwave (500 Hz)
-                vrState.leftHapticPulse = 0.98f;  // Structural deck Interdimensional recoil (420 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Resonant cataclysm Interdimensional overdrive shockwave (500 Hz)
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck Interdimensional recoil (420 Hz)
                 goto combat_gesture_done;
             }
             if (cranialFulcrumKneePlunge && (now - s_lastCranialFulcrumKneeTime > 2000)) {
@@ -3788,8 +3889,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_cranialFulcrumKneeDirKey, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Concussive fulcrum knee fracture shockwave (500 Hz)
-                vrState.leftHapticPulse = 0.95f;  // Whizzer overhook drag torque (420 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Concussive fulcrum knee fracture shockwave (500 Hz)
+                HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer overhook drag torque (420 Hz)
                 goto combat_gesture_done;
             }
 
@@ -3867,8 +3968,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 // Track C #15: release folded into debounced tap above.
                 SendKey('W', false);
                 // Track C #15: release folded into debounced tap above.
-                vrState.rightHapticPulse = 0.98f; // Resonant cataclysm Transdimensional overdrive shockwave (490 Hz)
-                vrState.leftHapticPulse = 0.98f;  // Structural deck Transdimensional recoil (410 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Resonant cataclysm Transdimensional overdrive shockwave (490 Hz)
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck Transdimensional recoil (410 Hz)
                 goto combat_gesture_done;
             }
             if (cranialFulcrumArmbarPlunge && (now - s_lastCranialFulcrumArmbarTime > 2000)) {
@@ -3901,8 +4002,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_cranialFulcrumArmbarDirKey, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Concussive fulcrum armbar fracture shockwave (490 Hz)
-                vrState.leftHapticPulse = 0.95f;  // Whizzer overhook drag torque (410 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Concussive fulcrum armbar fracture shockwave (490 Hz)
+                HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer overhook drag torque (410 Hz)
                 goto combat_gesture_done;
             }
 
@@ -3976,8 +4077,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 // Track C #15: release folded into debounced tap above.
                 SendKey('W', false);
                 // Track C #15: release folded into debounced tap above.
-                vrState.rightHapticPulse = 0.98f; // Resonant cataclysm Hyperdimensional overdrive shockwave (480 Hz)
-                vrState.leftHapticPulse = 0.98f;  // Structural deck Hyperdimensional recoil (400 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Resonant cataclysm Hyperdimensional overdrive shockwave (480 Hz)
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck Hyperdimensional recoil (400 Hz)
                 goto combat_gesture_done;
             }
             if (cranialFulcrumChokePlunge && (now - s_lastCranialFulcrumChokeTime > 2000)) {
@@ -4008,8 +4109,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_cranialFulcrumChokeDirKey, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Concussive fulcrum leverage shockwave (480 Hz)
-                vrState.leftHapticPulse = 0.95f;  // Whizzer collar tie drag torque (400 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Concussive fulcrum leverage shockwave (480 Hz)
+                HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer collar tie drag torque (400 Hz)
                 goto combat_gesture_done;
             }
 
@@ -4075,8 +4176,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', false);
                 SendKey('W', false);
                 SendKey(VK_SPACE, false);
-                vrState.rightHapticPulse = 0.98f; // Resonant cataclysm Metaverse overdrive shockwave (470 Hz)
-                vrState.leftHapticPulse = 0.98f;  // Structural deck Metaverse recoil (390 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Resonant cataclysm Metaverse overdrive shockwave (470 Hz)
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck Metaverse recoil (390 Hz)
                 goto combat_gesture_done;
             }
             if (cranialLeverPinPlunge && (now - s_lastCranialLeverPinTime > 2000)) {
@@ -4105,8 +4206,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_cranialLeverPinDirKey, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Concussive fulcrum lever lock shockwave (470 Hz)
-                vrState.leftHapticPulse = 0.95f;  // Whizzer collar tie drag torque (390 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Concussive fulcrum lever lock shockwave (470 Hz)
+                HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer collar tie drag torque (390 Hz)
                 goto combat_gesture_done;
             }
 
@@ -4172,8 +4273,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 // Track C #15: release folded into debounced tap above.
                 SendKey('W', false);
                 // Track C #15: release folded into debounced tap above.
-                vrState.rightHapticPulse = 0.98f; // Resonant cataclysm Omniverse overdrive shockwave (460 Hz)
-                vrState.leftHapticPulse = 0.98f;  // Structural deck Omniverse recoil (380 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Resonant cataclysm Omniverse overdrive shockwave (460 Hz)
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck Omniverse recoil (380 Hz)
                 goto combat_gesture_done;
             }
             if (cranialPivotSlamPlunge && (now - s_lastCranialPivotSlamTime > 2000)) {
@@ -4200,8 +4301,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_cranialPivotSlamDirKey, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Concussive deck impact and spinal fracture shockwave (460 Hz)
-                vrState.leftHapticPulse = 0.95f;  // Whizzer collar tie drag (380 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Concussive deck impact and spinal fracture shockwave (460 Hz)
+                HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer collar tie drag (380 Hz)
                 goto combat_gesture_done;
             }
             if (plasmaSuperclusterPlunge && (now - s_lastPlasmaSuperclusterTime > 2000)) {
@@ -4262,8 +4363,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', false);
                 SendKey('W', false);
                 SendKey(VK_SPACE, false);
-                vrState.rightHapticPulse = 0.98f; // Resonant cataclysm Supercluster overdrive shockwave (450 Hz)
-                vrState.leftHapticPulse = 0.98f;  // Structural deck Supercluster recoil (360 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Resonant cataclysm Supercluster overdrive shockwave (450 Hz)
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck Supercluster recoil (360 Hz)
                 goto combat_gesture_done;
             }
             if (cranialPivotTwistPlunge && (now - s_lastCranialPivotTwistTime > 2000)) {
@@ -4286,8 +4387,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_cranialPivotTwistDirKey, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Cervical vertebra fracture shockwave (450 Hz)
-                vrState.leftHapticPulse = 0.95f;  // Whizzer collar tie drag (370 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Cervical vertebra fracture shockwave (450 Hz)
+                HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer collar tie drag (370 Hz)
                 goto combat_gesture_done;
             }
             if (plasmaCosmicDawnPlunge && (now - s_lastPlasmaCosmicDawnTime > 2000)) {
@@ -4346,8 +4447,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', false);
                 SendKey('W', false);
                 SendKey(VK_SPACE, false);
-                vrState.rightHapticPulse = 0.98f; // Resonant cataclysm Cosmic Dawn overdrive shockwave (440 Hz)
-                vrState.leftHapticPulse = 0.98f;  // Structural deck Cosmic Dawn recoil (340 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Resonant cataclysm Cosmic Dawn overdrive shockwave (440 Hz)
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck Cosmic Dawn recoil (340 Hz)
                 goto combat_gesture_done;
             }
             if (cranialDoubleStrikePlunge && (now - s_lastCranialDoubleStrikeTime > 2000)) {
@@ -4368,8 +4469,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_cranialDoubleStrikeDirKey, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Dual cranial structural impact shockwave (440 Hz)
-                vrState.leftHapticPulse = 0.95f;  // Whizzer collar tie drag (360 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Dual cranial structural impact shockwave (440 Hz)
+                HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer collar tie drag (360 Hz)
                 goto combat_gesture_done;
             }
             if (plasmaBigBangPlunge && (now - s_lastPlasmaBigBangTime > 2000)) {
@@ -4424,8 +4525,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', false);
                 SendKey('W', false);
                 SendKey(VK_SPACE, false);
-                vrState.rightHapticPulse = 0.98f; // Resonant cataclysm Big Bang shockwave (430 Hz)
-                vrState.leftHapticPulse = 0.98f;  // Structural deck Big Bang recoil (320 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Resonant cataclysm Big Bang shockwave (430 Hz)
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck Big Bang recoil (320 Hz)
                 goto combat_gesture_done;
             }
             if (cranialStompPlunge && (now - s_lastCranialStompTime > 2000)) {
@@ -4444,8 +4545,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_cranialStompDirKey, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Cranial deck grating fracture shockwave (430 Hz)
-                vrState.leftHapticPulse = 0.95f;  // Whizzer collar tie drag (350 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Cranial deck grating fracture shockwave (430 Hz)
+                HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer collar tie drag (350 Hz)
                 goto combat_gesture_done;
             }
             if (plasmaGenesisPlunge && (now - s_lastPlasmaGenesisTime > 2000)) {
@@ -4496,8 +4597,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', false);
                 SendKey('W', false);
                 SendKey(VK_SPACE, false);
-                vrState.rightHapticPulse = 0.98f; // Resonant cataclysm genesis overdrive shockwave (420 Hz)
-                vrState.leftHapticPulse = 0.98f;  // Structural deck genesis recoil (300 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Resonant cataclysm genesis overdrive shockwave (420 Hz)
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck genesis recoil (300 Hz)
                 goto combat_gesture_done;
             }
             if (cranialPostImpactPlunge && (now - s_lastCranialPostImpactTime > 2000)) {
@@ -4514,8 +4615,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_cranialPostImpactDirKey, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Cranial steel post collision shockwave (420 Hz)
-                vrState.leftHapticPulse = 0.95f;  // Whizzer collar tie drag (340 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Cranial steel post collision shockwave (420 Hz)
+                HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer collar tie drag (340 Hz)
                 goto combat_gesture_done;
             }
             if (plasmaSingularityOverdrivePlunge && (now - s_lastPlasmaSingularityOverdriveTime > 2000)) {
@@ -4564,8 +4665,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', false);
                 SendKey('W', false);
                 SendKey(VK_SPACE, false);
-                vrState.rightHapticPulse = 0.98f; // Resonant cataclysm singularity overdrive shockwave (410 Hz)
-                vrState.leftHapticPulse = 0.98f;  // Structural deck singularity recoil (280 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Resonant cataclysm singularity overdrive shockwave (410 Hz)
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck singularity recoil (280 Hz)
                 goto combat_gesture_done;
             }
             if (cranialGrindPlunge && (now - s_lastCranialGrindTime > 2000)) {
@@ -4582,8 +4683,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_cranialGrindDirKey, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Cranial diamond grating abrasion shockwave (410 Hz)
-                vrState.leftHapticPulse = 0.95f;  // Whizzer collar tie drag (330 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Cranial diamond grating abrasion shockwave (410 Hz)
+                HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer collar tie drag (330 Hz)
                 goto combat_gesture_done;
             }
             if (plasmaHypernovaPlunge && (now - s_lastPlasmaHypernovaTime > 2000)) {
@@ -4630,8 +4731,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', false);
                 SendKey('W', false);
                 SendKey(VK_SPACE, false);
-                vrState.rightHapticPulse = 0.98f; // Resonant cataclysm hypernova shockwave (400 Hz)
-                vrState.leftHapticPulse = 0.98f;  // Structural deck hypernova recoil (260 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Resonant cataclysm hypernova shockwave (400 Hz)
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck hypernova recoil (260 Hz)
                 goto combat_gesture_done;
             }
             if (cervicalDeckPinPlunge && (now - s_lastCervicalDeckPinTime > 2000)) {
@@ -4648,8 +4749,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_cervicalDeckPinDirKey, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Cervical vertebra fracture shockwave (400 Hz)
-                vrState.leftHapticPulse = 0.95f;  // Whizzer collar tie drag (320 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Cervical vertebra fracture shockwave (400 Hz)
+                HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer collar tie drag (320 Hz)
                 goto combat_gesture_done;
             }
             if (plasmaSupernovaPlunge && (now - s_lastPlasmaSupernovaTime > 2000)) {
@@ -4694,8 +4795,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', false);
                 SendKey('W', false);
                 SendKey(VK_SPACE, false);
-                vrState.rightHapticPulse = 0.98f; // Resonant cataclysm supernova shockwave (400 Hz)
-                vrState.leftHapticPulse = 0.98f;  // Structural deck supernova recoil (240 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Resonant cataclysm supernova shockwave (400 Hz)
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck supernova recoil (240 Hz)
                 goto combat_gesture_done;
             }
             if (sternumKneeSpikePlunge && (now - s_lastSternumKneeSpikeTime > 2000)) {
@@ -4712,8 +4813,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_sternumKneeSpikeDirKey, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Sternum fracture shockwave (400 Hz)
-                vrState.leftHapticPulse = 0.95f;  // Whizzer collar tie drag (310 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Sternum fracture shockwave (400 Hz)
+                HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer collar tie drag (310 Hz)
                 goto combat_gesture_done;
             }
             if (plasmaSingularityPlunge && (now - s_lastPlasmaSingularityTime > 2000)) {
@@ -4754,8 +4855,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', false);
                 SendKey('W', false);
                 SendKey(VK_SPACE, false);
-                vrState.rightHapticPulse = 0.98f; // Resonant cataclysm singularity shockwave (390 Hz)
-                vrState.leftHapticPulse = 0.98f;  // Structural deck singularity recoil (220 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Resonant cataclysm singularity shockwave (390 Hz)
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck singularity recoil (220 Hz)
                 goto combat_gesture_done;
             }
             if (cranialDeckDriverPlunge && (now - s_lastCranialDeckDriverTime > 2000)) {
@@ -4772,8 +4873,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_cranialDeckDriverDirKey, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Cranial deck grating impact shockwave (390 Hz)
-                vrState.leftHapticPulse = 0.95f;  // Whizzer collar tie drag (300 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Cranial deck grating impact shockwave (390 Hz)
+                HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer collar tie drag (300 Hz)
                 goto combat_gesture_done;
             }
             if (plasmaCataclysmOverdrivePlunge && (now - s_lastPlasmaCataclysmOverdriveTime > 2000)) {
@@ -4810,8 +4911,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', false);
                 SendKey('W', false);
                 SendKey(VK_SPACE, false);
-                vrState.rightHapticPulse = 0.98f; // Resonant cataclysm overdrive shockwave (380 Hz)
-                vrState.leftHapticPulse = 0.98f;  // Structural girder recoil (200 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Resonant cataclysm overdrive shockwave (380 Hz)
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Structural girder recoil (200 Hz)
                 goto combat_gesture_done;
             }
             if (sternumElbowDropPlunge && (now - s_lastSternumElbowDropTime > 2000)) {
@@ -4828,8 +4929,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_sternumElbowDropDirKey, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Sternum fracture shockwave (380 Hz)
-                vrState.leftHapticPulse = 0.95f;  // Whizzer collar tie drag (290 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Sternum fracture shockwave (380 Hz)
+                HapticRequest(0, (0.95f), kHapticFinisher);  // Whizzer collar tie drag (290 Hz)
                 goto combat_gesture_done;
             }
             if (plasmaCataclysmPlunge && (now - s_lastPlasmaCataclysmTime > 2000)) {
@@ -4862,8 +4963,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', false);
                 SendKey('W', false);
                 SendKey(VK_SPACE, false);
-                vrState.rightHapticPulse = 0.98f; // Resonant cataclysm shockwave (360 Hz)
-                vrState.leftHapticPulse = 0.98f;  // Structural girder recoil (160 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Resonant cataclysm shockwave (360 Hz)
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Structural girder recoil (160 Hz)
                 goto combat_gesture_done;
             }
             if (thoracicPinLockThrow && (now - s_lastThoracicPinLockTime > 2000)) {
@@ -4880,8 +4981,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_thoracicPinLockDirKey, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Shoulder joint keylock fracture shockwave (360 Hz)
-                vrState.leftHapticPulse = 0.92f;  // Whizzer collar tie drag (270 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Shoulder joint keylock fracture shockwave (360 Hz)
+                HapticRequest(0, (0.92f), kHapticFinisher);  // Whizzer collar tie drag (270 Hz)
                 goto combat_gesture_done;
             }
             if (plasmaSeismOverdrivePlunge && (now - s_lastPlasmaSeismOverdriveTime > 2000)) {
@@ -4912,8 +5013,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', false);
                 SendKey('W', false);
                 SendKey(VK_SPACE, false);
-                vrState.rightHapticPulse = 0.98f; // Resonant seism overdrive shockwave (360 Hz)
-                vrState.leftHapticPulse = 0.98f;  // Structural girder recoil (150 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Resonant seism overdrive shockwave (360 Hz)
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Structural girder recoil (150 Hz)
                 goto combat_gesture_done;
             }
             if (thoracicMatSlamThrow && (now - s_lastThoracicMatSlamTime > 2000)) {
@@ -4930,8 +5031,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_thoracicMatSlamDirKey, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Thoracic cage fracture shockwave (360 Hz)
-                vrState.leftHapticPulse = 0.92f;  // Whizzer collar tie drag (270 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Thoracic cage fracture shockwave (360 Hz)
+                HapticRequest(0, (0.92f), kHapticFinisher);  // Whizzer collar tie drag (270 Hz)
                 goto combat_gesture_done;
             }
             if (plasmaResonantSeismPlunge && (now - s_lastPlasmaResonantSeismTime > 2000)) {
@@ -4960,8 +5061,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', false);
                 SendKey('W', false);
                 SendKey(VK_SPACE, false);
-                vrState.rightHapticPulse = 0.98f; // Resonant seism shockwave (360 Hz)
-                vrState.leftHapticPulse = 0.98f;  // Structural girder recoil (140 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Resonant seism shockwave (360 Hz)
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Structural girder recoil (140 Hz)
                 goto combat_gesture_done;
             }
             if (thoracicDislocationThrow && (now - s_lastThoracicDislocationTime > 2000)) {
@@ -4978,8 +5079,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_thoracicDislocationDirKey, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Thoracic vertebra dislocation shockwave (360 Hz)
-                vrState.leftHapticPulse = 0.92f;  // Whizzer collar tie drag (260 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Thoracic vertebra dislocation shockwave (360 Hz)
+                HapticRequest(0, (0.92f), kHapticFinisher);  // Whizzer collar tie drag (260 Hz)
                 goto combat_gesture_done;
             }
             if (plasmaHarmonicQuakePlunge && (now - s_lastPlasmaHarmonicQuakeTime > 2000)) {
@@ -5006,8 +5107,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', false);
                 SendKey('W', false);
                 SendKey(VK_SPACE, false);
-                vrState.rightHapticPulse = 0.98f; // Harmonic plasma quake wave (360 Hz)
-                vrState.leftHapticPulse = 0.98f;  // Structural deck recoil (130 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Harmonic plasma quake wave (360 Hz)
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck recoil (130 Hz)
                 goto combat_gesture_done;
             }
             if (hyperextensionFinisherThrow && (now - s_lastHyperextensionFinisherTime > 2000)) {
@@ -5024,8 +5125,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_hyperextensionFinisherDirKey, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Cervical hyperextension fracture shockwave (360 Hz)
-                vrState.leftHapticPulse = 0.92f;  // Whizzer collar tie drag (260 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Cervical hyperextension fracture shockwave (360 Hz)
+                HapticRequest(0, (0.92f), kHapticFinisher);  // Whizzer collar tie drag (260 Hz)
                 goto combat_gesture_done;
             }
             if (plasmaResonantWavePlunge && (now - s_lastPlasmaResonantWaveTime > 2000)) {
@@ -5050,8 +5151,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', false);
                 SendKey('W', false);
                 SendKey(VK_SPACE, false);
-                vrState.rightHapticPulse = 0.98f; // Harmonic plasma detonation wave (360 Hz)
-                vrState.leftHapticPulse = 0.98f;  // Structural deck recoil (120 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Harmonic plasma detonation wave (360 Hz)
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck recoil (120 Hz)
                 goto combat_gesture_done;
             }
             if (cervicalGratingSlamThrow && (now - s_lastCervicalGratingSlamTime > 2000)) {
@@ -5068,8 +5169,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_cervicalGratingSlamDirKey, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Cervical vertebra fracture shockwave (360 Hz)
-                vrState.leftHapticPulse = 0.92f;  // Whizzer collar tie drag (250 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Cervical vertebra fracture shockwave (360 Hz)
+                HapticRequest(0, (0.92f), kHapticFinisher);  // Whizzer collar tie drag (250 Hz)
                 goto combat_gesture_done;
             }
             if (plasmaOverloadWavePlunge && (now - s_lastPlasmaOverloadWaveTime > 2000)) {
@@ -5092,8 +5193,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', false);
                 SendKey('W', false);
                 SendKey(VK_SPACE, false);
-                vrState.rightHapticPulse = 0.98f; // Plasma overload detonation wave (360 Hz)
-                vrState.leftHapticPulse = 0.98f;  // Structural deck recoil (110 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Plasma overload detonation wave (360 Hz)
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck recoil (110 Hz)
                 goto combat_gesture_done;
             }
             if (sternumGratingSlamThrow && (now - s_lastSternumGratingSlamTime > 2000)) {
@@ -5110,8 +5211,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_sternumGratingSlamDirKey, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Thoracic cage fracture shockwave (360 Hz)
-                vrState.leftHapticPulse = 0.92f;  // Whizzer collar tie drag (250 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Thoracic cage fracture shockwave (360 Hz)
+                HapticRequest(0, (0.92f), kHapticFinisher);  // Whizzer collar tie drag (250 Hz)
                 goto combat_gesture_done;
             }
             if (plasmaCleaveWavePlunge && (now - s_lastPlasmaCleaveWaveTime > 2000)) {
@@ -5132,8 +5233,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', false);
                 SendKey('W', false);
                 SendKey(VK_SPACE, false);
-                vrState.rightHapticPulse = 0.98f; // Kinetic plasma cleave wave (360 Hz)
-                vrState.leftHapticPulse = 0.98f;  // Structural deck recoil (100 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Kinetic plasma cleave wave (360 Hz)
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck recoil (100 Hz)
                 goto combat_gesture_done;
             }
             if (sternumFractureSpikeThrow && (now - s_lastSternumFractureSpikeTime > 2000)) {
@@ -5150,8 +5251,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_sternumFractureSpikeDirKey, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Sternum bone fracture shockwave (360 Hz)
-                vrState.leftHapticPulse = 0.92f;  // Collar tie tension (250 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Sternum bone fracture shockwave (360 Hz)
+                HapticRequest(0, (0.92f), kHapticFinisher);  // Collar tie tension (250 Hz)
                 goto combat_gesture_done;
             }
             if (kineticPulseWavePlunge && (now - s_lastKineticPulseWaveTime > 2000)) {
@@ -5170,8 +5271,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', false);
                 SendKey('W', false);
                 SendKey(VK_SPACE, false);
-                vrState.rightHapticPulse = 0.98f; // Kinetic plasma detonation wave (360 Hz)
-                vrState.leftHapticPulse = 0.98f;  // Structural deck recoil (90 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Kinetic plasma detonation wave (360 Hz)
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck recoil (90 Hz)
                 goto combat_gesture_done;
             }
             if (sternumKneeDropThrow && (now - s_lastSternumKneeDropTime > 2000)) {
@@ -5188,8 +5289,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_sternumKneeDropDirKey, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Sternum bone fracture shockwave (360 Hz)
-                vrState.leftHapticPulse = 0.92f;  // Collar tie tension (240 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Sternum bone fracture shockwave (360 Hz)
+                HapticRequest(0, (0.92f), kHapticFinisher);  // Collar tie tension (240 Hz)
                 goto combat_gesture_done;
             }
             if (omnidirectionalPulsePlunge && (now - s_lastOmnidirectionalPulseTime > 2000)) {
@@ -5208,8 +5309,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', false);
                 SendKey('W', false);
                 SendKey(VK_SPACE, false);
-                vrState.rightHapticPulse = 0.98f; // Double-frequency electrostatic pulse blast (360 Hz)
-                vrState.leftHapticPulse = 0.98f;  // Seismic deck concussion (80 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Double-frequency electrostatic pulse blast (360 Hz)
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Seismic deck concussion (80 Hz)
                 goto combat_gesture_done;
             }
             if (whizzerGroundDislocationThrow && (now - s_lastWhizzerGroundDislocationTime > 2000)) {
@@ -5226,8 +5327,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_whizzerGroundDislocationDirKey, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Shoulder socket fracture and vertebral crack (360 Hz)
-                vrState.leftHapticPulse = 0.92f;  // Overhook torque strain (230 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Shoulder socket fracture and vertebral crack (360 Hz)
+                HapticRequest(0, (0.92f), kHapticFinisher);  // Overhook torque strain (230 Hz)
                 goto combat_gesture_done;
             }
             if (omnidirectionalArcPlunge && (now - s_lastOmnidirectionalArcTime > 2000)) {
@@ -5244,8 +5345,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', false);
                 SendKey('W', false);
                 SendKey(VK_SPACE, false);
-                vrState.rightHapticPulse = 0.98f; // Radial dielectric breakdown wave (360 Hz)
-                vrState.leftHapticPulse = 0.95f;  // Landing seismic dispersion (75 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Radial dielectric breakdown wave (360 Hz)
+                HapticRequest(0, (0.95f), kHapticFinisher);  // Landing seismic dispersion (75 Hz)
                 goto combat_gesture_done;
             }
             if (whizzerGroundFinisherThrow && (now - s_lastWhizzerGroundFinisherTime > 2000)) {
@@ -5262,8 +5363,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_whizzerGroundFinisherDirKey, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Bone fracture impact shockwave (360 Hz)
-                vrState.leftHapticPulse = 0.90f;  // Downward collar tie drag (220 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Bone fracture impact shockwave (360 Hz)
+                HapticRequest(0, (0.90f), kHapticFinisher);  // Downward collar tie drag (220 Hz)
                 goto combat_gesture_done;
             }
             if (deckImpactPlunge && (now - s_lastDeckImpactTime > 2000)) {
@@ -5280,8 +5381,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', false);
                 SendKey('W', false);
                 SendKey(VK_SPACE, false);
-                vrState.rightHapticPulse = 0.98f; // Concussive electro-kinetic deck blast (360 Hz)
-                vrState.leftHapticPulse = 0.98f;  // Structural deck resonance (60 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Concussive electro-kinetic deck blast (360 Hz)
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Structural deck resonance (60 Hz)
                 goto combat_gesture_done;
             }
             if (hyperextensionSpikeThrow && (now - s_lastHyperextensionSpikeTime > 2000)) {
@@ -5298,8 +5399,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_hyperextensionSpikeDirKey, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Cervical facet dislocation and mat impact shockwave (360 Hz)
-                vrState.leftHapticPulse = 0.92f;  // Chin thrust hyperextension torque (240 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Cervical facet dislocation and mat impact shockwave (360 Hz)
+                HapticRequest(0, (0.92f), kHapticFinisher);  // Chin thrust hyperextension torque (240 Hz)
                 goto combat_gesture_done;
             }
             if (vaultKineticCleavePlunge && (now - s_lastVaultKineticCleaveTime > 2000)) {
@@ -5316,8 +5417,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', false);
                 SendKey('W', false);
                 SendKey(VK_SPACE, false);
-                vrState.rightHapticPulse = 0.98f; // Kinetic plasma detonation blast (360 Hz)
-                vrState.leftHapticPulse = 0.90f;  // Two-handed landing frame recoil (80 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Kinetic plasma detonation blast (360 Hz)
+                HapticRequest(0, (0.90f), kHapticFinisher);  // Two-handed landing frame recoil (80 Hz)
                 goto combat_gesture_done;
             }
             if (thoracicSlamThrow && (now - s_lastThoracicSlamTime > 2000)) {
@@ -5334,8 +5435,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_thoracicSlamDirKey, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Ribcage crush and deck grating impact shockwave (360 Hz)
-                vrState.leftHapticPulse = 0.90f;  // Thoracic squeeze lift strain (220 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Ribcage crush and deck grating impact shockwave (360 Hz)
+                HapticRequest(0, (0.90f), kHapticFinisher);  // Thoracic squeeze lift strain (220 Hz)
                 goto combat_gesture_done;
             }
             if (vaultGroundArcPlunge && (now - s_lastVaultGroundArcTime > 2000)) {
@@ -5352,8 +5453,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', false);
                 SendKey('W', false);
                 SendKey(VK_SPACE, false);
-                vrState.rightHapticPulse = 0.98f; // Dielectric deck breakdown (360 Hz)
-                vrState.leftHapticPulse = 0.95f;  // Landing seismic dispersion (70 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Dielectric deck breakdown (360 Hz)
+                HapticRequest(0, (0.95f), kHapticFinisher);  // Landing seismic dispersion (70 Hz)
                 goto combat_gesture_done;
             }
             if (cervicalSpikeThrow && (now - s_lastCervicalSpikeTime > 2000)) {
@@ -5370,8 +5471,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_cervicalSpikeDirKey, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Cervical vertebra fracture shockwave (360 Hz)
-                vrState.leftHapticPulse = 0.90f;  // Collar tie neck drag tension (220 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Cervical vertebra fracture shockwave (360 Hz)
+                HapticRequest(0, (0.90f), kHapticFinisher);  // Collar tie neck drag tension (220 Hz)
                 goto combat_gesture_done;
             }
             if (cleaveArcBlastStrike && (now - s_lastCleaveArcBlastTime > 2000)) {
@@ -5388,8 +5489,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', false);
                 SendKey('W', false);
                 SendKey('S', false);
-                vrState.rightHapticPulse = 0.98f; // Frontal arc discharge detonation (360 Hz)
-                vrState.leftHapticPulse = 0.90f;  // Two-handed shaft recoil (220 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Frontal arc discharge detonation (360 Hz)
+                HapticRequest(0, (0.90f), kHapticFinisher);  // Two-handed shaft recoil (220 Hz)
                 goto combat_gesture_done;
             }
             if (whizzerCounterThrow && (now - s_lastWhizzerCounterTime > 2000)) {
@@ -5406,8 +5507,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_whizzerCounterDirKey, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Shoulder capsule dislocation and bone crack (350 Hz)
-                vrState.leftHapticPulse = 0.85f;  // Overhook fulcrum strain (210 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Shoulder capsule dislocation and bone crack (350 Hz)
+                HapticRequest(0, (0.85f), kHapticReload);  // Overhook fulcrum strain (210 Hz)
                 goto combat_gesture_done;
             }
             if (kineticCleaveSwing && (now - s_lastKineticCleaveTime > 2000)) {
@@ -5422,8 +5523,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', false);
                 SendKey('W', false);
                 SendKey('S', false);
-                vrState.rightHapticPulse = 0.98f; // High-arc kinetic impact and plasma discharge (360 Hz)
-                vrState.leftHapticPulse = 0.88f;  // Secondary grip dielectric dissipation (240 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // High-arc kinetic impact and plasma discharge (360 Hz)
+                HapticRequest(0, (0.88f), kHapticReload);  // Secondary grip dielectric dissipation (240 Hz)
                 goto combat_gesture_done;
             }
             if (lateralSuplexThrow && (now - s_lastLateralSuplexTime > 2000)) {
@@ -5440,8 +5541,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_lateralSuplexDirKey, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Spine compression and mat impact shockwave (360 Hz)
-                vrState.leftHapticPulse = 0.92f;  // Double underhook torso lift torque (190 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Spine compression and mat impact shockwave (360 Hz)
+                HapticRequest(0, (0.92f), kHapticFinisher);  // Double underhook torso lift torque (190 Hz)
                 goto combat_gesture_done;
             }
             if (groundingThrustLunge && (now - s_lastGroundingThrustTime > 2000)) {
@@ -5458,8 +5559,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', false);
                 SendKey('W', false);
                 SendKey('C', false);
-                vrState.rightHapticPulse = 0.98f; // Closed-circuit dielectric breakdown (350 Hz)
-                vrState.leftHapticPulse = 0.90f;  // Floor conduit surge (60 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Closed-circuit dielectric breakdown (350 Hz)
+                HapticRequest(0, (0.90f), kHapticFinisher);  // Floor conduit surge (60 Hz)
                 goto combat_gesture_done;
             }
             if (thaiPlumElbowPlunge && (now - s_lastThaiPlumElbowTime > 2000)) {
@@ -5474,8 +5575,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, false);
                 SendKey(s_thaiPlumElbowDirKey, false);
                 SendKey('W', false);
-                vrState.leftHapticPulse = 0.85f;  // Cervical collar tension (220 Hz)
-                vrState.rightHapticPulse = 0.98f; // Cranial bone fracture shockwave (350 Hz)
+                HapticRequest(0, (0.85f), kHapticFinisher);  // Cervical collar tension (220 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Cranial bone fracture shockwave (350 Hz)
                 goto combat_gesture_done;
             }
             if (batonShieldBashThrust && (now - s_lastBatonBashTime > 2000)) {
@@ -5490,8 +5591,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', false);
                 SendKey('W', false);
                 SendKey(VK_SPACE, false);
-                vrState.rightHapticPulse = 0.98f; // Planar electrostatic blast (340 Hz)
-                vrState.leftHapticPulse = 0.98f;  // Blunt kinetic recoil (80 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Planar electrostatic blast (340 Hz)
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Blunt kinetic recoil (80 Hz)
                 goto combat_gesture_done;
             }
             if (hipTossRotation && (now - s_lastHipTossTime > 2000)) {
@@ -5508,8 +5609,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_hipTossDirKey, false);
                 SendKey('W', false);
-                vrState.leftHapticPulse = 0.90f;  // Thoracic squeeze lift tension (230 Hz)
-                vrState.rightHapticPulse = 0.98f; // Hip toss deck impact blast (40 Hz)
+                HapticRequest(0, (0.90f), kHapticFinisher);  // Thoracic squeeze lift tension (230 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Hip toss deck impact blast (40 Hz)
                 goto combat_gesture_done;
             }
             if (batonHammerfistPlunge && (now - s_lastHammerfistTime > 2000)) {
@@ -5524,8 +5625,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', false);
                 SendKey('W', false);
                 SendKey('S', false);
-                vrState.rightHapticPulse = 0.98f; // High-voltage arc detonation blast (330 Hz)
-                vrState.leftHapticPulse = 0.70f;  // Forearm bone recoil (70 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // High-voltage arc detonation blast (330 Hz)
+                HapticRequest(0, (0.70f), kHapticReload);  // Forearm bone recoil (70 Hz)
                 goto combat_gesture_done;
             }
             if (whizzerDownWhip && (now - s_lastWhizzerTime > 2000)) {
@@ -5542,8 +5643,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(s_whizzerDirKey, false);
                 SendKey('W', false);
-                vrState.leftHapticPulse = 0.85f;  // Overhook shoulder lever strain (210 Hz)
-                vrState.rightHapticPulse = 0.98f; // Concussive mat impact (45 Hz)
+                HapticRequest(0, (0.85f), kHapticReload);  // Overhook shoulder lever strain (210 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Concussive mat impact (45 Hz)
                 goto combat_gesture_done;
             }
             if (javelinVaultStrike && (now - s_lastJavelinVaultTime > 2000)) {
@@ -5558,8 +5659,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', false);
                 SendKey('W', false);
                 SendKey(VK_SPACE, false);
-                vrState.rightHapticPulse = 0.98f; // Airborne arc detonation blast (360 Hz)
-                vrState.leftHapticPulse = 0.90f;  // Landing deck recoil (60 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Airborne arc detonation blast (360 Hz)
+                HapticRequest(0, (0.90f), kHapticFinisher);  // Landing deck recoil (60 Hz)
                 goto combat_gesture_done;
             }
             if (thaiPlumKneeDrive && (now - s_lastThaiPlumTime > 2000)) {
@@ -5575,8 +5676,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
                 SendKey('W', false);
-                vrState.leftHapticPulse = 0.95f;  // Ribcage fracture & posture break (280 Hz)
-                vrState.rightHapticPulse = 0.98f; // Concussive liver impact shockwave (320 Hz)
+                HapticRequest(0, (0.95f), kHapticFinisher);  // Ribcage fracture & posture break (280 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Concussive liver impact shockwave (320 Hz)
                 goto combat_gesture_done;
             }
             if (radialDisarmThrust && (now - s_lastRadialDisarmTime > 2000)) {
@@ -5594,8 +5695,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('W', false);
                 SendKey(s_radialDisarmDirKey, false);
                 mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
-                vrState.rightHapticPulse = 0.98f; // Penetrative arc detonation blast (350 Hz)
-                vrState.leftHapticPulse = 0.70f;
+                HapticRequest(1, (0.98f), kHapticFinisher); // Penetrative arc detonation blast (350 Hz)
+                HapticRequest(0, (0.70f), kHapticReload);
                 goto combat_gesture_done;
             }
             if (backSuplexHoistSlam && (now - s_lastBackSuplexTime > 2000)) {
@@ -5613,8 +5714,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey('W', false);
                 SendKey('S', false);
-                vrState.leftHapticPulse = 0.98f;  // Vertebral floor impact shockwave (40 Hz)
-                vrState.rightHapticPulse = 0.98f;
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Vertebral floor impact shockwave (40 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher);
                 goto combat_gesture_done;
             }
             if (isCrossThrustOvercharged && (now - s_lastCrossThrustTime > 2000)) {
@@ -5634,8 +5735,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, false);
                 SendKey('W', false);
                 mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
-                vrState.rightHapticPulse = 0.98f; // Catastrophic dielectric breakdown blast (360 Hz)
-                vrState.leftHapticPulse = 0.98f;
+                HapticRequest(1, (0.98f), kHapticFinisher); // Catastrophic dielectric breakdown blast (360 Hz)
+                HapticRequest(0, (0.98f), kHapticFinisher);
                 goto combat_gesture_done;
             }
             if (outsideLegKneeDrop && (now - s_lastOutsideLegSweepTime > 2000)) {
@@ -5653,8 +5754,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
                 SendKey(s_outsideLegSweepDirKey, false);
-                vrState.rightHapticPulse = 0.98f; // Concussive knee-drop mat impact (320 Hz)
-                vrState.leftHapticPulse = 0.95f;
+                HapticRequest(1, (0.98f), kHapticFinisher); // Concussive knee-drop mat impact (320 Hz)
+                HapticRequest(0, (0.95f), kHapticFinisher);
                 goto combat_gesture_done;
             }
             if (crossParryRiposte && (now - s_lastCrossParryTime > 2000)) {
@@ -5672,8 +5773,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('W', false);
                 SendKey(s_crossParryDirKey, false);
                 mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
-                vrState.rightHapticPulse = 0.98f; // Electro-kinetic counter-detonation blast (350 Hz)
-                vrState.leftHapticPulse = 0.70f;
+                HapticRequest(1, (0.98f), kHapticFinisher); // Electro-kinetic counter-detonation blast (350 Hz)
+                HapticRequest(0, (0.70f), kHapticReload);
                 goto combat_gesture_done;
             }
             if (frontHeadlockWrap && frontHeadlockArchTorque && (now - s_lastFrontHeadlockTime > 2000)) {
@@ -5690,8 +5791,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey('S', false);
                 SendKey('W', false);
-                vrState.leftHapticPulse = 0.98f;  // Cervical compression strain & bone snap (340 Hz)
-                vrState.rightHapticPulse = 0.98f;
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Cervical compression strain & bone snap (340 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher);
                 goto combat_gesture_done;
             }
             if (isLookingDownward && batonOverheadVault && batonVaultPlunge && (now - s_lastVaultDropTime > 2000)) {
@@ -5706,8 +5807,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('W', false);
                 SendKey('S', false);
                 SendKey(VK_SPACE, false);
-                vrState.rightHapticPulse = 0.98f; // High-voltage arc detonation blast (350 Hz)
-                vrState.leftHapticPulse = 0.95f;  // Heavy landing deck dispersion (55 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // High-voltage arc detonation blast (350 Hz)
+                HapticRequest(0, (0.95f), kHapticFinisher);  // Heavy landing deck dispersion (55 Hz)
                 goto combat_gesture_done;
             }
             if (suloevLowCrouch && suloevHookHold && suloevArchPull && (now - s_lastSuloevTime > 2000)) {
@@ -5722,8 +5823,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, false);
                 SendKey('S', false);
                 SendKey('C', false);
-                vrState.leftHapticPulse = 0.98f;  // Tendon tear & hip dislocation shockwave (330 Hz)
-                vrState.rightHapticPulse = 0.98f;
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Tendon tear & hip dislocation shockwave (330 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher);
                 goto combat_gesture_done;
             }
             if (isCrossThrustReady && (now - s_lastCrossThrustTime > 2000)) {
@@ -5741,8 +5842,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, false);
                 SendKey('W', false);
                 mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
-                vrState.rightHapticPulse = 0.98f; // High-voltage arc detonation blast (340 Hz)
-                vrState.leftHapticPulse = 0.98f;
+                HapticRequest(1, (0.98f), kHapticFinisher); // High-voltage arc detonation blast (340 Hz)
+                HapticRequest(0, (0.98f), kHapticFinisher);
                 goto combat_gesture_done;
             }
             if (firemansWhipThrow && (now - s_lastFiremansCarryTime > 2000)) {
@@ -5761,8 +5862,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, false);
                 SendKey(throwDirKey, false);
                 SendKey('W', false);
-                vrState.leftHapticPulse = 0.98f;  // Body-spike mat shockwave (45 Hz)
-                vrState.rightHapticPulse = 0.98f;
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Body-spike mat shockwave (45 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher);
                 goto combat_gesture_done;
             }
             if (batonThroatThrustStrike && (now - s_lastPistolDisarmTime > 1800)) {
@@ -5778,8 +5879,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('E', false);
                 mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Tracheal kinetic impact (320 Hz)
-                vrState.leftHapticPulse = 0.65f;
+                HapticRequest(1, (0.98f), kHapticFinisher); // Tracheal kinetic impact (320 Hz)
+                HapticRequest(0, (0.65f), kHapticLadder);
                 goto combat_gesture_done;
             }
             if (doubleLegSpikeSlam && (now - s_lastDoubleLegSlamTime > 2000)) {
@@ -5797,8 +5898,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, false);
                 SendKey('W', false);
                 SendKey('C', false);
-                vrState.leftHapticPulse = 0.98f;  // Concussive mat impact blast (40 Hz)
-                vrState.rightHapticPulse = 0.98f;
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Concussive mat impact blast (40 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher);
                 goto combat_gesture_done;
             }
             if (batonTripSweep && (now - s_lastBatonJabTripTime > 1800)) {
@@ -5814,8 +5915,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey('S', false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.90f; // Low sweep trip impact (180 Hz)
-                vrState.leftHapticPulse = 0.60f;
+                HapticRequest(1, (0.90f), kHapticFinisher); // Low sweep trip impact (180 Hz)
+                HapticRequest(0, (0.60f), kHapticLadder);
                 goto combat_gesture_done;
             }
             if (isSingleLegTakedown && (now - s_lastSingleLegTakedownTime > 1800)) {
@@ -5830,8 +5931,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, false);
                 SendKey('W', false);
                 SendKey('C', false);
-                vrState.leftHapticPulse = 0.80f;  // Ankle pick scoop (160 Hz)
-                vrState.rightHapticPulse = 0.98f; // Deck takedown slam (260 Hz)
+                HapticRequest(0, (0.80f), kHapticReload);  // Ankle pick scoop (160 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Deck takedown slam (260 Hz)
                 goto combat_gesture_done;
             }
             if (isBatonDiagonalParry && (now - s_lastDiagonalParryTime > 1800)) {
@@ -5846,8 +5947,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
                 SendKey(VK_SPACE, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Kinetic deflection shockwave (330 Hz)
-                vrState.leftHapticPulse = 0.75f;  // Off-hand conductive arc feedback (160 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Kinetic deflection shockwave (330 Hz)
+                HapticRequest(0, (0.75f), kHapticReload);  // Off-hand conductive arc feedback (160 Hz)
                 goto combat_gesture_done;
             }
             if (isArmTriangleReady) {
@@ -5863,8 +5964,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
                 SendKey('W', false);
-                vrState.leftHapticPulse = 0.85f;  // Vascular occlusion compression (140 Hz)
-                vrState.rightHapticPulse = 0.98f; // Cervical submission snap (280 Hz)
+                HapticRequest(0, (0.85f), kHapticReload);  // Vascular occlusion compression (140 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Cervical submission snap (280 Hz)
                 goto combat_gesture_done;
             }
             if (isBatonRadialSweep && (now - s_lastRadialSweepTime > 2000)) {
@@ -5880,8 +5981,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', false);
                 SendKey(VK_SPACE, false);
                 SendKey(dirKey, false);
-                vrState.rightHapticPulse = 0.98f; // Radial discharge blast (310 Hz)
-                vrState.leftHapticPulse = 0.85f;  // Off-hand follow-through ionization (280 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Radial discharge blast (310 Hz)
+                HapticRequest(0, (0.85f), kHapticReload);  // Off-hand follow-through ionization (280 Hz)
                 goto combat_gesture_done;
             }
             if (isKimuraFracture && (now - s_lastKimuraTime > 2000)) {
@@ -5896,8 +5997,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, false);
                 SendKey('A', false);
                 SendKey('S', false);
-                vrState.leftHapticPulse = 0.75f;  // Wrist bind resistance (190 Hz)
-                vrState.rightHapticPulse = 0.98f; // Humerus fracture crack (320 Hz)
+                HapticRequest(0, (0.75f), kHapticReload);  // Wrist bind resistance (190 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Humerus fracture crack (320 Hz)
                 goto combat_gesture_done;
             }
             if (isBatonJavelinThrust && (now - s_lastBatonJavelinTime > 1800)) {
@@ -5912,8 +6013,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', false);
                 SendKey(VK_SPACE, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Electro-kinetic impact pulse (320 Hz)
-                vrState.leftHapticPulse = 0.65f;
+                HapticRequest(1, (0.98f), kHapticFinisher); // Electro-kinetic impact pulse (320 Hz)
+                HapticRequest(0, (0.65f), kHapticLadder);
                 goto combat_gesture_done;
             }
             if (isOutsideTripMount && (now - s_lastOutsideTripTime > 1800)) {
@@ -5926,8 +6027,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey('C', false);
                 SendKey('W', false);
-                vrState.leftHapticPulse = 0.80f;  // Ankle hook resistance impact (170 Hz)
-                vrState.rightHapticPulse = 0.98f; // Cranial deck pound shockwave (260 Hz)
+                HapticRequest(0, (0.80f), kHapticReload);  // Ankle hook resistance impact (170 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Cranial deck pound shockwave (260 Hz)
                 goto combat_gesture_done;
             }
             if (isCrossArcBurstReady && (now - s_lastCrossArcBurstTime > 1800)) {
@@ -5941,8 +6042,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
                 SendKey('Q', false);
                 SendKey(VK_SPACE, false);
-                vrState.leftHapticPulse = 0.98f;  // Concussive electrostatic repulsion blast (320 Hz)
-                vrState.rightHapticPulse = 0.98f;
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Concussive electrostatic repulsion blast (320 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher);
                 goto combat_gesture_done;
             }
             if (suplexSpineSlam && (now - s_lastSuplexSlamTime > 1800)) {
@@ -5958,8 +6059,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 SendKey(VK_SPACE, false);
                 SendKey('S', false);
-                vrState.leftHapticPulse = 0.98f;  // Deep sub-bass floor impact shockwave (45 Hz)
-                vrState.rightHapticPulse = 0.98f;
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Deep sub-bass floor impact shockwave (45 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher);
                 goto combat_gesture_done;
             }
             if (isBatonLateralDisarm && (now - s_lastBatonDisarmTime > 1500)) {
@@ -5973,8 +6074,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
                 SendKey('E', false);
                 SendKey(dirKey, false);
-                vrState.rightHapticPulse = 0.98f; // Electromagnetic repulsion arc blast (310 Hz)
-                vrState.leftHapticPulse = 0.65f;
+                HapticRequest(1, (0.98f), kHapticFinisher); // Electromagnetic repulsion arc blast (310 Hz)
+                HapticRequest(0, (0.65f), kHapticLadder);
                 goto combat_gesture_done;
             }
             if (hammerfistStrike && (now - s_lastShinTrapTime > 1500)) {
@@ -5988,8 +6089,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey(VK_SPACE, false);
                 SendKey('S', false);
-                vrState.rightHapticPulse = 0.98f; // Skeletal hammerfist shockwave (280 Hz)
-                vrState.leftHapticPulse = 0.60f;
+                HapticRequest(1, (0.98f), kHapticFinisher); // Skeletal hammerfist shockwave (280 Hz)
+                HapticRequest(0, (0.60f), kHapticLadder);
                 goto combat_gesture_done;
             }
             if (isBatonSkullBreaker && (now - s_lastSkullBreakerTime > 1500)) {
@@ -6002,8 +6103,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey('S', false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Electro-kinetic cranial detonation blast (340 Hz)
-                vrState.leftHapticPulse = 0.60f;
+                HapticRequest(1, (0.98f), kHapticFinisher); // Electro-kinetic cranial detonation blast (340 Hz)
+                HapticRequest(0, (0.60f), kHapticLadder);
                 goto combat_gesture_done;
             }
             if (guillotineWrapStrike && (now - s_lastSnapdownChokeTime > 1500)) {
@@ -6017,8 +6118,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey('C', false);
                 SendKey('S', false);
-                vrState.rightHapticPulse = 0.98f; // Tracheal compression chokehold pulse (280 Hz)
-                vrState.leftHapticPulse = 0.70f;
+                HapticRequest(1, (0.98f), kHapticFinisher); // Tracheal compression chokehold pulse (280 Hz)
+                HapticRequest(0, (0.70f), kHapticReload);
                 goto combat_gesture_done;
             }
             if (isBatonGroundDischarge && (now - s_lastBatonGroundShockTime > 2000)) {
@@ -6033,8 +6134,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', false);
                 SendKey(VK_SPACE, false);
                 SendKey('S', false);
-                vrState.leftHapticPulse = 0.98f;  // Seismic ground shock & dielectric breakdown (50 Hz & 320 Hz)
-                vrState.rightHapticPulse = 0.98f;
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Seismic ground shock & dielectric breakdown (50 Hz & 320 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher);
                 goto combat_gesture_done;
             }
             if (cervicalSnapWhip && (now - s_lastPalmChinComboTime > 1500)) {
@@ -6048,8 +6149,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey(VK_SPACE, false);
                 SendKey('W', false);
-                vrState.leftHapticPulse = 0.98f; // Cervical vertebrae fracture snap (300 Hz)
-                vrState.rightHapticPulse = 0.70f;
+                HapticRequest(0, (0.98f), kHapticFinisher); // Cervical vertebrae fracture snap (300 Hz)
+                HapticRequest(1, (0.70f), kHapticReload);
                 goto combat_gesture_done;
             }
             if (isBatonArcTrapArmed) {
@@ -6057,8 +6158,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('E');
                 SendKeyTap('Q');
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Static surface detonation snap (140 Hz)
-                vrState.leftHapticPulse = 0.70f;
+                HapticRequest(1, (0.95f), kHapticFinisher); // Static surface detonation snap (140 Hz)
+                HapticRequest(0, (0.70f), kHapticReload);
                 goto combat_gesture_done;
             }
             if (isCrossChestArcWall) {
@@ -6078,8 +6179,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey('Q', false);
                 SendKey('S', false);
-                vrState.leftHapticPulse = 0.98f;  // Blinding EMP arc detonation shockwave (300 Hz)
-                vrState.rightHapticPulse = 0.98f;
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Blinding EMP arc detonation shockwave (300 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher);
                 goto combat_gesture_done;
             }
             if (isDischargingArcWave) {
@@ -6090,8 +6191,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('S', false);
                 SendKeyTap(VK_SPACE);
                 SendKeyTap('Q');
-                vrState.leftHapticPulse = 0.98f;  // High-voltage electrostatic arc ring shockwave (300 Hz)
-                vrState.rightHapticPulse = 0.98f;
+                HapticRequest(0, (0.98f), kHapticFinisher);  // High-voltage electrostatic arc ring shockwave (300 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher);
                 goto combat_gesture_done;
             }
             if (isBatonGroundPin && (now - s_lastBatonGroundPinTime > 1500)) {
@@ -6106,8 +6207,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', false);
                 SendKey('S', false);
                 SendKey('C', false);
-                vrState.rightHapticPulse = 0.98f; // Heavy deck collision & ground circuit arc (260 Hz)
-                vrState.leftHapticPulse = 0.65f;
+                HapticRequest(1, (0.98f), kHapticFinisher); // Heavy deck collision & ground circuit arc (260 Hz)
+                HapticRequest(0, (0.65f), kHapticLadder);
                 goto combat_gesture_done;
             }
             if (isClinchHeadbutt && (now - s_lastHeadbuttTime > 1500)) {
@@ -6120,8 +6221,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey(VK_SPACE, false);
                 SendKey('W', false);
-                vrState.leftHapticPulse = 0.98f;  // Concussive cranial skull collision shockwave (180 Hz)
-                vrState.rightHapticPulse = 0.98f;
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Concussive cranial skull collision shockwave (180 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher);
                 goto combat_gesture_done;
             }
             if (sternumElbowSmash && (now - s_lastLiverElbowComboTime > 1500)) {
@@ -6135,7 +6236,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey('A', false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Bone-fracturing sternum blunt crack (280 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Bone-fracturing sternum blunt crack (280 Hz)
                 goto combat_gesture_done;
             }
             if (isBatonChargedSpear && (now - s_lastSpearThrustTime > 1500)) {
@@ -6148,8 +6249,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey('S', false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // High-voltage linear shockwave (310 Hz)
-                vrState.leftHapticPulse = 0.65f;  // Forearm bracing recoil (140 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // High-voltage linear shockwave (310 Hz)
+                HapticRequest(0, (0.65f), kHapticLadder);  // Forearm bracing recoil (140 Hz)
                 goto combat_gesture_done;
             }
             if (isKneeStomp && (now - s_lastKneeStompTime > 1500)) {
@@ -6162,8 +6263,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey('S', false);
                 SendKey('C', false);
-                vrState.rightHapticPulse = 0.98f; // Joint-crushing skeletal fracture shockwave (240 Hz)
-                vrState.leftHapticPulse = 0.60f;  // Body-weight plant & brace feedback (100 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Joint-crushing skeletal fracture shockwave (240 Hz)
+                HapticRequest(0, (0.60f), kHapticLadder);  // Body-weight plant & brace feedback (100 Hz)
                 goto combat_gesture_done;
             }
             if (isLeadKneeThrust && (now - s_lastLeadKneeTime > 1500)) {
@@ -6176,8 +6277,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey('C', false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Concussive abdominal organ shockwave (200 Hz)
-                vrState.leftHapticPulse = 0.65f;  // Frame clamp vibration (100 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Concussive abdominal organ shockwave (200 Hz)
+                HapticRequest(0, (0.65f), kHapticLadder);  // Frame clamp vibration (100 Hz)
                 goto combat_gesture_done;
             }
             if (isDuckUnderKidneyCounter && (now - s_lastKidneyCounterTime > 1500)) {
@@ -6190,7 +6291,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey('D', false);
                 SendKey('C', false);
-                vrState.rightHapticPulse = 0.98f; // Visceral renal concussive shockwave (220 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Visceral renal concussive shockwave (220 Hz)
                 goto combat_gesture_done;
             }
             if (blindRiposteStrike && (now - s_lastEyeRubRiposteTime > 1500)) {
@@ -6204,7 +6305,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey('W', false);
                 SendKey(VK_SPACE, false);
-                vrState.rightHapticPulse = 0.98f; // Retaliatory counter-strike blast (240 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Retaliatory counter-strike blast (240 Hz)
                 goto combat_gesture_done;
             }
             if (isParrySnap && (now - s_lastParrySnapTime > 1500)) {
@@ -6217,8 +6318,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey('E', false);
                 SendKey('W', false);
-                vrState.leftHapticPulse = 0.80f;  // Forearm deflection snap (220 Hz)
-                vrState.rightHapticPulse = 0.98f; // Joint-shattering bone crack (280 Hz)
+                HapticRequest(0, (0.80f), kHapticReload);  // Forearm deflection snap (220 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Joint-shattering bone crack (280 Hz)
                 goto combat_gesture_done;
             }
             if (isBatonRibJab && (now - s_lastBatonRibJabTime > 1500)) {
@@ -6231,7 +6332,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey(VK_SPACE, false);
                 SendKey('S', false);
-                vrState.rightHapticPulse = 0.98f; // Neuromuscular shock & ground deck impact (290 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Neuromuscular shock & ground deck impact (290 Hz)
                 goto combat_gesture_done;
             }
             if (isDoubleEarClap && (now - s_lastDoubleEarClapTime > 1500)) {
@@ -6244,8 +6345,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey(VK_SPACE, false);
                 SendKey('W', false);
-                vrState.leftHapticPulse = 0.98f;  // Concussive acoustic blast (160 Hz)
-                vrState.rightHapticPulse = 0.98f;
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Concussive acoustic blast (160 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher);
                 goto combat_gesture_done;
             }
             if (dartCounterJabStrike && (now - s_lastDartCounterJabTime > 1500)) {
@@ -6259,7 +6360,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey('3', false);
                 SendKey('E', false);
-                vrState.rightHapticPulse = 0.98f; // Bio-electric discharge shockwave (320 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Bio-electric discharge shockwave (320 Hz)
                 goto combat_gesture_done;
             }
             if (isRibUnderhook && (now - s_lastRibUnderhookTime > 1500)) {
@@ -6272,7 +6373,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey(VK_SPACE, false);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.95f; // Cartilage perforation & body lift rumble (280 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Cartilage perforation & body lift rumble (280 Hz)
                 goto combat_gesture_done;
             }
             if (dualSledgeOverhead) {
@@ -6281,8 +6382,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey('S', false);
-                vrState.rightHapticPulse = 0.98f; // Catastrophic blunt fracture shockwave (80 Hz)
-                vrState.leftHapticPulse = 0.98f;
+                HapticRequest(1, (0.98f), kHapticFinisher); // Catastrophic blunt fracture shockwave (80 Hz)
+                HapticRequest(0, (0.98f), kHapticFinisher);
                 goto combat_gesture_done;
             }
             if (stealthCarotidSlash) {
@@ -6291,7 +6392,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.95f; // Arterial release incision & spray (260 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Arterial release incision & spray (260 Hz)
                 goto combat_gesture_done;
             }
             if (twoHandedBatonSlam) {
@@ -6300,8 +6401,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey('S', false);
-                vrState.rightHapticPulse = 0.98f; // Electro-kinetic shockwave blast (280 Hz)
-                vrState.leftHapticPulse = 0.98f;
+                HapticRequest(1, (0.98f), kHapticFinisher); // Electro-kinetic shockwave blast (280 Hz)
+                HapticRequest(0, (0.98f), kHapticFinisher);
                 goto combat_gesture_done;
             }
             if (mechPowerPunch) {
@@ -6310,8 +6411,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.98f; // Piston shockwave blast (100 Hz)
-                vrState.leftHapticPulse = 0.85f;
+                HapticRequest(1, (0.98f), kHapticFinisher); // Piston shockwave blast (100 Hz)
+                HapticRequest(0, (0.85f), kHapticReload);
                 goto combat_gesture_done;
             }
             if (droneEmpSnap) {
@@ -6319,8 +6420,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('E');
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                vrState.rightHapticPulse = 0.95f; // Mechanical spine crunch & EMP arc wave (280 Hz)
-                vrState.leftHapticPulse = 0.95f;
+                HapticRequest(1, (0.95f), kHapticFinisher); // Mechanical spine crunch & EMP arc wave (280 Hz)
+                HapticRequest(0, (0.95f), kHapticFinisher);
                 goto combat_gesture_done;
             }
             if (leftTrayBatter) {
@@ -6329,7 +6430,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey('W', false);
-                vrState.leftHapticPulse = 0.90f; // Sheet metal concussive clatter (160 Hz)
+                HapticRequest(0, (0.90f), kHapticFinisher); // Sheet metal concussive clatter (160 Hz)
                 goto combat_gesture_done;
             }
             if (dualShieldBash) {
@@ -6338,8 +6439,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.95f; // Shield rim blunt shockwave (140 Hz)
-                vrState.leftHapticPulse = 0.95f;
+                HapticRequest(1, (0.95f), kHapticFinisher); // Shield rim blunt shockwave (140 Hz)
+                HapticRequest(0, (0.95f), kHapticFinisher);
                 goto combat_gesture_done;
             }
             if (dualShieldPlant) {
@@ -6347,8 +6448,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', true); // Crouch lock cover stance
                 SendKey(VK_SPACE, true);
                 SendKey(VK_SPACE, false);
-                vrState.rightHapticPulse = 0.75f; // Deck clamp thud (80 Hz)
-                vrState.leftHapticPulse = 0.75f;
+                HapticRequest(1, (0.75f), kHapticReload); // Deck clamp thud (80 Hz)
+                HapticRequest(0, (0.75f), kHapticReload);
                 goto combat_gesture_done;
             }
             if (dualStoolHeavySmash) {
@@ -6357,8 +6458,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey('S', false);
-                vrState.rightHapticPulse = 0.95f; // Bone-shattering blunt fracture (120 Hz)
-                vrState.leftHapticPulse = 0.95f;
+                HapticRequest(1, (0.95f), kHapticFinisher); // Bone-shattering blunt fracture (120 Hz)
+                HapticRequest(0, (0.95f), kHapticFinisher);
                 goto combat_gesture_done;
             }
             if (dualPalmShove) {
@@ -6367,16 +6468,16 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey('W', false);
-                vrState.rightHapticPulse = 0.85f; // Elastic ring boundary / concussive shockwave (140 Hz)
-                vrState.leftHapticPulse = 0.85f;
+                HapticRequest(1, (0.85f), kHapticReload); // Elastic ring boundary / concussive shockwave (140 Hz)
+                HapticRequest(0, (0.85f), kHapticReload);
                 goto combat_gesture_done;
             }
             if (isLookingDown && isDownwardPlunge) {
                 VR_LOG_INFO("Physical Gesture: DEATH-FROM-ABOVE AERIAL TAKEDOWN / DROP AMBUSH (Pitch: %.2f rad, Vy: %.2f m/s)", s_lastHmdPitch, activeVel.y);
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                vrState.rightHapticPulse = 0.95f; // Bone-shattering ground impact shockwave (280 Hz)
-                vrState.leftHapticPulse = 0.95f;
+                HapticRequest(1, (0.95f), kHapticFinisher); // Bone-shattering ground impact shockwave (280 Hz)
+                HapticRequest(0, (0.95f), kHapticFinisher);
                 goto combat_gesture_done;
             }
             if (dualOverheadSlam) {
@@ -6386,8 +6487,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey('S', false);
 
-                vrState.rightHapticPulse = 0.95f; // Heavy blunt concussive shockwave (120 Hz)
-                vrState.leftHapticPulse = 0.95f;
+                HapticRequest(1, (0.95f), kHapticFinisher); // Heavy blunt concussive shockwave (120 Hz)
+                HapticRequest(0, (0.95f), kHapticFinisher);
                 goto combat_gesture_done;
             }
             if (dualCrossSlash) {
@@ -6402,29 +6503,29 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey('D', false);
 
-                vrState.rightHapticPulse = 0.95f;
-                vrState.leftHapticPulse = 0.95f;
+                HapticRequest(1, (0.95f), kHapticFinisher);
+                HapticRequest(0, (0.95f), kHapticFinisher);
                 goto combat_gesture_done;
             }
-            if (activeVel.y < -1.35f && (activeLocal.y > -0.10f || s_isPhysicallyCrouched)) {
+            if (activeVel.y < -1.35f && (activeLocal.y > -0.10f || s_posture.isPhysicallyCrouched)) {
                 VR_LOG_INFO("Physical Gesture: OVERHEAD SHIV PLUNGE / FINISHER (Vy: %.2f m/s, Y: %.2fm)", activeVel.y, activeLocal.y);
                 SendKey('S', true);
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKey('S', false);
 
-                if (rSpeed > lSpeed) vrState.rightHapticPulse = 0.95f;
-                else vrState.leftHapticPulse = 0.95f;
+                if (rSpeed > lSpeed) HapticRequest(1, (0.95f), kHapticFinisher);
+                else HapticRequest(0, (0.95f), kHapticFinisher);
                 goto combat_gesture_done;
             }
-            if ((s_isPhysicallyCrouched || s_isStealthPeeking) && activeLocal.z < -0.25f && (activeVel.z < -1.1f || fabsf(activeVel.x) > 1.1f)) {
+            if ((s_posture.isPhysicallyCrouched || s_posture.isStealthPeeking) && activeLocal.z < -0.25f && (activeVel.z < -1.1f || fabsf(activeVel.x) > 1.1f)) {
                 VR_LOG_INFO("Physical Gesture: STEALTH TAKEDOWN / THROAT-SLIT initiated (Vz: %.2f, Vx: %.2f)", activeVel.z, activeVel.x);
                 SendKeyTap('E');
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
 
-                if (rSpeed > lSpeed) vrState.rightHapticPulse = 0.90f;
-                else vrState.leftHapticPulse = 0.90f;
+                if (rSpeed > lSpeed) HapticRequest(1, (0.90f), kHapticFinisher);
+                else HapticRequest(0, (0.90f), kHapticFinisher);
                 goto combat_gesture_done;
             }
             {
@@ -6444,8 +6545,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     SendKey('W', false);
 
                     float pulse = isBatonArcJab ? 0.95f : 0.90f;
-                    if (rSpeed > lSpeed) MergeHaptic(vrState.rightHapticPulse, pulse); // GH #32: finisher
-                    else MergeHaptic(vrState.leftHapticPulse, pulse); // GH #32: finisher
+                    if (rSpeed > lSpeed) HapticRequest(1, pulse, kHapticFinisher); // GH #32: finisher
+                    else HapticRequest(0, pulse, kHapticFinisher); // GH #32: finisher
                     goto combat_gesture_done;
                 }
                 // Uppercut: upward vertical speed dominates forward & lateral
@@ -6456,8 +6557,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                     SendKey('S', false);
 
-                    if (rSpeed > lSpeed) vrState.rightHapticPulse = 0.9f;
-                    else vrState.leftHapticPulse = 0.9f;
+                    if (rSpeed > lSpeed) HapticRequest(1, (0.9f), kHapticFinisher);
+                    else HapticRequest(0, (0.9f), kHapticFinisher);
                     goto combat_gesture_done;
                 }
                 // Lateral Hook / Blade Slash: lateral speed dominates
@@ -6470,8 +6571,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                     SendKey(hookKey, false);
 
-                    if (rSpeed > lSpeed) vrState.rightHapticPulse = 0.9f;
-                    else vrState.leftHapticPulse = 0.9f;
+                    if (rSpeed > lSpeed) HapticRequest(1, (0.9f), kHapticFinisher);
+                    else HapticRequest(0, (0.9f), kHapticFinisher);
                     goto combat_gesture_done;
                 }
             }
@@ -6560,15 +6661,15 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             s_lastReloadGestureTime = now;
             VR_LOG_INFO("Tactical Weapon: POWER CELL HOT-SWAP EJECTED (Vy: %.2f m/s, Dist: %.2fm)", offHandVelY, reloadHandDist);
             SendGestureTap('R', "reload/powercell-eject");
-            MergeHaptic(vrState.leftHapticPulse, 0.75f); // GH #32: magnetic cell disconnect snap (140 Hz)
-            MergeHaptic(vrState.rightHapticPulse, 0.50f);
+            HapticRequest(0, 0.75f, kHapticReload); // GH #32: magnetic cell disconnect snap (140 Hz)
+            HapticRequest(1, 0.50f, kHapticUi);
         } else if (reloadReq.magInsert || reloadReq.waistPouch) {
             s_lastReloadGestureTime = now;
             VR_LOG_INFO("Tactical Gesture: MANUAL WEAPON RELOAD triggered (%s, HandDist: %.2fm, LeftY: %.2f)",
                 reloadReq.magInsert ? "Weapon Receiver / Mag-Well" : "Waist Ammo Pouch", reloadHandDist, offHandLocal.y);
             SendGestureTap('R', "reload/manual");
-            MergeHaptic(vrState.leftHapticPulse, 0.55f); // GH #32
-            MergeHaptic(vrState.rightHapticPulse, 0.75f);
+            HapticRequest(0, 0.55f, kHapticLadder); // GH #32
+            HapticRequest(1, 0.75f, kHapticReload);
         }
     }
 
@@ -6580,15 +6681,15 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         if (relVelY > 0.55f && (now - s_lastHoneStrokeTime > 250)) {
             s_lastHoneStrokeTime = now;
             VR_LOG_INFO("Physical Gesture: SHIV SHARPENING / BLADE GRINDING STROKE (RelVelY: %.2f m/s, Dist: %.2fm)", relVelY, reloadHandDist);
-            vrState.leftHapticPulse = 0.55f;  // Crisp metallic scrape (220 Hz)
-            vrState.rightHapticPulse = 0.55f;
+            HapticRequest(0, (0.55f), kHapticLadder);  // Crisp metallic scrape (220 Hz)
+            HapticRequest(1, (0.55f), kHapticLadder);
         }
     }
 
     // 6a-2. Inmate Toothbrush Shank Whittling & Rapid Friction Sharpening (ADR 0068)
     static DWORD s_lastWhittleStrokeTime = 0;
     static int s_whittleStrokeCount = 0;
-    bool crouchedForWhittle = (s_isPhysicallyCrouched || s_isDeepProne);
+    bool crouchedForWhittle = (s_posture.isPhysicallyCrouched || s_posture.isDeepProne);
     bool dominantNearFloor = (rightLocal.y < -0.45f && rightLocal.z > -0.45f && rightLocal.z < -0.15f);
     bool grippingShank = (vrState.rightController.grip > 0.50f);
     bool fastFrictionStroke = (fabsf(rVel.x) > 0.65f);
@@ -6597,13 +6698,13 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             s_lastWhittleStrokeTime = now;
             s_whittleStrokeCount++;
             VR_LOG_INFO("Physical Gesture: TOOTHBRUSH SHANK WHITTLING STROKE #%d (SpeedX: %.2f m/s)", s_whittleStrokeCount, rVel.x);
-            vrState.rightHapticPulse = 0.50f; // Abrasive concrete grinding pulse (200 Hz)
+            HapticRequest(1, (0.50f), kHapticUi); // Abrasive concrete grinding pulse (200 Hz)
             if (s_whittleStrokeCount >= 5) {
                 s_whittleStrokeCount = 0;
                 VR_LOG_INFO("Physical Gesture: IMPROVISED SHIV RAZOR TIP HONED / EQUIPPED");
                 SendKeyTap('E');
                 SendKeyTap('3'); // Equip shank slot
-                vrState.rightHapticPulse = 0.70f; // Hone completion resonance (260 Hz)
+                HapticRequest(1, (0.70f), kHapticReload); // Hone completion resonance (260 Hz)
             }
         }
     }
@@ -6619,13 +6720,13 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             s_lastSporkStrokeTime = now;
             s_sporkStrokeCount++;
             VR_LOG_INFO("Physical Gesture: MESS SPORK TINE NOTCHING STROKE #%d (SpeedX: %.2f m/s)", s_sporkStrokeCount, rVel.x);
-            vrState.rightHapticPulse = 0.45f; // Serrated rasp pulse (190 Hz)
+            HapticRequest(1, (0.45f), kHapticUi); // Serrated rasp pulse (190 Hz)
             if (s_sporkStrokeCount >= 4) {
                 s_sporkStrokeCount = 0;
                 VR_LOG_INFO("Physical Gesture: SERRATED CONTRABAND PUNCTURE SPORK CRAFTED / EQUIPPED");
                 SendKeyTap('E');
                 SendKeyTap('3'); // Equip shank/shiv slot
-                vrState.rightHapticPulse = 0.70f; // Hone ping resonance (240 Hz)
+                HapticRequest(1, (0.70f), kHapticReload); // Hone ping resonance (240 Hz)
             }
         }
     }
@@ -6642,8 +6743,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         SendKeyTap('4'); // Equip flare / throwable slot
         mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
         mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-        vrState.leftHapticPulse = 0.85f;  // Sulfur percussion strike snap (260 Hz)
-        vrState.rightHapticPulse = 0.85f;
+        HapticRequest(0, (0.85f), kHapticReload);  // Sulfur percussion strike snap (260 Hz)
+        HapticRequest(1, (0.85f), kHapticReload);
     }
 
     // 6a-5. Medical Syringe Sedative Self-Injection & Bio-Adrenaline Rush (ADR 0087)
@@ -6657,27 +6758,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         VR_LOG_INFO("Medical Restoration: PNEUMATIC BIO-ADRENALINE SYRINGE INJECTED (Rx: %.2f, Ry: %.2f, Rz: %.2f)", rightLocal.x, rightLocal.y, rightLocal.z);
         SendKeyTap('E');
         SendKeyTap('Q'); // Bio-adrenaline / stimulant surge
-        vrState.rightHapticPulse = 0.85f; // Needle plunge & adrenaline rush pulse (100 Hz)
-        vrState.leftHapticPulse = 0.65f;  // Arm tissue injection feedback
+        HapticRequest(1, (0.85f), kHapticReload); // Needle plunge & adrenaline rush pulse (100 Hz)
+        HapticRequest(0, (0.65f), kHapticLadder);  // Arm tissue injection feedback
     }
 
     // 6a-6. Inmate Pit Brawl Dirt / Ash Pocket Concealment (ADR 0096)
     static DWORD s_lastGritScoopTime = 0;
     static bool s_hasScoopedGrit = false;
-    bool crouchedNearGround = (s_isPhysicallyCrouched || s_isDeepProne) && (rightLocal.y < -0.45f);
+    bool crouchedNearGround = (s_posture.isPhysicallyCrouched || s_posture.isDeepProne) && (rightLocal.y < -0.45f);
     bool gritFloorScoop = crouchedNearGround && (vrState.rightController.grip > 0.50f) && (rVel.z > 0.35f);
     if (gritFloorScoop && !s_hasScoopedGrit && (now - s_lastGritScoopTime > 1500)) {
         s_hasScoopedGrit = true;
         s_lastGritScoopTime = now;
         VR_LOG_INFO("Physical Stealth: PIT BRAWL DIRT / ASH SCOOPED FROM FLOOR (Ry: %.2f, Rz: %.2f)", rightLocal.y, rVel.z);
-        vrState.rightHapticPulse = 0.35f; // Abrasive grit sifting pulse (140 Hz)
+        HapticRequest(1, (0.35f), kHapticUi); // Abrasive grit sifting pulse (140 Hz)
     }
     if (s_hasScoopedGrit && (rightLocal.y > -0.38f && rightLocal.y < -0.15f && fabsf(rightLocal.x) > 0.12f)) {
         s_hasScoopedGrit = false;
         VR_LOG_INFO("Physical Stealth: PIT BRAWL GRIT CONCEALED IN WAIST POCKET");
         SendKeyTap('E');
         SendKeyTap(VK_TAB);
-        vrState.rightHapticPulse = 0.45f; // Cloth pocket rustle confirmation (180 Hz)
+        HapticRequest(1, (0.45f), kHapticUi); // Cloth pocket rustle confirmation (180 Hz)
     }
 
     // 6a-7. Security Guard Taser Wire Snip & Circuit Disarm (ADR 0101)
@@ -6692,7 +6793,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         VR_LOG_INFO("Tactical Defense: GUARD TASER WIRE SNIPPED / CIRCUIT GROUNDED (Vx: %.2f m/s)", rVel.x);
         SendKeyTap('E');
         SendKeyTap('3'); // Ground discharge into shiv blade
-        vrState.rightHapticPulse = 0.75f; // Dielectric wire shear snap (220 Hz)
+        HapticRequest(1, (0.75f), kHapticReload); // Dielectric wire shear snap (220 Hz)
     }
 
     // 6b. Two-Handed Firearm Stabilization (ADR 0005)
@@ -6727,8 +6828,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         if (s_twoHandedStabilizationActive) {
             VR_LOG_INFO("Two-Handed Firearm Stabilization ENGAGED (%s, HandDist: %.2fm)",
                 isHarriesStance ? "Tactical Harries Flashlight Stance" : "Foregrip Hold", twoHandDist);
-            vrState.leftHapticPulse = isHarriesStance ? 0.35f : 0.25f;  // Subtle haptic confirmation pulse
-            vrState.rightHapticPulse = isHarriesStance ? 0.35f : 0.25f;
+            HapticRequest(0, (isHarriesStance ? 0.35f : 0.25f), kHapticUi);  // Subtle haptic confirmation pulse
+            HapticRequest(1, (isHarriesStance ? 0.35f : 0.25f), kHapticUi);
         } else {
             VR_LOG_INFO("Two-Handed Firearm Stabilization DISENGAGED (HandDist: %.2fm)", twoHandDist);
             s_hasStabilizedPose = false;
@@ -6851,8 +6952,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         bool shieldHeldForward = (rightLocal.z > -0.35f && rightLocal.z < -0.15f) && (fabsf(rightLocal.y) < 0.20f);
         if (shieldHeldForward && (now - s_lastLaserDeflectTime > 150)) {
             s_lastLaserDeflectTime = now;
-            vrState.rightHapticPulse = 0.30f; // Laser scatter refraction micro-vibration (220 Hz)
-            vrState.leftHapticPulse = 0.30f;
+            HapticRequest(1, (0.30f), kHapticUi); // Laser scatter refraction micro-vibration (220 Hz)
+            HapticRequest(0, (0.30f), kHapticUi);
         }
     }
 
@@ -6865,14 +6966,14 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             s_shotgunPumpRackedBack = true;
             s_lastPumpActionTime = now;
             VR_LOG_INFO("Physical Gunplay: SHOTGUN PUMP RACKED BACK / CASING EJECTED (relZ: %.2fm)", relZ);
-            vrState.leftHapticPulse = 0.55f; // Mechanical slide rack click (180 Hz)
-            vrState.rightHapticPulse = 0.35f;
+            HapticRequest(0, (0.55f), kHapticLadder); // Mechanical slide rack click (180 Hz)
+            HapticRequest(1, (0.35f), kHapticUi);
         } else if (s_shotgunPumpRackedBack && relZ < 0.01f) {
             s_shotgunPumpRackedBack = false;
             s_lastPumpActionTime = now;
             VR_LOG_INFO("Physical Gunplay: SHOTGUN SLIDE PUSHED FORWARD / SHELL CHAMBERED (relZ: %.2fm)", relZ);
-            vrState.leftHapticPulse = 0.75f; // Heavy chamber lock snap (240 Hz)
-            vrState.rightHapticPulse = 0.55f;
+            HapticRequest(0, (0.75f), kHapticReload); // Heavy chamber lock snap (240 Hz)
+            HapticRequest(1, (0.55f), kHapticLadder);
         }
     } else {
         s_shotgunPumpRackedBack = false;
@@ -6890,8 +6991,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
         SendKeyTap('W');
         SendKeyTap(VK_SPACE);
-        vrState.rightHapticPulse = 0.98f; // Point-blank concussive muzzle blast (90 Hz)
-        vrState.leftHapticPulse = 0.98f;
+        HapticRequest(1, (0.98f), kHapticFinisher); // Point-blank concussive muzzle blast (90 Hz)
+        HapticRequest(0, (0.98f), kHapticFinisher);
     }
 
     // 6h. Mining Core Pneumatic Rock Drill & Industrial Jackhammer Rumble (ADR 0037)
@@ -6899,8 +7000,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (s_twoHandedStabilizationActive && (vrState.rightController.trigger > 0.80f) && (vrState.leftController.trigger > 0.80f)) {
         if (now - s_lastMiningDrillTime > 70) {
             s_lastMiningDrillTime = now;
-            vrState.rightHapticPulse = 0.95f; // Seismic subterranean percussion (65 Hz)
-            vrState.leftHapticPulse = 0.95f;
+            HapticRequest(1, (0.95f), kHapticFinisher); // Seismic subterranean percussion (65 Hz)
+            HapticRequest(0, (0.95f), kHapticFinisher);
         }
     }
 
@@ -6922,8 +7023,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         SendKeyTap(VK_SPACE);
         mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
         mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-        vrState.leftHapticPulse = 0.98f;  // Seismic percussive hammer strike (50 Hz)
-        vrState.rightHapticPulse = 0.98f;
+        HapticRequest(0, (0.98f), kHapticFinisher);  // Seismic percussive hammer strike (50 Hz)
+        HapticRequest(1, (0.98f), kHapticFinisher);
     }
 
     // 6c. Spatial Weapon Holstering & Physical Inventory Gestures (ADR 0015, 0021, 0023, 0038)
@@ -6959,44 +7060,44 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             s_activeWeaponSlot = 1;
             VR_LOG_INFO("Holster Gesture: PRIMARY WEAPON slot toggled (Over-Shoulder)");
             SendKeyTap('1');
-            vrState.rightHapticPulse = 0.75f; // Solid mechanical latch pulse
+            HapticRequest(1, (0.75f), kHapticReload); // Solid mechanical latch pulse
         } else if (rightAtChest) {
             s_lastHolsterTime = now;
             s_activeWeaponSlot = 4;
             VR_LOG_INFO("Holster Gesture: TACTICAL GRENADE slot toggled (Chest Bandolier)");
             SendKeyTap('4');
-            vrState.rightHapticPulse = 0.65f; // Grenade bandolier snap pulse
+            HapticRequest(1, (0.65f), kHapticLadder); // Grenade bandolier snap pulse
         } else if (rightLowSpine) {
             s_lastHolsterTime = now;
             s_activeWeaponSlot = 5;
             VR_LOG_INFO("Holster Gesture: HEAVY WEAPON / SCAR GUN slot toggled (Low Spine)");
             SendKeyTap('5');
-            vrState.rightHapticPulse = 0.85f; // Heavy industrial magnetic clamp pulse
-        } else if ((s_isPhysicallyCrouched || s_isDeepProne) && (leftAtBootSheath || rightAtBootSheath)) {
+            HapticRequest(1, (0.85f), kHapticReload); // Heavy industrial magnetic clamp pulse
+        } else if ((s_posture.isPhysicallyCrouched || s_posture.isDeepProne) && (leftAtBootSheath || rightAtBootSheath)) {
             s_lastHolsterTime = now;
             s_activeWeaponSlot = 3;
             VR_LOG_INFO("Holster Gesture: CONCEALED SHIV DRAWN FROM BOOT SHEATH (Y: %.2fm)", leftAtBootSheath ? offHolster.y : domHolster.y);
             SendKeyTap('3'); // Equip shiv/knife slot
-            if (leftAtBootSheath) vrState.leftHapticPulse = 0.45f; // Leather boot sheath friction click (160 Hz)
-            if (rightAtBootSheath) vrState.rightHapticPulse = 0.45f;
-        } else if ((s_isPhysicallyCrouched || s_isDeepProne) && (rightAtAnkle || leftAtAnkle)) {
+            if (leftAtBootSheath) HapticRequest(0, (0.45f), kHapticUi); // Leather boot sheath friction click (160 Hz)
+            if (rightAtBootSheath) HapticRequest(1, (0.45f), kHapticUi);
+        } else if ((s_posture.isPhysicallyCrouched || s_posture.isDeepProne) && (rightAtAnkle || leftAtAnkle)) {
             s_lastHolsterTime = now;
             VR_LOG_INFO("Holster Gesture: CONTRABAND ANKLE BOOT POUCH accessed (HandY: %.2fm)", rightAtAnkle ? domHolster.y : offHolster.y);
             SendKeyTap(VK_TAB); // Cube PDA / contraband manifest
-            if (rightAtAnkle) vrState.rightHapticPulse = 0.35f; // Subtle fabric rustle (140 Hz)
-            if (leftAtAnkle) vrState.leftHapticPulse = 0.35f;
+            if (rightAtAnkle) HapticRequest(1, (0.35f), kHapticUi); // Subtle fabric rustle (140 Hz)
+            if (leftAtAnkle) HapticRequest(0, (0.35f), kHapticUi);
         } else if (rightAtHip) {
             s_lastHolsterTime = now;
             s_activeWeaponSlot = 2;
             VR_LOG_INFO("Holster Gesture: SIDEARM / PISTOL slot toggled (Right Hip)");
             SendKeyTap('2');
-            vrState.rightHapticPulse = 0.65f; // Leather holster draw pulse
+            HapticRequest(1, (0.65f), kHapticLadder); // Leather holster draw pulse
         } else if (leftAtHip) {
             s_lastHolsterTime = now;
             s_activeWeaponSlot = 3;
             VR_LOG_INFO("Holster Gesture: MELEE / ULAK slot toggled (Left Hip)");
             SendKeyTap('3');
-            vrState.leftHapticPulse = 0.70f; // Metallic blade unsheathe pulse
+            HapticRequest(0, (0.70f), kHapticReload); // Metallic blade unsheathe pulse
         }
     }
 
@@ -7016,14 +7117,14 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             s_grenadePrimed = true;
             VR_LOG_INFO("Tactical Gesture: GRENADE PIN PULLED / PRIMED (Hand Proximity: %.2fm)", handProximity);
             mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0); // Begin throw cook
-            vrState.leftHapticPulse = 0.75f; // Sharp metallic cotter pin friction (180 Hz)
-            vrState.rightHapticPulse = 0.50f;
+            HapticRequest(0, (0.75f), kHapticReload); // Sharp metallic cotter pin friction (180 Hz)
+            HapticRequest(1, (0.50f), kHapticUi);
         } else if (s_grenadePrimed && (rSpeed > 1.2f || vrState.rightController.trigger < 0.20f)) {
             // Throw release: dynamic forward arm swing or releasing right hand
             s_grenadePrimed = false;
             VR_LOG_INFO("Tactical Gesture: GRENADE LAUNCHED / THROWN (Speed: %.2f m/s)", rSpeed);
             mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-            vrState.rightHapticPulse = 0.60f; // Throw release impulse
+            HapticRequest(1, (0.60f), kHapticLadder); // Throw release impulse
         }
     }
 
@@ -7039,8 +7140,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             VR_LOG_INFO("Tactical Gesture: SCAR AIR MINE DETONATION TRIGGERED (Off-Hand Clench)");
             mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
             mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
-            vrState.leftHapticPulse = 0.95f; // Heavy explosive shockwave (280 Hz)
-            vrState.rightHapticPulse = 0.95f;
+            HapticRequest(0, (0.95f), kHapticFinisher); // Heavy explosive shockwave (280 Hz)
+            HapticRequest(1, (0.95f), kHapticFinisher);
         } else if (!wantDetonate) {
             s_scarDetonatorDown = false;
         }
@@ -7061,8 +7162,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             VR_LOG_INFO("Environmental Gesture: VENTILATION GRATE PRY / DUCT OPEN executed (Lz: %.2f, Rz: %.2f)", lVel.z, rVel.z);
             SendKeyTap('E');
             SendKeyTap(VK_SPACE);
-            vrState.leftHapticPulse = 0.75f; // Heavy mechanical wrenching pulse
-            vrState.rightHapticPulse = 0.75f;
+            HapticRequest(0, (0.75f), kHapticReload); // Heavy mechanical wrenching pulse
+            HapticRequest(1, (0.75f), kHapticReload);
         } else {
             // Biometric Terminal / Retinal Scanner Poke (Single-Hand Pointed Poke)
             bool rightPointing = (vrState.rightController.trigger < 0.20f && vrState.rightController.grip > 0.40f);
@@ -7082,22 +7183,22 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastEnvInteractTime = now;
                 VR_LOG_INFO("Environmental Gesture: BIOMETRIC TERMINAL TOUCH / RETINAL SCANNER (Right Hand, Z: %.2fm)", rightLocal.z);
                 SendKeyTap('E');
-                vrState.rightHapticPulse = 0.40f; // Digital tactile beep
+                HapticRequest(1, (0.40f), kHapticUi); // Digital tactile beep
             } else if (leftPointing && leftPoke) {
                 s_lastEnvInteractTime = now;
                 VR_LOG_INFO("Environmental Gesture: BIOMETRIC TERMINAL TOUCH / RETINAL SCANNER (Left Hand, Z: %.2fm)", leftLocal.z);
                 SendKeyTap('E');
-                vrState.leftHapticPulse = 0.40f; // Digital tactile beep
+                HapticRequest(0, (0.40f), kHapticUi); // Digital tactile beep
             } else if (rightPalmOpen && rightPalmTouch) {
                 s_lastEnvInteractTime = now;
                 VR_LOG_INFO("Environmental Gesture: NANOMED MEDICAL REGENERATION STATION TOUCH (Right Palm, Z: %.2fm)", rightLocal.z);
                 SendKeyTap('E');
-                vrState.rightHapticPulse = 0.50f; // Bio-restorative soothing haptic wave
+                HapticRequest(1, (0.50f), kHapticUi); // Bio-restorative soothing haptic wave
             } else if (leftPalmOpen && leftPalmTouch) {
                 s_lastEnvInteractTime = now;
                 VR_LOG_INFO("Environmental Gesture: NANOMED MEDICAL REGENERATION STATION TOUCH (Left Palm, Z: %.2fm)", leftLocal.z);
                 SendKeyTap('E');
-                vrState.leftHapticPulse = 0.50f; // Bio-restorative soothing haptic wave
+                HapticRequest(0, (0.50f), kHapticUi); // Bio-restorative soothing haptic wave
             }
 
 #if 0 // Disabled legacy procedural environmental gestures (ADR 0398) to prevent spurious key bursts
@@ -7110,8 +7211,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 VR_LOG_INFO("Environmental Gesture: CRYO-POD / HIBERNATION CANOPY EMERGENCY EJECTION (Lz: %.2f, Rz: %.2f)", lVel.z, rVel.z);
                 SendKeyTap('E');
                 SendKeyTap(VK_SPACE);
-                vrState.leftHapticPulse = 0.80f; // Pneumatic decompression surge
-                vrState.rightHapticPulse = 0.80f;
+                HapticRequest(0, (0.80f), kHapticReload); // Pneumatic decompression surge
+                HapticRequest(1, (0.80f), kHapticReload);
             }
 
             // Cryo-Chamber Defrost Thermal Cycle Override Keypad Punch (ADR 0112)
@@ -7124,16 +7225,16 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastDefrostTapTime = now;
                 s_defrostTapCount++;
                 VR_LOG_INFO("Environmental Gesture: CRYO-CHAMBER DEFROST KEYPAD TAP #%d", s_defrostTapCount);
-                if (rVel.z < -0.32f) vrState.rightHapticPulse = 0.45f; // Membrane click (260 Hz)
-                if (lVel.z < -0.32f) vrState.leftHapticPulse = 0.45f;
+                if (rVel.z < -0.32f) HapticRequest(1, (0.45f), kHapticUi); // Membrane click (260 Hz)
+                if (lVel.z < -0.32f) HapticRequest(0, (0.45f), kHapticUi);
                 if (s_defrostTapCount >= 3) {
                     s_defrostTapCount = 0;
                     VR_LOG_INFO("Environmental Gesture: CRYO DEFROST CYCLE INITIATED / THERMAL BYPASS CONFIRMED");
                     SendKeyTap('E');
                     SendKeyTap(VK_RETURN);
                     SendKeyTap('Q');
-                    vrState.rightHapticPulse = 0.70f; // Confirmation chime (180 Hz)
-                    vrState.leftHapticPulse = 0.70f;
+                    HapticRequest(1, (0.70f), kHapticUi); // Confirmation chime (180 Hz)
+                    HapticRequest(0, (0.70f), kHapticReload);
                 }
             }
 
@@ -7146,7 +7247,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastEnvInteractTime = now;
                 VR_LOG_INFO("Environmental Gesture: VENT FASTENER UNTHREADING RATCHET (Z: %.2fm, Vx: %.2f)", rightLocal.z, rVel.x);
                 SendKeyTap('E');
-                vrState.rightHapticPulse = 0.45f; // Mechanical ratchet tooth click (160 Hz)
+                HapticRequest(1, (0.45f), kHapticUi); // Mechanical ratchet tooth click (160 Hz)
             }
 
             // Tactical Circuit Breaker Sabotage & Power Box Lever (ADR 0043)
@@ -7156,8 +7257,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastEnvInteractTime = now;
                 VR_LOG_INFO("Environmental Gesture: CIRCUIT BREAKER SABOTAGE / POWER CUT executed (Vy: %.2f)", rightAtBreakerBox ? rVel.y : lVel.y);
                 SendKeyTap('E');
-                if (rightAtBreakerBox) vrState.rightHapticPulse = 0.80f; // Heavy mechanical contactor snap (140 Hz)
-                if (leftAtBreakerBox) vrState.leftHapticPulse = 0.80f;
+                if (rightAtBreakerBox) HapticRequest(1, (0.80f), kHapticReload); // Heavy mechanical contactor snap (140 Hz)
+                if (leftAtBreakerBox) HapticRequest(0, (0.80f), kHapticReload);
             }
 
             // Manual Bulkhead Handwheel Spindle Cranking (ADR 0044)
@@ -7168,7 +7269,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastWheelCrankTime = now;
                 VR_LOG_INFO("Environmental Gesture: BULKHEAD HANDWHEEL CRANKING (Speed: %.2f m/s)", wheelTangentialSpeed);
                 SendKeyTap('E');
-                vrState.rightHapticPulse = 0.45f; // Hydraulic dogging ratchet click (160 Hz)
+                HapticRequest(1, (0.45f), kHapticUi); // Hydraulic dogging ratchet click (160 Hz)
             }
 
             // Bio-Containment Decontamination Airlock Lever (ADR 0064)
@@ -7180,7 +7281,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastEnvInteractTime = now;
                 VR_LOG_INFO("Environmental Gesture: BIO-CONTAINMENT DECONTAMINATION LEVER PULLED (Ry: %.2f)", rVel.y);
                 SendKeyTap('E');
-                vrState.rightHapticPulse = 0.80f; // Pressurized decontamination air blast whoosh (140 Hz)
+                HapticRequest(1, (0.80f), kHapticReload); // Pressurized decontamination air blast whoosh (140 Hz)
             }
 
             // Atmospheric Decompression Blast Shield Overhead Pull (ADR 0046)
@@ -7191,8 +7292,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastEnvInteractTime = now;
                 VR_LOG_INFO("Environmental Gesture: EMERGENCY BLAST SHIELD LOWERED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
                 SendKeyTap('E');
-                vrState.leftHapticPulse = 0.95f; // Heavy bulkhead slam impact (120 Hz)
-                vrState.rightHapticPulse = 0.95f;
+                HapticRequest(0, (0.95f), kHapticFinisher); // Heavy bulkhead slam impact (120 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher);
             }
 
             // Sub-Level Mining Cart Handbrake & Throttle (ADR 0048)
@@ -7209,7 +7310,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 // Continuous rail shudder haptics
                 if (now - s_lastCartRumbleTime > 180) {
                     s_lastCartRumbleTime = now;
-                    vrState.rightHapticPulse = 0.40f; // Steel wheel rail shudder (60 Hz)
+                    HapticRequest(1, (0.40f), kHapticUi); // Steel wheel rail shudder (60 Hz)
                 }
             }
 
@@ -7221,8 +7322,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastEnvInteractTime = now;
                 VR_LOG_INFO("Environmental Gesture: MECH COCKPIT CANOPY SLAMMED & SEALED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
                 SendKeyTap('E');
-                vrState.leftHapticPulse = 0.85f; // Pneumatic hermetic lock surge (120 Hz)
-                vrState.rightHapticPulse = 0.85f;
+                HapticRequest(0, (0.85f), kHapticReload); // Pneumatic hermetic lock surge (120 Hz)
+                HapticRequest(1, (0.85f), kHapticReload);
             }
 
             // Cryo-Pod Cryo-Glass Condensation Wipe & Frost Scraping (ADR 0051)
@@ -7235,7 +7336,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastGlassWipeTime = now;
                 VR_LOG_INFO("Environmental Gesture: CRYO-GLASS CONDENSATION WIPE / FROST SCRAPE (Speed: %.2f m/s)", rightWipeSpeed);
                 SendKeyTap('E');
-                vrState.rightHapticPulse = 0.35f; // Squeaking glass friction micro-haptic (240 Hz)
+                HapticRequest(1, (0.35f), kHapticUi); // Squeaking glass friction micro-haptic (240 Hz)
             }
 
             // Subterranean High-Pressure Steam Pipe Wheel Valve Release (ADR 0053)
@@ -7249,13 +7350,13 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastSteamValveTurnTime = now;
                 s_steamValveRotations++;
                 VR_LOG_INFO("Environmental Gesture: STEAM PIPE WHEEL VALVE ROTATION #%d (Speed: %.2f m/s)", s_steamValveRotations, steamValveSpeed);
-                vrState.rightHapticPulse = 0.50f; // Metal valve friction tick (160 Hz)
+                HapticRequest(1, (0.50f), kHapticUi); // Metal valve friction tick (160 Hz)
                 if (s_steamValveRotations >= 3) {
                     s_steamValveRotations = 0;
                     VR_LOG_INFO("Environmental Gesture: HIGH-PRESSURE STEAM VALVE POPPED / SCALDING DIVERSION RELEASED");
                     SendKeyTap('E');
                     SendKeyTap('Q'); // Thermal diversion signal
-                    vrState.rightHapticPulse = 0.70f; // Sustained pneumatic steam vibration (110 Hz)
+                    HapticRequest(1, (0.70f), kHapticReload); // Sustained pneumatic steam vibration (110 Hz)
                 }
             }
 
@@ -7272,8 +7373,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 VR_LOG_INFO("Environmental Gesture: INMATE BRAWL STOOL WRENCHED FROM FLOOR (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
                 SendKeyTap('E');
                 SendKeyTap('1'); // Equip improvised heavy melee slot
-                vrState.leftHapticPulse = 0.85f; // Shearing bolt crack (200 Hz)
-                vrState.rightHapticPulse = 0.85f;
+                HapticRequest(0, (0.85f), kHapticReload); // Shearing bolt crack (200 Hz)
+                HapticRequest(1, (0.85f), kHapticReload);
             }
 
             // Heavy Automated Cargo Crane Lever Console Steering (ADR 0057)
@@ -7298,7 +7399,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 }
                 if (now - s_lastCraneRumbleTime > 200) {
                     s_lastCraneRumbleTime = now;
-                    vrState.rightHapticPulse = 0.35f; // Heavy hydraulic motor rumble (50 Hz)
+                    HapticRequest(1, (0.35f), kHapticUi); // Heavy hydraulic motor rumble (50 Hz)
                 }
             }
 
@@ -7312,7 +7413,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 VR_LOG_INFO("Environmental Gesture: INMATE MESS TRAY EQUIPPED FROM TABLE (Y: %.2fm)", leftLocal.y);
                 SendKeyTap('E');
                 SendKeyTap('1'); // Equip improvised defensive slot
-                vrState.leftHapticPulse = 0.40f; // Stamped sheet metal clang (180 Hz)
+                HapticRequest(0, (0.40f), kHapticUi); // Stamped sheet metal clang (180 Hz)
             }
 
             // Hydraulic Pressure Blast Valve Steam Jet Venting (ADR 0061)
@@ -7325,7 +7426,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 VR_LOG_INFO("Environmental Gesture: HYDRAULIC PRESSURE BLAST VALVE POPPED / STEAM JET RELEASED");
                 SendKeyTap('E');
                 SendKeyTap('Q'); // Thermal diversion signal
-                vrState.rightHapticPulse = 0.75f; // Pressurized jet stream vibration (130 Hz)
+                HapticRequest(1, (0.75f), kHapticReload); // Pressurized jet stream vibration (130 Hz)
             }
 
             // Overhead Vent Hatch Dual-Palm Upward Shove (ADR 0067)
@@ -7339,8 +7440,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 VR_LOG_INFO("Environmental Gesture: OVERHEAD VENT HATCH SHOVED OPEN (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
                 SendKeyTap('E');
                 SendKeyTap(VK_SPACE);
-                vrState.leftHapticPulse = 0.80f; // Spring-loaded latch pop & metal resonance (160 Hz)
-                vrState.rightHapticPulse = 0.80f;
+                HapticRequest(0, (0.80f), kHapticReload); // Spring-loaded latch pop & metal resonance (160 Hz)
+                HapticRequest(1, (0.80f), kHapticReload);
             }
 
             // Cryo-Chamber Emergency Oxygen Mask Quick-Don Stance (ADR 0069)
@@ -7357,7 +7458,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     s_lastMaskEquipTime = now;
                     VR_LOG_INFO("Environmental Gear: EMERGENCY REBREATHER / OXYGEN MASK CLAMPED TO FACE (Y: %.2fm)", leftLocal.y);
                     SendKeyTap('E'); // Seal environmental rebreather
-                    vrState.leftHapticPulse = 0.65f; // Pneumatic seal whoosh & inhalation pulse (110 Hz)
+                    HapticRequest(0, (0.65f), kHapticLadder); // Pneumatic seal whoosh & inhalation pulse (110 Hz)
                 }
             } else {
                 s_maskHoldStartTime = 0;
@@ -7405,8 +7506,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 bool isMovingTurret = (fabsf(dZ) > 0.08f) || (avgY > 0.05f || avgY < -0.18f);
                 if (isMovingTurret && (now - s_lastTurretGearRumble > 160)) {
                     s_lastTurretGearRumble = now;
-                    vrState.leftHapticPulse = 0.45f; // Deep gear train meshing rumble (55 Hz)
-                    vrState.rightHapticPulse = 0.45f;
+                    HapticRequest(0, (0.45f), kHapticUi); // Deep gear train meshing rumble (55 Hz)
+                    HapticRequest(1, (0.45f), kHapticUi);
                 }
             } else if (s_turretSteeringActive) {
                 s_turretSteeringActive = false;
@@ -7426,7 +7527,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastContainerLatchTime = now;
                 VR_LOG_INFO("Environmental Gesture: CARGO CONTAINER HYDRAULIC LOCK UNLATCHED (Vy: %.2f, Vx: %.2f)", rVel.y, rVel.x);
                 SendKeyTap('E');
-                vrState.rightHapticPulse = 0.85f; // Heavy hydraulic seal snap & mechanical clunk (100 Hz)
+                HapticRequest(1, (0.85f), kHapticReload); // Heavy hydraulic seal snap & mechanical clunk (100 Hz)
             }
 
             // Subterranean Cryo-Nitrogen Coolant Valve Venting Diversion (ADR 0074)
@@ -7440,7 +7541,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 VR_LOG_INFO("Environmental Gesture: CRYO-NITROGEN COOLANT VALVE POPPED / SUB-ZERO PLUME RELEASED");
                 SendKeyTap('E');
                 SendKeyTap('Q'); // Thermal diversion signal
-                vrState.rightHapticPulse = 0.85f; // Crystalline ice fracture crack (260 Hz)
+                HapticRequest(1, (0.85f), kHapticReload); // Crystalline ice fracture crack (260 Hz)
             }
 
             // Subterranean Mining Cart Rail Track Switch Wrench Pull (ADR 0076)
@@ -7453,7 +7554,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastTrackSwitchTime = now;
                 VR_LOG_INFO("Environmental Gesture: MINING RAIL TRACK SWITCH WRENCH THROWN (Vx: %.2f)", rVel.x);
                 SendKeyTap('E');
-                vrState.rightHapticPulse = 0.85f; // Heavy iron rail clank & ground shudder (70 Hz)
+                HapticRequest(1, (0.85f), kHapticReload); // Heavy iron rail clank & ground shudder (70 Hz)
             }
 
             // Subterranean Mining Rail Turntable Manual Push Lever (ADR 0108)
@@ -7467,20 +7568,20 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastTurntablePushTime = now;
                 s_turntablePushCount++;
                 VR_LOG_INFO("Environmental Gesture: MINING RAIL TURNTABLE ROTATION STRIDE #%d (Speed: %.2f m/s)", s_turntablePushCount, rSpeed);
-                vrState.rightHapticPulse = 0.65f; // Heavy ball-bearing grinding rumble (55 Hz)
+                HapticRequest(1, (0.65f), kHapticLadder); // Heavy ball-bearing grinding rumble (55 Hz)
                 if (s_turntablePushCount >= 3) {
                     s_turntablePushCount = 0;
                     VR_LOG_INFO("Environmental Gesture: MINING RAIL TURNTABLE LOCKED INTO QUADRANT DETENT");
                     SendKeyTap('E');
                     SendKeyTap(VK_SPACE);
                     SendKeyTap(VK_TAB);
-                    vrState.rightHapticPulse = 0.90f; // Concussive mechanical detent lock (80 Hz)
+                    HapticRequest(1, (0.90f), kHapticUi); // Concussive mechanical detent lock (80 Hz)
                 }
             }
 
             // Subterranean Mining Rail Track Derailer Wedge Strike (ADR 0120)
             static DWORD s_lastDerailerStrikeTime = 0;
-            bool leftAtRailWedge = (s_isPhysicallyCrouched || s_isDeepProne) &&
+            bool leftAtRailWedge = (s_posture.isPhysicallyCrouched || s_posture.isDeepProne) &&
                                    (leftLocal.z > -0.45f && leftLocal.z < -0.16f && leftLocal.y < -0.45f) &&
                                    (vrState.leftController.grip > 0.55f);
             bool rightHammerStrikeDown = (rVel.y < -1.10f);
@@ -7490,8 +7591,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('E');
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
-                vrState.rightHapticPulse = 0.95f; // Anvil crack shockwave (260 Hz)
-                vrState.leftHapticPulse = 0.60f;  // Rail acoustic ring (85 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Anvil crack shockwave (260 Hz)
+                HapticRequest(0, (0.60f), kHapticLadder);  // Rail acoustic ring (85 Hz)
             }
 
             // Mining Core Pneumatic Rock Bolter Sinking & Anchor Driver (ADR 0123)
@@ -7508,8 +7609,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                vrState.leftHapticPulse = 0.65f;  // High-frequency sleeve rattle (210 Hz)
-                vrState.rightHapticPulse = 0.98f; // Heavy pneumatic percussion impact (55 Hz)
+                HapticRequest(0, (0.65f), kHapticLadder);  // High-frequency sleeve rattle (210 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Heavy pneumatic percussion impact (55 Hz)
             }
 
             // Subterranean Mining Core Pneumatic Breaker Chisel Point Swap (ADR 0130)
@@ -7521,7 +7622,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 if (s_collarReleasedTime == 0) {
                     s_collarReleasedTime = now;
                     VR_LOG_INFO("Environmental Gesture: PNEUMATIC CHISEL CHUCK COLLAR RELEASED (Lz: %.2f)", lVel.z);
-                    vrState.leftHapticPulse = 0.60f; // Spring ball-detent release click (180 Hz)
+                    HapticRequest(0, (0.60f), kHapticUi); // Spring ball-detent release click (180 Hz)
                 }
             }
             bool diamondChiselSeatRam = (s_collarReleasedTime > 0 && (now - s_collarReleasedTime < 600) && rVel.z < -0.80f);
@@ -7532,8 +7633,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('E');
                 SendKeyTap(VK_SPACE);
                 SendKeyTap('3');
-                vrState.rightHapticPulse = 0.90f; // Hardened alloy chuck lock snap (90 Hz)
-                vrState.leftHapticPulse = 0.70f;
+                HapticRequest(1, (0.90f), kHapticFinisher); // Hardened alloy chuck lock snap (90 Hz)
+                HapticRequest(0, (0.70f), kHapticReload);
             }
 
             // Subterranean Mining Rail Pneumatic Car Tipper Lock Release (ADR 0135)
@@ -7548,8 +7649,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('E');
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_RETURN);
-                vrState.leftHapticPulse = 0.95f;  // Pawl release snap & ore dump rumble (50 Hz)
-                vrState.rightHapticPulse = 0.95f;
+                HapticRequest(0, (0.95f), kHapticFinisher);  // Pawl release snap & ore dump rumble (50 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher);
             }
 
             // Dark Athena EVA Airlock Manual Handwheel Decompression Dogging (ADR 0078)
@@ -7563,14 +7664,14 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastAirlockCrankTime = now;
                 s_airlockCrankCount++;
                 VR_LOG_INFO("Environmental Gesture: EVA AIRLOCK HANDWHEEL DOGGING REVOLUTION #%d (Speed: %.2f m/s)", s_airlockCrankCount, dualWheelSpeed);
-                vrState.leftHapticPulse = 0.50f;
-                vrState.rightHapticPulse = 0.50f; // Ratchet tooth click (160 Hz)
+                HapticRequest(0, (0.50f), kHapticUi);
+                HapticRequest(1, (0.50f), kHapticUi); // Ratchet tooth click (160 Hz)
                 if (s_airlockCrankCount >= 3) {
                     s_airlockCrankCount = 0;
                     VR_LOG_INFO("Environmental Gesture: EVA AIRLOCK BULKHEAD DOGGED SHUT / HERMETIC REPRESSURIZATION TRIGGERED");
                     SendKeyTap('E');
-                    vrState.leftHapticPulse = 0.85f; // Hermetic clamp thud & seal hiss (100 Hz)
-                    vrState.rightHapticPulse = 0.85f;
+                    HapticRequest(0, (0.85f), kHapticReload); // Hermetic clamp thud & seal hiss (100 Hz)
+                    HapticRequest(1, (0.85f), kHapticReload);
                 }
             }
 
@@ -7585,16 +7686,16 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastSolarArrayCrankTime = now;
                 s_solarArrayCrankCount++;
                 VR_LOG_INFO("Environmental Gesture: EVA SOLAR ARRAY SPINDLE REVOLUTION #%d (Speed: %.2f m/s)", s_solarArrayCrankCount, solarCrankSpeed);
-                vrState.leftHapticPulse = 0.50f;
-                vrState.rightHapticPulse = 0.50f; // Planetary gear teeth click (150 Hz)
+                HapticRequest(0, (0.50f), kHapticUi);
+                HapticRequest(1, (0.50f), kHapticUi); // Planetary gear teeth click (150 Hz)
                 if (s_solarArrayCrankCount >= 3) {
                     s_solarArrayCrankCount = 0;
                     VR_LOG_INFO("Environmental Gesture: SOLAR ARRAY ORIENTATION ACHIEVED / AUXILIARY POWER RESTORED");
                     SendKeyTap('E');
                     SendKeyTap(VK_RETURN);
                     SendKeyTap('W');
-                    vrState.leftHapticPulse = 0.85f;  // Electromagnetic solar collector lock hum (90 Hz)
-                    vrState.rightHapticPulse = 0.85f;
+                    HapticRequest(0, (0.85f), kHapticReload);  // Electromagnetic solar collector lock hum (90 Hz)
+                    HapticRequest(1, (0.85f), kHapticReload);
                 }
             }
 
@@ -7608,7 +7709,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastPetcockTwistTime = now;
                 VR_LOG_INFO("Environmental Gesture: ATMOSPHERIC BLEED PETCOCK VALVE TWISTED (Vx: %.2f)", rVel.x);
                 SendKeyTap('E');
-                vrState.rightHapticPulse = 0.55f; // Piercing pressure hiss & needle valve rattle (220 Hz)
+                HapticRequest(1, (0.55f), kHapticLadder); // Piercing pressure hiss & needle valve rattle (220 Hz)
             }
 
             // Cryo-Stasis Chamber Manual Coolant Bleed Petcock Turn (ADR 0127)
@@ -7621,8 +7722,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('E');
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.75f; // Cryo vapor jet expansion rumble (140 Hz)
-                vrState.leftHapticPulse = 0.35f;
+                HapticRequest(1, (0.75f), kHapticReload); // Cryo vapor jet expansion rumble (140 Hz)
+                HapticRequest(0, (0.35f), kHapticUi);
             }
 
             // Cryo-Chamber Defrost Temperature Sensor Probe Insertion (ADR 0138)
@@ -7634,7 +7735,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 if (s_thermalProbeStartTime == 0) s_thermalProbeStartTime = now;
                 DWORD dwell = now - s_thermalProbeStartTime;
                 float progress = (dwell < 400) ? (dwell / 400.0f) : 1.0f;
-                vrState.rightHapticPulse = 0.30f + 0.40f * progress; // Ascending thermal equilibrium buzz
+                HapticRequest(1, (0.30f + 0.40f * progress), kHapticUi); // Ascending thermal equilibrium buzz
                 if (dwell >= 400) {
                     s_thermalProbeStartTime = 0;
                     s_lastThermalProbeTime = now;
@@ -7642,7 +7743,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     SendKeyTap('E');
                     SendKeyTap(VK_TAB);
                     SendKeyTap('Q');
-                    vrState.rightHapticPulse = 0.80f; // Defrost authorization chime (280 Hz)
+                    HapticRequest(1, (0.80f), kHapticUi); // Defrost authorization chime (280 Hz)
                 }
             } else {
                 s_thermalProbeStartTime = 0;
@@ -7658,8 +7759,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 VR_LOG_INFO("Environmental Stealth: TURRET OPTICAL SENSOR DOME SPRAY-PAINTED / COATED");
                 SendKeyTap('E');
                 SendKeyTap('Q'); // Optical suppression signal
-                if (vrState.rightController.grip > 0.50f) vrState.rightHapticPulse = 0.50f; // Aerosol propellant hiss (160 Hz)
-                if (vrState.leftController.grip > 0.50f) vrState.leftHapticPulse = 0.50f;
+                if (vrState.rightController.grip > 0.50f) HapticRequest(1, (0.50f), kHapticUi); // Aerosol propellant hiss (160 Hz)
+                if (vrState.leftController.grip > 0.50f) HapticRequest(0, (0.50f), kHapticUi);
             }
 
             // Subterranean Ventilation Axial Fan Blade Jamming Bar (ADR 0084)
@@ -7673,8 +7774,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 VR_LOG_INFO("Environmental Gesture: VENTILATION AXIAL FAN BLADES JAMMED (Lz: %.2f, Rz: %.2f)", lVel.z, rVel.z);
                 SendKeyTap('E');
                 SendKeyTap(VK_SPACE);
-                vrState.leftHapticPulse = 0.95f; // Shearing metal turbine arrest impact (120 Hz)
-                vrState.rightHapticPulse = 0.95f;
+                HapticRequest(0, (0.95f), kHapticFinisher); // Shearing metal turbine arrest impact (120 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher);
             }
 
             // Atmospheric Hull Rupture Emergency Foam Canister Deployment (ADR 0088)
@@ -7688,8 +7789,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 VR_LOG_INFO("Environmental Gesture: HULL RUPTURE EMERGENCY FOAM CANISTER EXTRUDED (Vx: %.2f)", rVel.x);
                 SendKeyTap('E');
                 SendKeyTap(VK_SPACE);
-                vrState.leftHapticPulse = 0.60f; // Acoustic foam jet extrusion (120 Hz)
-                vrState.rightHapticPulse = 0.75f; // Rapid cure polymerization pop (200 Hz)
+                HapticRequest(0, (0.60f), kHapticLadder); // Acoustic foam jet extrusion (120 Hz)
+                HapticRequest(1, (0.75f), kHapticReload); // Rapid cure polymerization pop (200 Hz)
             }
 
             // Subterranean Hydroponics Plant Specimen Harvesting (ADR 0093)
@@ -7701,8 +7802,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastHarvestTime = now;
                 VR_LOG_INFO("Environmental Gesture: HYDROPONIC SPECIMEN HARVESTED (Vy: %.2f)", (rVel.y > lVel.y) ? rVel.y : lVel.y);
                 SendKeyTap('E');
-                if (rVel.y > 0.40f) vrState.rightHapticPulse = 0.45f; // Botanical snap click (160 Hz)
-                if (lVel.y > 0.40f) vrState.leftHapticPulse = 0.45f;
+                if (rVel.y > 0.40f) HapticRequest(1, (0.45f), kHapticUi); // Botanical snap click (160 Hz)
+                if (lVel.y > 0.40f) HapticRequest(0, (0.45f), kHapticUi);
             }
 
             // Dark Athena Drone Charging Bay Station Disconnect Jerk (ADR 0094)
@@ -7715,8 +7816,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 VR_LOG_INFO("Environmental Gesture: DRONE RECHARGE UMBILICAL SEVERED (Vz: %.2f)", (rVel.z > lVel.z) ? rVel.z : lVel.z);
                 SendKeyTap('E');
                 SendKeyTap(VK_SPACE);
-                if (rVel.z > 0.85f) vrState.rightHapticPulse = 0.90f; // Inductive arc shudder (240 Hz)
-                if (lVel.z > 0.85f) vrState.leftHapticPulse = 0.90f;
+                if (rVel.z > 0.85f) HapticRequest(1, (0.90f), kHapticFinisher); // Inductive arc shudder (240 Hz)
+                if (lVel.z > 0.85f) HapticRequest(0, (0.90f), kHapticFinisher);
             }
 
             // Cybernetic Drone Power Shunt Manual Lever Yank (ADR 0121)
@@ -7730,8 +7831,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('E');
                 SendKeyTap(VK_SPACE);
                 SendKeyTap('Q');
-                if (rVel.y < -0.60f) vrState.rightHapticPulse = 0.90f; // Inductive shunt discharge shudder (280 Hz)
-                if (lVel.y < -0.60f) vrState.leftHapticPulse = 0.90f;
+                if (rVel.y < -0.60f) HapticRequest(1, (0.90f), kHapticFinisher); // Inductive shunt discharge shudder (280 Hz)
+                if (lVel.y < -0.60f) HapticRequest(0, (0.90f), kHapticFinisher);
             }
 
             // Subterranean Cryo-Stasis Chamber Biometric Bypass Override (ADR 0097)
@@ -7748,8 +7849,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 VR_LOG_INFO("Environmental Gesture: CRYO-STASIS BIOMETRIC BYPASS OVERRIDE (Ry: %.2f, Ly: %.2f)", rVel.y, leftLocal.y);
                 SendKeyTap('E');
                 SendKeyTap(VK_RETURN);
-                vrState.leftHapticPulse = 0.50f; // Electronic card read chirp (220 Hz)
-                vrState.rightHapticPulse = 0.80f; // Heavy magnetic breaker disconnect thud (120 Hz)
+                HapticRequest(0, (0.50f), kHapticUi); // Electronic card read chirp (220 Hz)
+                HapticRequest(1, (0.80f), kHapticReload); // Heavy magnetic breaker disconnect thud (120 Hz)
             }
 
             // Dark Athena Fusion Reactor Core Rod Manual Insertion (ADR 0100 - Century Milestone!)
@@ -7763,8 +7864,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('E');
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_RETURN);
-                vrState.leftHapticPulse = 0.98f; // Catastrophic magnetic confinement shockwave (45 Hz)
-                vrState.rightHapticPulse = 0.98f;
+                HapticRequest(0, (0.98f), kHapticFinisher); // Catastrophic magnetic confinement shockwave (45 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher);
             }
 
             // Subterranean Hydroponics Nutrient Dispenser Pressure Plunger (ADR 0105)
@@ -7777,15 +7878,15 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastPlungerStrokeTime = now;
                 s_plungerStrokeCount++;
                 VR_LOG_INFO("Environmental Gesture: HYDROPONIC NUTRIENT PLUNGER STROKE #%d (Vy: %.2f)", s_plungerStrokeCount, (rVel.y < lVel.y) ? rVel.y : lVel.y);
-                if (rVel.y < -0.45f) vrState.rightHapticPulse = 0.60f; // Hydraulic displacement slosh (110 Hz)
-                if (lVel.y < -0.45f) vrState.leftHapticPulse = 0.60f;
+                if (rVel.y < -0.45f) HapticRequest(1, (0.60f), kHapticLadder); // Hydraulic displacement slosh (110 Hz)
+                if (lVel.y < -0.45f) HapticRequest(0, (0.60f), kHapticLadder);
                 if (s_plungerStrokeCount >= 3) {
                     s_plungerStrokeCount = 0;
                     VR_LOG_INFO("Environmental Gesture: NUTRIENT ACCUMULATOR RELIEF VALVE CLEARED / IRRIGATION RESTORED");
                     SendKeyTap('E');
                     SendKeyTap('Q');
-                    vrState.leftHapticPulse = 0.75f; // Relief valve clack (220 Hz)
-                    vrState.rightHapticPulse = 0.75f;
+                    HapticRequest(0, (0.75f), kHapticReload); // Relief valve clack (220 Hz)
+                    HapticRequest(1, (0.75f), kHapticReload);
                 }
             }
 
@@ -7800,8 +7901,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('E');
                 SendKeyTap(VK_SPACE);
                 SendKeyTap('Q');
-                if (rVel.y > 0.65f) vrState.rightHapticPulse = 0.80f; // Armature clack & pipe surge (110 Hz)
-                if (lVel.y > 0.65f) vrState.leftHapticPulse = 0.80f;
+                if (rVel.y > 0.65f) HapticRequest(1, (0.80f), kHapticReload); // Armature clack & pipe surge (110 Hz)
+                if (lVel.y > 0.65f) HapticRequest(0, (0.80f), kHapticReload);
             }
 
             // Subterranean Hydroponics Misting Manifold Handwheel Siphon (ADR 0124)
@@ -7814,21 +7915,21 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastMistingSiphonTime = now;
                 s_mistingSiphonCrankCount++;
                 VR_LOG_INFO("Environmental Gesture: HYDROPONICS MISTING SIPHON HANDWHEEL REVOLUTION #%d (Speed: %.2f m/s)", s_mistingSiphonCrankCount, mistingWheelSpeed);
-                vrState.rightHapticPulse = 0.55f; // Brass thread friction detent (120 Hz)
+                HapticRequest(1, (0.55f), kHapticUi); // Brass thread friction detent (120 Hz)
                 if (s_mistingSiphonCrankCount >= 3) {
                     s_mistingSiphonCrankCount = 0;
                     VR_LOG_INFO("Environmental Gesture: MISTING MANIFOLD PRESSURE SIPHON VENTED & FLUSHED");
                     SendKeyTap('E');
                     SendKeyTap('Q');
                     SendKeyTap(VK_RETURN);
-                    vrState.rightHapticPulse = 0.85f; // Pressurized aerosol purge blast (190 Hz)
-                    vrState.leftHapticPulse = 0.40f;
+                    HapticRequest(1, (0.85f), kHapticReload); // Pressurized aerosol purge blast (190 Hz)
+                    HapticRequest(0, (0.40f), kHapticUi);
                 }
             }
 
             // Subterranean Hydroponics Root Aeration Valve Foot Pedal Treadle (ADR 0132)
             static DWORD s_lastTreadlePlungeTime = 0;
-            bool lowStanceForTreadle = (s_isPhysicallyCrouched || s_isDeepProne) || (rightLocal.y < -0.45f);
+            bool lowStanceForTreadle = (s_posture.isPhysicallyCrouched || s_posture.isDeepProne) || (rightLocal.y < -0.45f);
             bool treadleDownPlunge = (rVel.y < -0.95f && rightLocal.y < -0.48f && vrState.rightController.grip > 0.50f);
             if (lowStanceForTreadle && treadleDownPlunge && (now - s_lastTreadlePlungeTime > 1800)) {
                 s_lastTreadlePlungeTime = now;
@@ -7836,8 +7937,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('E');
                 SendKeyTap('C');
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.90f; // Pneumatic fluid aeration surge pulse (120 Hz)
-                vrState.leftHapticPulse = 0.40f;
+                HapticRequest(1, (0.90f), kHapticFinisher); // Pneumatic fluid aeration surge pulse (120 Hz)
+                HapticRequest(0, (0.40f), kHapticUi);
             }
 
             // Dark Athena Cargo Bay Magnetic Crane Remote Pendant Snatch (ADR 0106)
@@ -7850,8 +7951,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 VR_LOG_INFO("Environmental Gesture: CARGO GANTRY CRANE PENDANT SNATCHED & HAULED (Vy: %.2f)", (rVel.y < lVel.y) ? rVel.y : lVel.y);
                 SendKeyTap('E');
                 SendKeyTap('W'); // Engage gantry remote bridge
-                if (rVel.y < -0.45f) vrState.rightHapticPulse = 0.70f; // Steel cable tension & relay click (160 Hz)
-                if (lVel.y < -0.45f) vrState.leftHapticPulse = 0.70f;
+                if (rVel.y < -0.45f) HapticRequest(1, (0.70f), kHapticReload); // Steel cable tension & relay click (160 Hz)
+                if (lVel.y < -0.45f) HapticRequest(0, (0.70f), kHapticReload);
             }
 
             // Dark Athena EVA Solar Flare Radiation Shelter Bulkhead Seal (ADR 0109)
@@ -7866,8 +7967,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('E');
                 SendKeyTap('C');
                 SendKeyTap(VK_SPACE);
-                vrState.leftHapticPulse = 0.98f;  // Deep lead door structural impact shockwave (40 Hz)
-                vrState.rightHapticPulse = 0.98f;
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Deep lead door structural impact shockwave (40 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher);
             }
 
             // Dark Athena EVA Solar Collector Debris Shield Ejection (ADR 0117)
@@ -7882,8 +7983,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('E');
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_RETURN);
-                vrState.leftHapticPulse = 0.95f;  // Pyrotechnic explosive pin severance shockwave (240 Hz)
-                vrState.rightHapticPulse = 0.95f;
+                HapticRequest(0, (0.95f), kHapticFinisher);  // Pyrotechnic explosive pin severance shockwave (240 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher);
             }
 
             // Dark Athena EVA Antenna Array Dipole Polarization Alignment (ADR 0125)
@@ -7896,16 +7997,16 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastAntennaAlignTime = now;
                 s_antennaAlignStep++;
                 VR_LOG_INFO("Environmental Gesture: EVA ANTENNA GIMBAL POLARIZATION SWEEP STEP #%d (Speed: %.2f)", s_antennaAlignStep, antennaSweepSpeed);
-                vrState.leftHapticPulse = 0.45f + 0.15f * s_antennaAlignStep;  // Ascending harmonic hum
-                vrState.rightHapticPulse = 0.45f + 0.15f * s_antennaAlignStep;
+                HapticRequest(0, (0.45f + 0.15f * s_antennaAlignStep), kHapticAmbient);  // Ascending harmonic hum
+                HapticRequest(1, (0.45f + 0.15f * s_antennaAlignStep), kHapticAmbient);
                 if (s_antennaAlignStep >= 3) {
                     s_antennaAlignStep = 0;
                     VR_LOG_INFO("Environmental Gesture: EVA ANTENNA ARRAY CARRIER WAVE POLARIZATION LOCKED");
                     SendKeyTap('E');
                     SendKeyTap('W');
                     SendKeyTap(VK_TAB);
-                    vrState.leftHapticPulse = 0.85f;  // Magnetic phase lock detent (90 Hz)
-                    vrState.rightHapticPulse = 0.85f;
+                    HapticRequest(0, (0.85f), kHapticUi);  // Magnetic phase lock detent (90 Hz)
+                    HapticRequest(1, (0.85f), kHapticReload);
                 }
             }
 
@@ -7918,15 +8019,15 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastSolarScrapeTime = now;
                 s_solarScrapeCount++;
                 VR_LOG_INFO("Environmental Gesture: EVA SOLAR PANEL DE-ICING SCRAPE STROKE #%d (Speed: %.2f)", s_solarScrapeCount, rSpeed);
-                vrState.rightHapticPulse = 0.50f; // Crystalline glass scraping rasp (240 Hz)
+                HapticRequest(1, (0.50f), kHapticUi); // Crystalline glass scraping rasp (240 Hz)
                 if (s_solarScrapeCount >= 4) {
                     s_solarScrapeCount = 0;
                     VR_LOG_INFO("Environmental Gesture: EVA SOLAR PANEL DE-ICED & AUXILIARY POWER BUS RESTORED");
                     SendKeyTap('E');
                     SendKeyTap(VK_TAB);
                     SendKeyTap(VK_RETURN);
-                    vrState.rightHapticPulse = 0.80f; // Auxiliary power bus resonance chime (310 Hz)
-                    vrState.leftHapticPulse = 0.40f;
+                    HapticRequest(1, (0.80f), kHapticUi); // Auxiliary power bus resonance chime (310 Hz)
+                    HapticRequest(0, (0.40f), kHapticUi);
                 }
             }
 
@@ -7937,7 +8038,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             bool steadyGlideVelocity = (fabsf(rVel.x) > 0.25f && fabsf(rVel.x) < 0.65f);
             if (handAtTrussSeam && steadyGlideVelocity && (now - s_lastWeldScanTime > 2000)) {
                 if (s_weldScanStartTime == 0) s_weldScanStartTime = now;
-                vrState.rightHapticPulse = 0.45f; // Ultrasonic scanner diagnostic vibration (230 Hz)
+                HapticRequest(1, (0.45f), kHapticReload); // Ultrasonic scanner diagnostic vibration (230 Hz)
                 if (now - s_weldScanStartTime >= 350) {
                     s_weldScanStartTime = 0;
                     s_lastWeldScanTime = now;
@@ -7945,7 +8046,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     SendKeyTap('E');
                     SendKeyTap(VK_SPACE);
                     SendKeyTap(VK_TAB);
-                    vrState.rightHapticPulse = 0.75f; // Structural clearance confirmation chime (180 Hz)
+                    HapticRequest(1, (0.75f), kHapticUi); // Structural clearance confirmation chime (180 Hz)
                 }
             } else {
                 s_weldScanStartTime = 0;
@@ -7960,15 +8061,15 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastCableWinchTime = now;
                 s_cableWinchCrankCount++;
                 VR_LOG_INFO("Environmental Gesture: EVA CABLE TENSION WINCH REVOLUTION #%d (Speed: %.2f)", s_cableWinchCrankCount, winchCrankSpeed);
-                vrState.rightHapticPulse = 0.55f + 0.10f * s_cableWinchCrankCount; // Progressive tension ratchet
+                HapticRequest(1, (0.55f + 0.10f * s_cableWinchCrankCount), kHapticLadder); // Progressive tension ratchet
                 if (s_cableWinchCrankCount >= 3) {
                     s_cableWinchCrankCount = 0;
                     VR_LOG_INFO("Environmental Gesture: EVA SOLAR ARRAY CABLE TAUT & WINCH LOCKED");
                     SendKeyTap('E');
                     SendKeyTap('W');
                     SendKeyTap(VK_RETURN);
-                    vrState.rightHapticPulse = 0.90f; // Mechanical dog lock snap (90 Hz)
-                    vrState.leftHapticPulse = 0.50f;
+                    HapticRequest(1, (0.90f), kHapticFinisher); // Mechanical dog lock snap (90 Hz)
+                    HapticRequest(0, (0.50f), kHapticUi);
                 }
             }
 
@@ -7982,8 +8083,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('E');
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
-                vrState.rightHapticPulse = 0.95f; // Metallurgical shear crack shockwave (260 Hz)
-                vrState.leftHapticPulse = 0.60f;
+                HapticRequest(1, (0.95f), kHapticFinisher); // Metallurgical shear crack shockwave (260 Hz)
+                HapticRequest(0, (0.60f), kHapticLadder);
             }
 
             // Subterranean Hydroponics Bio-Filter Carbon Mesh Cartridge Extraction (ADR 0140)
@@ -7999,8 +8100,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('E');
                 SendKeyTap('Q');
                 SendKeyTap(VK_TAB);
-                vrState.leftHapticPulse = 0.85f;  // Filter canal sliding release clunk (180 Hz)
-                vrState.rightHapticPulse = 0.85f;
+                HapticRequest(0, (0.85f), kHapticReload);  // Filter canal sliding release clunk (180 Hz)
+                HapticRequest(1, (0.85f), kHapticReload);
             }
 
             // Dark Athena EVA Solar Collector Photovoltaic Cell Thermal Decoupling Fuse Pull (ADR 0143)
@@ -8014,7 +8115,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('E');
                 SendKeyTap(VK_RETURN);
                 SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.85f; // Spring retention detent release snap (160 Hz)
+                HapticRequest(1, (0.85f), kHapticUi); // Spring retention detent release snap (160 Hz)
             }
 
             // Subterranean Hydroponics Bio-Sludge Siphon Pump T-Handle Reciprocating Stroke (ADR 0144)
@@ -8029,16 +8130,16 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastSludgeStrokeTime = now;
                 s_sludgePumpStrokeCount++;
                 VR_LOG_INFO("Environmental Gesture: HYDROPONICS SLUDGE SIPHON STROKE #%d (Ly: %.2f, Ry: %.2f)", s_sludgePumpStrokeCount, lVel.y, rVel.y);
-                vrState.leftHapticPulse = 0.65f;  // Heavy viscous hydraulic drag (70 Hz)
-                vrState.rightHapticPulse = 0.65f;
+                HapticRequest(0, (0.65f), kHapticLadder);  // Heavy viscous hydraulic drag (70 Hz)
+                HapticRequest(1, (0.65f), kHapticLadder);
                 if (s_sludgePumpStrokeCount >= 3) {
                     s_sludgePumpStrokeCount = 0;
                     VR_LOG_INFO("Environmental Gesture: SLUDGE SIPHON CLEARED & SUMP DRAIN OPENED");
                     SendKeyTap('E');
                     SendKeyTap(VK_SPACE);
                     SendKeyTap('W');
-                    vrState.leftHapticPulse = 0.95f;  // Siphon surge pop & drainage rumble (120 Hz)
-                    vrState.rightHapticPulse = 0.95f;
+                    HapticRequest(0, (0.95f), kHapticFinisher);  // Siphon surge pop & drainage rumble (120 Hz)
+                    HapticRequest(1, (0.95f), kHapticFinisher);
                 }
             }
 
@@ -8051,8 +8152,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (handAtTrussHingeNipple) {
                 if (s_greaseInjectStart == 0) s_greaseInjectStart = now;
                 DWORD injectDuration = now - s_greaseInjectStart;
-                vrState.rightHapticPulse = 0.50f; // Continuous fluid displacement buzz (160 Hz)
-                vrState.leftHapticPulse = 0.35f;
+                HapticRequest(1, (0.50f), kHapticUi); // Continuous fluid displacement buzz (160 Hz)
+                HapticRequest(0, (0.35f), kHapticUi);
                 if (injectDuration >= 400 && (now - s_lastGreaseInjectTime > 1500)) {
                     s_lastGreaseInjectTime = now;
                     s_greaseInjectStart = 0;
@@ -8060,8 +8161,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     SendKeyTap('E');
                     SendKeyTap(VK_RETURN);
                     SendKeyTap(VK_TAB);
-                    vrState.rightHapticPulse = 0.85f; // Hydraulic unseize pop (90 Hz)
-                    vrState.leftHapticPulse = 0.60f;
+                    HapticRequest(1, (0.85f), kHapticReload); // Hydraulic unseize pop (90 Hz)
+                    HapticRequest(0, (0.60f), kHapticLadder);
                 }
             } else {
                 s_greaseInjectStart = 0;
@@ -8077,14 +8178,14 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastAlgaeScrapeTime = now;
                 s_algaeScrapeCount++;
                 VR_LOG_INFO("Environmental Gesture: HYDROPONICS ALGAE TUBE SCRAPING STROKE #%d (Speed: %.2f)", s_algaeScrapeCount, algaeScrapeSpeed);
-                vrState.rightHapticPulse = 0.48f; // Gritty quartz blade friction rasp (210 Hz)
+                HapticRequest(1, (0.48f), kHapticUi); // Gritty quartz blade friction rasp (210 Hz)
                 if (s_algaeScrapeCount >= 4) {
                     s_algaeScrapeCount = 0;
                     VR_LOG_INFO("Environmental Gesture: ALGAE BIOMASS CLEARED FROM QUARTZ TUBE");
                     SendKeyTap('E');
                     SendKeyTap(VK_TAB);
                     SendKeyTap(VK_SPACE);
-                    vrState.rightHapticPulse = 0.75f; // Quartz resonance clean chime (290 Hz)
+                    HapticRequest(1, (0.75f), kHapticUi); // Quartz resonance clean chime (290 Hz)
                 }
             }
 
@@ -8099,8 +8200,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('E');
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Hardened alloy detent lock snap (280 Hz)
-                vrState.leftHapticPulse = 0.60f;
+                HapticRequest(1, (0.95f), kHapticUi); // Hardened alloy detent lock snap (280 Hz)
+                HapticRequest(0, (0.60f), kHapticLadder);
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator Blast Door Dual Lever Pull (ADR 0152)
@@ -8116,8 +8217,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('E');
                 SendKeyTap(VK_RETURN);
                 SendKeyTap('Q');
-                vrState.leftHapticPulse = 0.95f;  // Lever trip clack & combustion blast rumble (50 Hz)
-                vrState.rightHapticPulse = 0.95f;
+                HapticRequest(0, (0.95f), kHapticFinisher);  // Lever trip clack & combustion blast rumble (50 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher);
             }
 
             // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Cotter Pin Extraction (ADR 0155)
@@ -8131,8 +8232,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('E');
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
-                vrState.rightHapticPulse = 0.95f; // Mechanical release detent clunk (180 Hz)
-                vrState.leftHapticPulse = 0.60f;
+                HapticRequest(1, (0.95f), kHapticUi); // Mechanical release detent clunk (180 Hz)
+                HapticRequest(0, (0.60f), kHapticLadder);
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator Burner Ignition Spark Wheel Strike (ADR 0156)
@@ -8146,8 +8247,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('E');
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Flint rasp & combustion flame blast (60 Hz)
-                vrState.leftHapticPulse = 0.70f;
+                HapticRequest(1, (0.95f), kHapticFinisher); // Flint rasp & combustion flame blast (60 Hz)
+                HapticRequest(0, (0.70f), kHapticReload);
             }
 
             // Dark Athena EVA Solar Collector Truss Thermal Radiator Fin Unfolding Wrench (ADR 0159)
@@ -8161,8 +8262,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('E');
                 SendKeyTap('W');
                 SendKeyTap(VK_TAB);
-                vrState.rightHapticPulse = 0.90f; // Detent latch lock pulse (280 Hz)
-                vrState.leftHapticPulse = 0.60f;
+                HapticRequest(1, (0.90f), kHapticUi); // Detent latch lock pulse (280 Hz)
+                HapticRequest(0, (0.60f), kHapticLadder);
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator Flame Damper Handwheel Spin (ADR 0160)
@@ -8175,15 +8276,15 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastDamperSpinTime = now;
                 s_damperSpinCount++;
                 VR_LOG_INFO("Environmental Gesture: HYDROPONICS FLAME DAMPER HANDWHEEL REVOLUTION #%d (Speed: %.2f)", s_damperSpinCount, damperWheelSpeed);
-                vrState.rightHapticPulse = 0.55f; // Spindle rotation rumble (130 Hz)
+                HapticRequest(1, (0.55f), kHapticLadder); // Spindle rotation rumble (130 Hz)
                 if (s_damperSpinCount >= 3) {
                     s_damperSpinCount = 0;
                     VR_LOG_INFO("Environmental Gesture: FLAME DAMPER VANES FULLY OPENED & LOCKED");
                     SendKeyTap('E');
                     SendKeyTap(VK_SPACE);
                     SendKeyTap('Q');
-                    vrState.rightHapticPulse = 0.95f; // Mechanical end-stop detent thud (210 Hz)
-                    vrState.leftHapticPulse = 0.50f;
+                    HapticRequest(1, (0.95f), kHapticUi); // Mechanical end-stop detent thud (210 Hz)
+                    HapticRequest(0, (0.50f), kHapticUi);
                 }
             }
 
@@ -8198,8 +8299,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('E');
                 SendKeyTap('W');
                 SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Mechanical turnbuckle detent snap (290 Hz)
-                vrState.leftHapticPulse = 0.50f;
+                HapticRequest(1, (0.95f), kHapticUi); // Mechanical turnbuckle detent snap (290 Hz)
+                HapticRequest(0, (0.50f), kHapticUi);
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator Flame Arrestor Mesh Screen Slide-In (ADR 0164)
@@ -8214,8 +8315,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('E');
                 SendKeyTap(VK_RETURN);
                 SendKeyTap(VK_TAB);
-                vrState.rightHapticPulse = 0.90f; // Mechanical seating latch snap (260 Hz)
-                vrState.leftHapticPulse = 0.90f;
+                HapticRequest(1, (0.90f), kHapticFinisher); // Mechanical seating latch snap (260 Hz)
+                HapticRequest(0, (0.90f), kHapticFinisher);
             }
 
             // Dark Athena EVA Solar Array Debris Deflection Grid Pitch Tilt Pivot (ADR 0167)
@@ -8231,8 +8332,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('E');
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
-                vrState.leftHapticPulse = 0.95f;  // Gimbal quadrant detent thud (270 Hz)
-                vrState.rightHapticPulse = 0.95f;
+                HapticRequest(0, (0.95f), kHapticUi);  // Gimbal quadrant detent thud (270 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher);
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator Slag Poking Spud Bar Thrust (ADR 0168)
@@ -8248,8 +8349,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.98f; // Slag percussion fracture blast (260 Hz)
-                vrState.leftHapticPulse = 0.85f;
+                HapticRequest(1, (0.98f), kHapticFinisher); // Slag percussion fracture blast (260 Hz)
+                HapticRequest(0, (0.85f), kHapticReload);
             }
 
             // Dark Athena EVA Solar Collector Heat Radiator Shutter Louver Multi-Slit Slide (ADR 0171)
@@ -8263,8 +8364,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('E');
                 SendKeyTap('C');
                 SendKeyTap(VK_TAB);
-                vrState.rightHapticPulse = 0.90f; // Detent latch lock pulse (280 Hz)
-                vrState.leftHapticPulse = 0.50f;
+                HapticRequest(1, (0.90f), kHapticUi); // Detent latch lock pulse (280 Hz)
+                HapticRequest(0, (0.50f), kHapticUi);
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator Flame Sensor Quartz Sight-Glass Scrape (ADR 0172)
@@ -8277,15 +8378,15 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastSightGlassTime = now;
                 s_sightGlassCount++;
                 VR_LOG_INFO("Environmental Gesture: HYDROPONICS SIGHT-GLASS SCRAPE STROKE #%d (Speed: %.2f)", s_sightGlassCount, sightGlassSpeed);
-                vrState.rightHapticPulse = 0.45f; // Quartz rasp friction (220 Hz)
+                HapticRequest(1, (0.45f), kHapticUi); // Quartz rasp friction (220 Hz)
                 if (s_sightGlassCount >= 4) {
                     s_sightGlassCount = 0;
                     VR_LOG_INFO("Environmental Gesture: SIGHT-GLASS WINDOW CLEARED / BURNER OPTICS RESTORED");
                     SendKeyTap('E');
                     SendKeyTap(VK_TAB);
                     SendKeyTap(VK_RETURN);
-                    vrState.rightHapticPulse = 0.85f; // Optical sync resonant confirmation chime (320 Hz)
-                    vrState.leftHapticPulse = 0.50f;
+                    HapticRequest(1, (0.85f), kHapticUi); // Optical sync resonant confirmation chime (320 Hz)
+                    HapticRequest(0, (0.50f), kHapticUi);
                 }
             }
 
@@ -8301,8 +8402,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('E');
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_RETURN);
-                vrState.leftHapticPulse = 0.95f;  // Mechanical ring release detent thud (290 Hz)
-                vrState.rightHapticPulse = 0.95f;
+                HapticRequest(0, (0.95f), kHapticUi);  // Mechanical ring release detent thud (290 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher);
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Steam Scrubber Siphon Drain (ADR 0176)
@@ -8316,8 +8417,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('E');
                 SendKeyTap('Q');
                 SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.90f; // Turbulent hydraulic drain surge rumble (90 Hz)
-                vrState.leftHapticPulse = 0.50f;
+                HapticRequest(1, (0.90f), kHapticFinisher); // Turbulent hydraulic drain surge rumble (90 Hz)
+                HapticRequest(0, (0.50f), kHapticUi);
             }
 
             // Dark Athena EVA Solar Array Wing Jettison Explosive Bolt Shear (ADR 0179)
@@ -8333,8 +8434,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
-                vrState.leftHapticPulse = 0.98f;  // Explosive bolt severance shockwave (280 Hz)
-                vrState.rightHapticPulse = 0.98f;
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Explosive bolt severance shockwave (280 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher);
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Purge Steam Lance (ADR 0180)
@@ -8352,8 +8453,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Steam manifold purge blast (240 Hz)
-                vrState.leftHapticPulse = 0.70f;  // Foregrip steam vibration (110 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Steam manifold purge blast (240 Hz)
+                HapticRequest(0, (0.70f), kHapticReload);  // Foregrip steam vibration (110 Hz)
             }
 
             // Dark Athena EVA Solar Collector Truss Articulation Lock Wedge Mallet Strike (ADR 0183)
@@ -8369,8 +8470,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.98f; // Wedge percussion impact shockwave (270 Hz)
-                vrState.leftHapticPulse = 0.65f;  // Truss resonant chime (110 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Wedge percussion impact shockwave (270 Hz)
+                HapticRequest(0, (0.65f), kHapticUi);  // Truss resonant chime (110 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator Secondary Air Preheater Bypass Flap (ADR 0184)
@@ -8387,8 +8488,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_SPACE);
-                vrState.leftHapticPulse = 0.95f;  // Bypass seat detent thud (250 Hz)
-                vrState.rightHapticPulse = 0.95f;
+                HapticRequest(0, (0.95f), kHapticUi);  // Bypass seat detent thud (250 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher);
             }
 
             // Dark Athena EVA Solar Collector Articulation Hinge Wedge Removal Slide-Hammer (ADR 0187)
@@ -8404,8 +8505,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
-                vrState.leftHapticPulse = 0.98f;  // Inertial collision thud (290 Hz)
-                vrState.rightHapticPulse = 0.98f;
+                HapticRequest(0, (0.98f), kHapticFinisher);  // Inertial collision thud (290 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher);
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Soot Blower Lance Oscillation (ADR 0188)
@@ -8420,8 +8521,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastSootBlowerTime = now;
                 s_sootBlowerStrokeCount++;
                 VR_LOG_INFO("Environmental Gesture: HYDROPONICS SOOT BLOWER LANCE STROKE #%d (Rz: %.2f, Lz: %.2f)", s_sootBlowerStrokeCount, rVel.z, lVel.z);
-                vrState.rightHapticPulse = 0.55f; // Tube scraping rasp (220 Hz)
-                vrState.leftHapticPulse = 0.40f;
+                HapticRequest(1, (0.55f), kHapticLadder); // Tube scraping rasp (220 Hz)
+                HapticRequest(0, (0.40f), kHapticUi);
                 if (s_sootBlowerStrokeCount >= 3 && !meleeFiredThisFrame) { // GH #31
                     s_sootBlowerStrokeCount = 0;
                     VR_LOG_INFO("Environmental Gesture: ECONOMIZER TUBE BANK CLEARED VIA HIGH-PRESSURE STEAM SOOT BLOW");
@@ -8430,8 +8531,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     SendKeyTap('Q');
                     mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                     mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                    vrState.rightHapticPulse = 0.95f; // Steam jet acoustic blast (120 Hz)
-                    vrState.leftHapticPulse = 0.75f;
+                    HapticRequest(1, (0.95f), kHapticFinisher); // Steam jet acoustic blast (120 Hz)
+                    HapticRequest(0, (0.75f), kHapticReload);
                 }
             }
 
@@ -8448,8 +8549,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.85f; // Cryogenic vapor venting surge (90 Hz)
-                vrState.leftHapticPulse = 0.45f;
+                HapticRequest(1, (0.85f), kHapticReload); // Cryogenic vapor venting surge (90 Hz)
+                HapticRequest(0, (0.45f), kHapticUi);
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Slag Tap Hole Oxygen Lance Burn (ADR 0192)
@@ -8464,8 +8565,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 if (s_slagBurnStartTime == 0) s_slagBurnStartTime = now;
                 DWORD burnTime = now - s_slagBurnStartTime;
                 float burnRamp = (burnTime < 400) ? (burnTime / 400.0f) : 1.0f;
-                vrState.rightHapticPulse = 0.50f + 0.45f * burnRamp; // Sizzle to breakout rumble (260 -> 70 Hz)
-                vrState.leftHapticPulse = 0.35f + 0.40f * burnRamp;
+                HapticRequest(1, (0.50f + 0.45f * burnRamp), kHapticUi); // Sizzle to breakout rumble (260 -> 70 Hz)
+                HapticRequest(0, (0.35f + 0.40f * burnRamp), kHapticUi);
                 if (burnTime >= 400 && !meleeFiredThisFrame && (now - s_lastSlagBurnTime > 2500)) { // GH #31
                     s_lastSlagBurnTime = now;
                     s_slagBurnStartTime = 0;
@@ -8475,8 +8576,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                     SendKeyTap(VK_SPACE);
                     SendKeyTap(VK_RETURN);
-                    vrState.rightHapticPulse = 0.98f; // Molten slag breakout rumble (70 Hz)
-                    vrState.leftHapticPulse = 0.90f;
+                    HapticRequest(1, (0.98f), kHapticFinisher); // Molten slag breakout rumble (70 Hz)
+                    HapticRequest(0, (0.90f), kHapticFinisher);
                 }
             } else {
                 s_slagBurnStartTime = 0;
@@ -8495,8 +8596,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.98f; // Alloy pin punch shockwave (260 Hz)
-                vrState.leftHapticPulse = 0.65f;  // Mechanical lug alignment detent pop (140 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Alloy pin punch shockwave (260 Hz)
+                HapticRequest(0, (0.65f), kHapticUi);  // Mechanical lug alignment detent pop (140 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Primary Air Swirl Vane Lever (ADR 0196)
@@ -8513,8 +8614,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.90f; // Detent notch engagement click (240 Hz)
-                vrState.leftHapticPulse = 0.65f;  // Quadrant ratchet friction (150 Hz)
+                HapticRequest(1, (0.90f), kHapticUi); // Detent notch engagement click (240 Hz)
+                HapticRequest(0, (0.65f), kHapticLadder);  // Quadrant ratchet friction (150 Hz)
             }
 
             // Dark Athena EVA Solar Collector Truss Articulation Lock Ring Pinch Pin Insertion (ADR 0199)
@@ -8530,8 +8631,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.98f; // Spring-loaded detent lock click (290 Hz)
-                vrState.leftHapticPulse = 0.65f;  // Guide sleeve friction (190 Hz)
+                HapticRequest(1, (0.98f), kHapticUi); // Spring-loaded detent lock click (290 Hz)
+                HapticRequest(0, (0.65f), kHapticLadder);  // Guide sleeve friction (190 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Electrostatic Precipitator Rapping Rod Impact (ADR 0200)
@@ -8548,8 +8649,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap('Q');
                 SendKeyTap(VK_TAB);
-                vrState.rightHapticPulse = 0.98f; // Rapping anvil impact shockwave (270 Hz)
-                vrState.leftHapticPulse = 0.70f;  // Precipitator plate vibration rumble (85 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Rapping anvil impact shockwave (270 Hz)
+                HapticRequest(0, (0.70f), kHapticReload);  // Precipitator plate vibration rumble (85 Hz)
             }
 
             // Dark Athena EVA Solar Collector Photovoltaic Array Tension Guy-Wire Rigging Turnbuckle Locking Nut Strike (ADR 0203)
@@ -8565,8 +8666,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('W');
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
-                vrState.rightHapticPulse = 0.98f; // Locking nut impact detent snap (260 Hz)
-                vrState.leftHapticPulse = 0.60f;  // High-tension wire resonance chime (140 Hz)
+                HapticRequest(1, (0.98f), kHapticUi); // Locking nut impact detent snap (260 Hz)
+                HapticRequest(0, (0.60f), kHapticUi);  // High-tension wire resonance chime (140 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Ash Quenching Trough Agitator Rake Sweep (ADR 0204)
@@ -8583,8 +8684,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Clinker fracture crunch (280 Hz)
-                vrState.leftHapticPulse = 0.65f;  // Gritty slurry grating friction (180 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Clinker fracture crunch (280 Hz)
+                HapticRequest(0, (0.65f), kHapticLadder);  // Gritty slurry grating friction (180 Hz)
             }
 
             // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Grease Nipple Cap Removal (ADR 0207)
@@ -8600,8 +8701,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
                 SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.90f; // Thread unseating detent click (270 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Thread friction drag (170 Hz)
+                HapticRequest(1, (0.90f), kHapticUi); // Thread unseating detent click (270 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Thread friction drag (170 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Combustion Air Damper Linkage Cotter Pin Extraction (ADR 0208)
@@ -8617,8 +8718,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.98f; // Cotter pin release snap (290 Hz)
-                vrState.leftHapticPulse = 0.65f;  // Corroded clevis drag (210 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Cotter pin release snap (290 Hz)
+                HapticRequest(0, (0.65f), kHapticLadder);  // Corroded clevis drag (210 Hz)
             }
 
             // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Retaining Ring Circlip Pliers Pinch (ADR 0211)
@@ -8635,8 +8736,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.98f; // Circlip snap detent (300 Hz)
-                vrState.leftHapticPulse = 0.65f;  // Pliers spring compression tension (200 Hz)
+                HapticRequest(1, (0.98f), kHapticUi); // Circlip snap detent (300 Hz)
+                HapticRequest(0, (0.65f), kHapticLadder);  // Pliers spring compression tension (200 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Secondary Air Damper Handwheel Spin (ADR 0212)
@@ -8649,7 +8750,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastSecondaryDamperTime = now;
                 s_secondaryDamperRevs++;
                 VR_LOG_INFO("Environmental Gesture: HYDROPONICS SECONDARY AIR DAMPER WHEEL CRANK #%d (Speed: %.2f)", s_secondaryDamperRevs, secondaryDamperSpeed);
-                vrState.rightHapticPulse = 0.55f; // Spindle rotation friction (140 Hz)
+                HapticRequest(1, (0.55f), kHapticLadder); // Spindle rotation friction (140 Hz)
                 if (s_secondaryDamperRevs >= 3) {
                     s_secondaryDamperRevs = 0;
                     VR_LOG_INFO("Environmental Gesture: SECONDARY AIR DRAFT VANES OPENED");
@@ -8657,7 +8758,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     SendKeyTap('Q');
                     SendKeyTap(VK_SPACE);
                     SendKeyTap(VK_TAB);
-                    vrState.rightHapticPulse = 0.95f; // Mechanical end-stop thud (220 Hz)
+                    HapticRequest(1, (0.95f), kHapticFinisher); // Mechanical end-stop thud (220 Hz)
                 }
             }
 
@@ -8674,8 +8775,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
                 SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.95f; // Mechanical gap detent seating click (280 Hz)
-                vrState.leftHapticPulse = 0.65f;  // Shim sliding friction (190 Hz)
+                HapticRequest(1, (0.95f), kHapticUi); // Mechanical gap detent seating click (280 Hz)
+                HapticRequest(0, (0.65f), kHapticLadder);  // Shim sliding friction (190 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Flue Gas Thermocouple Well Threaded Plug Tightening (ADR 0216)
@@ -8691,8 +8792,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.98f; // Metallic torque stop thud (270 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Copper crush washer deformation (160 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Metallic torque stop thud (270 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Copper crush washer deformation (160 Hz)
             }
 
             // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Axial Retaining Cap Screw Driver Torque (ADR 0219)
@@ -8709,8 +8810,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Mechanical torque stop thud (290 Hz)
-                vrState.leftHapticPulse = 0.60f;  // Helical thread tightening friction (170 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Mechanical torque stop thud (290 Hz)
+                HapticRequest(0, (0.60f), kHapticLadder);  // Helical thread tightening friction (170 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Bearing Housing Oil Level Sight-Glass Inspection & Vent (ADR 0220)
@@ -8726,8 +8827,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.85f; // Pneumatic vent surge (95 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Knurled brass thread friction (150 Hz)
+                HapticRequest(1, (0.85f), kHapticReload); // Pneumatic vent surge (95 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Knurled brass thread friction (150 Hz)
             }
 
             // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Axial Play Vernier Caliper Micrometer Verification (ADR 0223)
@@ -8744,8 +8845,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
                 SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.90f; // Optical tolerance confirmation chime (310 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Vernier slide micro-clicks (210 Hz)
+                HapticRequest(1, (0.90f), kHapticUi); // Optical tolerance confirmation chime (310 Hz)
+                HapticRequest(0, (0.50f), kHapticUi);  // Vernier slide micro-clicks (210 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Primary Air Plenum Cleanout Manhole Cover Dog Clamp (ADR 0224)
@@ -8762,8 +8863,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Forged dog-clamp seating thuds (270 Hz)
-                vrState.leftHapticPulse = 0.95f;  // Cast-iron clamp hinge swing (130 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Forged dog-clamp seating thuds (270 Hz)
+                HapticRequest(0, (0.95f), kHapticFinisher);  // Cast-iron clamp hinge swing (130 Hz)
             }
 
             // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Thermal Blanket Velcro Sealing Flap (ADR 0227)
@@ -8780,8 +8881,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
                 SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.90f; // Magnetic border snap click (260 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Velcro seam friction (180 Hz)
+                HapticRequest(1, (0.90f), kHapticUi); // Magnetic border snap click (260 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Velcro seam friction (180 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Primary Air Plenum Ash Hoist Bucket Winch Crank (ADR 0228)
@@ -8794,7 +8895,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastAshWinchTime = now;
                 s_ashWinchRevs++;
                 VR_LOG_INFO("Environmental Gesture: HYDROPONICS ASH HOIST WINCH CRANK #%d (Speed: %.2f)", s_ashWinchRevs, ashWinchSpeed);
-                vrState.rightHapticPulse = 0.55f; // Cable drum winding rumble (140 Hz)
+                HapticRequest(1, (0.55f), kHapticLadder); // Cable drum winding rumble (140 Hz)
                 if (s_ashWinchRevs >= 3) {
                     s_ashWinchRevs = 0;
                     VR_LOG_INFO("Environmental Gesture: ASH HOIST BUCKET ELEVATED TO HEARTH FLOOR");
@@ -8802,7 +8903,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     SendKeyTap('Q');
                     SendKeyTap(VK_SPACE);
                     SendKeyTap(VK_TAB);
-                    vrState.rightHapticPulse = 0.95f; // Hoist dog ratchet thud (220 Hz)
+                    HapticRequest(1, (0.95f), kHapticFinisher); // Hoist dog ratchet thud (220 Hz)
                 }
             }
 
@@ -8820,8 +8921,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.92f; // Eccentric adjuster detent click (280 Hz)
-                vrState.leftHapticPulse = 0.60f;  // Gearbox casing resonance (140 Hz)
+                HapticRequest(1, (0.92f), kHapticUi); // Eccentric adjuster detent click (280 Hz)
+                HapticRequest(0, (0.60f), kHapticLadder);  // Gearbox casing resonance (140 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Primary Air Plenum Slag Agitator Scraping Bar (ADR 0232)
@@ -8836,8 +8937,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastSlagScraperTime = now;
                 s_slagScraperStrokes++;
                 VR_LOG_INFO("Environmental Gesture: INCINERATOR SLAG SCRAPER STROKE #%d (Rz: %.2f, Lz: %.2f)", s_slagScraperStrokes, rVel.z, lVel.z);
-                vrState.rightHapticPulse = 0.65f; // Scraper grating drag friction (200 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Shaft resonance (150 Hz)
+                HapticRequest(1, (0.65f), kHapticAmbient); // Scraper grating drag friction (200 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Shaft resonance (150 Hz)
                 if (s_slagScraperStrokes >= 3) {
                     s_slagScraperStrokes = 0;
                     VR_LOG_INFO("Environmental Gesture: PRIMARY AIR TUYERES CLEARED OF REFRACTORY SLAG");
@@ -8845,8 +8946,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     SendKeyTap('Q');
                     SendKeyTap(VK_TAB);
                     SendKeyTap(VK_SPACE);
-                    vrState.rightHapticPulse = 0.95f; // Refractory clinker dislodged impact (300 Hz)
-                    vrState.leftHapticPulse = 0.85f;  // Shaft vibration impact (160 Hz)
+                    HapticRequest(1, (0.95f), kHapticFinisher); // Refractory clinker dislodged impact (300 Hz)
+                    HapticRequest(0, (0.85f), kHapticReload);  // Shaft vibration impact (160 Hz)
                 }
             }
 
@@ -8865,8 +8966,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Knurled brass clamping screw torque stop (290 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Caliper rail contact friction (150 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Knurled brass clamping screw torque stop (290 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Caliper rail contact friction (150 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Weight Clip Insertion (ADR 0236)
@@ -8883,8 +8984,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Spring-steel tang snap (280 Hz)
-                vrState.leftHapticPulse = 0.60f;  // Blade runner resonance (130 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Spring-steel tang snap (280 Hz)
+                HapticRequest(0, (0.60f), kHapticLadder);  // Blade runner resonance (130 Hz)
             }
 
             // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Axial Play Vernier Caliper Dial Gauge Zero Calibration Thumbscrew (ADR 0239)
@@ -8902,8 +9003,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
                 SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.50f; // Knurled brass zero-detent ratchet (240 Hz)
-                vrState.leftHapticPulse = 0.90f;  // Optical zero datum confirmation tone (320 Hz)
+                HapticRequest(1, (0.50f), kHapticUi); // Knurled brass zero-detent ratchet (240 Hz)
+                HapticRequest(0, (0.90f), kHapticFinisher);  // Optical zero datum confirmation tone (320 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Lock Tang Crimping Plier Squeeze (ADR 0240)
@@ -8920,8 +9021,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.98f; // Plier mechanical bottom-out snap (310 Hz)
-                vrState.leftHapticPulse = 0.65f;  // Blade deformation resistance (170 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Plier mechanical bottom-out snap (310 Hz)
+                HapticRequest(0, (0.65f), kHapticLadder);  // Blade deformation resistance (170 Hz)
             }
 
             // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Axial Play Vernier Caliper Dial Gauge Retaining Dog Set Screw (ADR 0243)
@@ -8938,8 +9039,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Hardened dog screw torque stop (290 Hz)
-                vrState.leftHapticPulse = 0.60f;  // Hinge lug friction (160 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Hardened dog screw torque stop (290 Hz)
+                HapticRequest(0, (0.60f), kHapticLadder);  // Hinge lug friction (160 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Phase Angle Stroboscope Synchronization (ADR 0244)
@@ -8957,8 +9058,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.55f; // Optical flash sync micro-clicks (190 Hz)
-                vrState.leftHapticPulse = 0.90f;  // Stationary rotor strobe lock tone (310 Hz)
+                HapticRequest(1, (0.55f), kHapticUi); // Optical flash sync micro-clicks (190 Hz)
+                HapticRequest(0, (0.90f), kHapticFinisher);  // Stationary rotor strobe lock tone (310 Hz)
             }
 
             // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Axial Play Vernier Caliper Dial Gauge Retaining Dog Set Screw Driver Detent Release (ADR 0247)
@@ -8975,8 +9076,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
                 SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.65f; // Set screw thread unseating rasp (260 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Fixture clamp release pop (180 Hz)
+                HapticRequest(1, (0.65f), kHapticLadder); // Set screw thread unseating rasp (260 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Fixture clamp release pop (180 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Phase Angle Stroboscope Target Reflective Tape Burnish (ADR 0248)
@@ -8993,8 +9094,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Roller burnish seating snap (280 Hz)
-                vrState.leftHapticPulse = 0.60f;  // Shaft cylindrical friction (140 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Roller burnish seating snap (280 Hz)
+                HapticRequest(0, (0.60f), kHapticLadder);  // Shaft cylindrical friction (140 Hz)
             }
 
             // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Axial Play Vernier Caliper Fixture Removal & Stowage (ADR 0251)
@@ -9011,8 +9112,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Magnetic anvil quick-release clack (290 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Hinge lug clearance (150 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Magnetic anvil quick-release clack (290 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Hinge lug clearance (150 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Phase Angle Optical Tachometer Sensor Alignment (ADR 0252)
@@ -9029,8 +9130,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.55f; // Optical receiver micro-clicks (190 Hz)
-                vrState.leftHapticPulse = 0.95f;  // Optical alignment lock chime (320 Hz)
+                HapticRequest(1, (0.55f), kHapticUi); // Optical receiver micro-clicks (190 Hz)
+                HapticRequest(0, (0.95f), kHapticUi);  // Optical alignment lock chime (320 Hz)
             }
 
             // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Axial Play Vernier Caliper Storage Pouch Magnetic Flap Seal (ADR 0255)
@@ -9047,8 +9148,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Neodymium magnetic clasp snap (270 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Kevlar fabric tension (130 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Neodymium magnetic clasp snap (270 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Kevlar fabric tension (130 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Cable Strain Relief Clamp Screw (ADR 0256)
@@ -9065,8 +9166,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Saddle clamp torque stop (280 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Shielded cable compression (140 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Saddle clamp torque stop (280 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Shielded cable compression (140 Hz)
             }
 
             // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Axial Play Vernier Caliper Storage Pouch Retention D-Ring Carabiner Clip (ADR 0259)
@@ -9083,8 +9184,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
                 SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.98f; // Spring-steel carabiner gate snap (290 Hz)
-                vrState.leftHapticPulse = 0.60f;  // Titanium D-ring tension (140 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Spring-steel carabiner gate snap (290 Hz)
+                HapticRequest(0, (0.60f), kHapticLadder);  // Titanium D-ring tension (140 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Cable Shield Grounding Lug Screw (ADR 0260)
@@ -9101,8 +9202,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.98f; // Grounding screw torque stop (290 Hz)
-                vrState.leftHapticPulse = 0.60f;  // Braided copper wire compression (150 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Grounding screw torque stop (290 Hz)
+                HapticRequest(0, (0.60f), kHapticLadder);  // Braided copper wire compression (150 Hz)
             }
 
             // Dark Athena EVA Solar Collector Photovoltaic Cell Busbar Laser Weld Inspection Pyrometer (ADR 0263)
@@ -9119,8 +9220,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Laser pyrometer pulse chime (310 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Busbar thermal contact buzz (160 Hz)
+                HapticRequest(1, (0.95f), kHapticUi); // Laser pyrometer pulse chime (310 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Busbar thermal contact buzz (160 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Signal Amplifier Potentiometer (ADR 0264)
@@ -9137,8 +9238,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.55f; // Potentiometer detent wiper micro-clicks (200 Hz)
-                vrState.leftHapticPulse = 0.95f;  // Signal gain lock chime (330 Hz)
+                HapticRequest(1, (0.55f), kHapticUi); // Potentiometer detent wiper micro-clicks (200 Hz)
+                HapticRequest(0, (0.95f), kHapticUi);  // Signal gain lock chime (330 Hz)
             }
 
             // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode Heat Sink Clamp Spring (ADR 0267)
@@ -9155,8 +9256,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
                 SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.95f; // Tempered spring-steel snap (280 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Heat sink pad compression (140 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Tempered spring-steel snap (280 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Heat sink pad compression (140 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Signal Cable Magnetic Shield Wrap (ADR 0268)
@@ -9173,8 +9274,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Metallic shielding wrap click (260 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Silicone cable strain (150 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Metallic shielding wrap click (260 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Silicone cable strain (150 Hz)
             }
 
             // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode Ceramic Insulator Wafer Insertion (ADR 0271)
@@ -9191,8 +9292,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Ceramic wafer detent seating snap (290 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Mounting plate guide tension (150 Hz)
+                HapticRequest(1, (0.95f), kHapticUi); // Ceramic wafer detent seating snap (290 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Mounting plate guide tension (150 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Signal Cable Silicone Strain Relief Boot (ADR 0272)
@@ -9209,8 +9310,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Elastomeric boot detent snap (270 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Gland adapter friction (140 Hz)
+                HapticRequest(1, (0.95f), kHapticUi); // Elastomeric boot detent snap (270 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Gland adapter friction (140 Hz)
             }
 
             // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode Ceramic Insulator Wafer Lock Tab Plier Crimp (ADR 0275)
@@ -9227,8 +9328,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
                 SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.95f; // Tab deformation crimp snap (300 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Bracket clamp tension (160 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Tab deformation crimp snap (300 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Bracket clamp tension (160 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Signal Cable Heat-Shrink Sleeve Heat Gun Pass (ADR 0276)
@@ -9245,8 +9346,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Hot-air blower buzz (250 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Curing sleeve contraction (150 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Hot-air blower buzz (250 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Curing sleeve contraction (150 Hz)
             }
 
             // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode Terminal Lead Screw Torquing (ADR 0279)
@@ -9263,8 +9364,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Screw torque stop click (290 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Copper lug tension (160 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Screw torque stop click (290 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Copper lug tension (160 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Signal Amplifier BNC Output Connector Twist-Lock (ADR 0280)
@@ -9281,8 +9382,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Bayonet detent snap (280 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Bulkhead receptacle resistance (150 Hz)
+                HapticRequest(1, (0.95f), kHapticUi); // Bayonet detent snap (280 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Bulkhead receptacle resistance (150 Hz)
             }
 
             // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode Terminal Protective Silicone Boot Slide (ADR 0283)
@@ -9299,8 +9400,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
                 SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.95f; // Elastomeric boot detent snap (280 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Bracket guide tension (140 Hz)
+                HapticRequest(1, (0.95f), kHapticUi); // Elastomeric boot detent snap (280 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Bracket guide tension (140 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Signal Amplifier BNC Cable P-Clamp Screw (ADR 0284)
@@ -9317,8 +9418,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // P-clamp torque stop click (290 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Cushioned saddle compression (150 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // P-clamp torque stop click (290 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Cushioned saddle compression (150 Hz)
             }
 
             // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode Silicone Boot Retention Zip-Tie Tension & Flush Cut (ADR 0287)
@@ -9335,8 +9436,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Flush-cut blade snap (310 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Boot compression tension (160 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Flush-cut blade snap (310 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Boot compression tension (160 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Diagnostic Oscilloscope Probe Ground Clip Attachment (ADR 0288)
@@ -9353,8 +9454,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Alligator clip bite snap (280 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Ground stud contact (140 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Alligator clip bite snap (280 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Ground stud contact (140 Hz)
             }
 
             // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode Thermal Grease Syringe Bead Extrusion (ADR 0291)
@@ -9371,8 +9472,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Viscous paste extrusion drag (260 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Heatsink pocket stabilization (140 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Viscous paste extrusion drag (260 Hz)
+                HapticRequest(0, (0.50f), kHapticUi);  // Heatsink pocket stabilization (140 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Diagnostic Oscilloscope Frequency Dial Alignment (ADR 0292)
@@ -9389,8 +9490,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Rotary switch detent click (320 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Chassis fan rumble (120 Hz)
+                HapticRequest(1, (0.95f), kHapticUi); // Rotary switch detent click (320 Hz)
+                HapticRequest(0, (0.50f), kHapticUi);  // Chassis fan rumble (120 Hz)
             }
 
             // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode Ceramic Wafer Alignment Guide Pin Insertion (ADR 0295)
@@ -9407,8 +9508,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Polished guide pin sliding stop click (290 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Heatsink pocket grounding tension (150 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Polished guide pin sliding stop click (290 Hz)
+                HapticRequest(0, (0.50f), kHapticUi);  // Heatsink pocket grounding tension (150 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Diagnostic Oscilloscope Trigger Threshold Level Knob Twist (ADR 0296)
@@ -9425,8 +9526,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Trigger potentiometer micro-stepped clicks (310 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Fan induction motor harmonics (130 Hz)
+                HapticRequest(1, (0.95f), kHapticAmbient); // Trigger potentiometer micro-stepped clicks (310 Hz)
+                HapticRequest(0, (0.50f), kHapticUi);  // Fan induction motor harmonics (130 Hz)
             }
 
             // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode Ceramic Wafer Alignment Guide Pin Retraction & Latch Engagement (ADR 0299)
@@ -9443,8 +9544,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
                 SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.95f; // Spring latch snap (280 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Heatsink pocket resonance (140 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Spring latch snap (280 Hz)
+                HapticRequest(0, (0.50f), kHapticUi);  // Heatsink pocket resonance (140 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Diagnostic Oscilloscope Channel Input Coupling Toggle (ADR 0300)
@@ -9461,8 +9562,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // 3-position slide switch detent click (300 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Chassis grounding vibration (130 Hz)
+                HapticRequest(1, (0.95f), kHapticUi); // 3-position slide switch detent click (300 Hz)
+                HapticRequest(0, (0.50f), kHapticUi);  // Chassis grounding vibration (130 Hz)
             }
 
             // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode Ceramic Wafer Lock Tab Plier Final Clinch (ADR 0303)
@@ -9479,8 +9580,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Metal tab deformation crunch (310 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Bracket reaction force (160 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Metal tab deformation crunch (310 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Bracket reaction force (160 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Diagnostic Oscilloscope Volts/Div Vertical Sensitivity Rotary Switch Step (ADR 0304)
@@ -9497,8 +9598,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // 8-position detented rotary switch clicks (330 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Chassis frame vibration (130 Hz)
+                HapticRequest(1, (0.95f), kHapticUi); // 8-position detented rotary switch clicks (330 Hz)
+                HapticRequest(0, (0.50f), kHapticUi);  // Chassis frame vibration (130 Hz)
             }
 
             // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode Cathode Terminal Lug Lead Torque Wrench Tighten (ADR 0307)
@@ -9515,8 +9616,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Mechanical torque wrench break-over click (320 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Terminal post reaction tension (150 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Mechanical torque wrench break-over click (320 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Terminal post reaction tension (150 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Diagnostic Oscilloscope Timebase Variable Vernier Calibration Knob Twist (ADR 0308)
@@ -9533,8 +9634,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Continuous viscous potentiometer drag (300 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Chassis grounding hum (120 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Continuous viscous potentiometer drag (300 Hz)
+                HapticRequest(0, (0.50f), kHapticUi);  // Chassis grounding hum (120 Hz)
             }
 
             // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode Silicone Insulator Boot Final Slide & Hermetic Seal Clench (ADR 0311)
@@ -9551,8 +9652,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
                 SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.95f; // Elastomeric seal seating pop (290 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Heatsink bracket reaction (150 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Elastomeric seal seating pop (290 Hz)
+                HapticRequest(0, (0.50f), kHapticUi);  // Heatsink bracket reaction (150 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Diagnostic Oscilloscope Phase Marker Reticle Crosshair Alignment (ADR 0312)
@@ -9569,8 +9670,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Reticle alignment lock detent click (340 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Chassis resonance hum (130 Hz)
+                HapticRequest(1, (0.95f), kHapticUi); // Reticle alignment lock detent click (340 Hz)
+                HapticRequest(0, (0.50f), kHapticUi);  // Chassis resonance hum (130 Hz)
             }
 
             // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode Silicone Insulator Boot Nylon Cable Tie Tension & Flush Cutter Snip (ADR 0315)
@@ -9587,8 +9688,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Mechanical guillotine blade flush-cut snap (330 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Heatsink bracket reaction (140 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Mechanical guillotine blade flush-cut snap (330 Hz)
+                HapticRequest(0, (0.50f), kHapticUi);  // Heatsink bracket reaction (140 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Diagnostic Oscilloscope Vector Phase Angle Polar Display Graticule Lock (ADR 0316)
@@ -9605,8 +9706,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Rocker switch toggle detent snap (350 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Chassis grounding vibration (130 Hz)
+                HapticRequest(1, (0.95f), kHapticUi); // Rocker switch toggle detent snap (350 Hz)
+                HapticRequest(0, (0.50f), kHapticUi);  // Chassis grounding vibration (130 Hz)
             }
 
             // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode Circuit Continuity & Resistance Multimeter Probe Test (ADR 0319)
@@ -9623,8 +9724,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_TAB);
                 SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.95f; // Gold-plated probe tip contact snap (310 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Ground clip reaction (150 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Gold-plated probe tip contact snap (310 Hz)
+                HapticRequest(0, (0.50f), kHapticUi);  // Ground clip reaction (150 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Correction Trial Weight Clip Installation (ADR 0320)
@@ -9641,8 +9742,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Spring-steel balance clip seating thud (360 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Impeller acoustic resonance (140 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Spring-steel balance clip seating thud (360 Hz)
+                HapticRequest(0, (0.50f), kHapticUi);  // Impeller acoustic resonance (140 Hz)
             }
 
             // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode High-Current DC Bus Main Breaker Switch Interlock Clench (ADR 0323)
@@ -9660,8 +9761,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
                 SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.98f; // Magnetic blowout arc shockwave (380 Hz)
-                vrState.leftHapticPulse = 0.60f;  // Busbar hum (160 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Magnetic blowout arc shockwave (380 Hz)
+                HapticRequest(0, (0.60f), kHapticLadder);  // Busbar hum (160 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Correction Trial Weight Lock-Tang Staking Punch (ADR 0324)
@@ -9678,8 +9779,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.98f; // Center punch detent impact shockwave (380 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Impeller acoustic chime (150 Hz)
+                HapticRequest(1, (0.98f), kHapticUi); // Center punch detent impact shockwave (380 Hz)
+                HapticRequest(0, (0.55f), kHapticUi);  // Impeller acoustic chime (150 Hz)
             }
 
             // Dark Athena EVA Solar Collector Photovoltaic Array Primary Sun-Tracking Gimbal Pitch Actuator Manual Clasp Unlatch (ADR 0327)
@@ -9697,8 +9798,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_SPACE);
                 SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.95f; // Hardened steel lock clasp release snap (350 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Gimbal frame resonance (140 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Hardened steel lock clasp release snap (350 Hz)
+                HapticRequest(0, (0.50f), kHapticUi);  // Gimbal frame resonance (140 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Correction Residual Vibration Sensor Zero-Calibration Verification (ADR 0328)
@@ -9715,8 +9816,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // 10-turn precision potentiometer drag & detent click (360 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Chassis grounding vibration (130 Hz)
+                HapticRequest(1, (0.95f), kHapticUi); // 10-turn precision potentiometer drag & detent click (360 Hz)
+                HapticRequest(0, (0.50f), kHapticUi);  // Chassis grounding vibration (130 Hz)
             }
 
             // Dark Athena EVA Solar Collector Photovoltaic Array Primary Sun-Tracking Gimbal Yaw Actuator Manual Clasp Unlatch (ADR 0331)
@@ -9734,8 +9835,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_SPACE);
                 SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.95f; // Hardened titanium yaw clasp toggle snap (360 Hz)
-                vrState.leftHapticPulse = 0.52f;  // Gimbal yoke low-frequency resonance (145 Hz)
+                HapticRequest(1, (0.95f), kHapticUi); // Hardened titanium yaw clasp toggle snap (360 Hz)
+                HapticRequest(0, (0.52f), kHapticUi);  // Gimbal yoke low-frequency resonance (145 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Motor Starter Circuit Breaker Interlock Close (ADR 0332)
@@ -9753,8 +9854,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.98f; // 480V copper bus contact closure snap (370 Hz)
-                vrState.leftHapticPulse = 0.58f;  // Electromagnetic inductive hum rumble (135 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // 480V copper bus contact closure snap (370 Hz)
+                HapticRequest(0, (0.58f), kHapticLadder);  // Electromagnetic inductive hum rumble (135 Hz)
             }
 
             // Dark Athena EVA Solar Collector Photovoltaic Array Primary Sun-Tracking Gimbal Harmonic Drive Manual Hand-Crank Slew Calibration (ADR 0335)
@@ -9773,8 +9874,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
                 SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.92f; // Harmonic drive flexspline gear mesh friction (330 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Structural gearbox casing resonance (150 Hz)
+                HapticRequest(1, (0.92f), kHapticFinisher); // Harmonic drive flexspline gear mesh friction (330 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Structural gearbox casing resonance (150 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Variable Frequency Drive Speed Control Potentiometer Dial Adjustment (ADR 0336)
@@ -9793,8 +9894,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap(VK_RETURN);
                 SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.95f; // Precision 10-turn potentiometer drag (360 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Inverter IGBT switching hum (140 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Precision 10-turn potentiometer drag (360 Hz)
+                HapticRequest(0, (0.55f), kHapticUi);  // Inverter IGBT switching hum (140 Hz)
             }
 
             // Dark Athena EVA Solar Collector Photovoltaic Array Primary Sun-Tracking Gimbal Optical Sun-Sensor Quadrant Photodiode Collimator Alignment (ADR 0339)
@@ -9812,8 +9913,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_TAB);
                 SendKeyTap('Q');
                 SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Optical collimator barrel lock detent snap (370 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Outboard spar structural resonance (160 Hz)
+                HapticRequest(1, (0.95f), kHapticUi); // Optical collimator barrel lock detent snap (370 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Outboard spar structural resonance (160 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Variable Frequency Drive Acceleration Ramp Parameter Keypad Entry (ADR 0340)
@@ -9831,8 +9932,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
                 SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Membrane switch tactile snap (380 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Chassis enclosure resonance (130 Hz)
+                HapticRequest(1, (0.95f), kHapticUi); // Membrane switch tactile snap (380 Hz)
+                HapticRequest(0, (0.50f), kHapticUi);  // Chassis enclosure resonance (130 Hz)
             }
 
             // Dark Athena EVA Solar Collector Photovoltaic Array Primary Sun-Tracking Gimbal Closed-Loop Optical Tracking Servo Controller Enable Switch Toggle (ADR 0343)
@@ -9850,8 +9951,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
                 SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.98f; // Spring-loaded toggle switch detent snap (380 Hz)
-                vrState.leftHapticPulse = 0.60f;  // Servo drive inverter coil whine (170 Hz)
+                HapticRequest(1, (0.98f), kHapticUi); // Spring-loaded toggle switch detent snap (380 Hz)
+                HapticRequest(0, (0.60f), kHapticLadder);  // Servo drive inverter coil whine (170 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Variable Frequency Drive Motor Run Forward Pushbutton Latch (ADR 0344)
@@ -9870,8 +9971,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_RETURN);
                 SendKeyTap('Q');
                 SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.98f; // Industrial pushbutton spring contact snap (390 Hz)
-                vrState.leftHapticPulse = 0.60f;  // Motor run contactor magnetic pull (150 Hz)
+                HapticRequest(1, (0.98f), kHapticFinisher); // Industrial pushbutton spring contact snap (390 Hz)
+                HapticRequest(0, (0.60f), kHapticLadder);  // Motor run contactor magnetic pull (150 Hz)
             }
 
             // Dark Athena EVA Solar Collector Photovoltaic Array Primary Sun-Tracking Gimbal Azimuth Limit Switch Cam Dog Engagement (ADR 0347)
@@ -9889,8 +9990,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
                 SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.95f; // Alloy cam dog detent snap (400 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Limit switch bracket resonance (160 Hz)
+                HapticRequest(1, (0.95f), kHapticUi); // Alloy cam dog detent snap (400 Hz)
+                HapticRequest(0, (0.55f), kHapticUi);  // Limit switch bracket resonance (160 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Motor Run Pilot Indicator Strobe Lamp Visual Verification (ADR 0348)
@@ -9908,8 +10009,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
                 SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Strobe lens push-to-test micro-switch click (400 Hz)
-                vrState.leftHapticPulse = 0.55f;  // VFD enclosure acoustic vibration (145 Hz)
+                HapticRequest(1, (0.95f), kHapticUi); // Strobe lens push-to-test micro-switch click (400 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // VFD enclosure acoustic vibration (145 Hz)
             }
 
             // Dark Athena EVA Solar Collector Photovoltaic Array Primary Sun-Tracking Gimbal Elevation/Pitch Limit Switch Cam Dog Engagement (ADR 0351)
@@ -9927,8 +10028,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_TAB);
                 SendKeyTap(VK_RETURN);
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Alloy cam dog detent snap (410 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Limit switch housing resonance (165 Hz)
+                HapticRequest(1, (0.95f), kHapticUi); // Alloy cam dog detent snap (410 Hz)
+                HapticRequest(0, (0.55f), kHapticUi);  // Limit switch housing resonance (165 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Motor Starter Auxiliary Contact Block Mechanical Latch Verification (ADR 0352)
@@ -9947,8 +10048,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_RETURN);
                 SendKeyTap(VK_RETURN);
                 SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Mechanical auxiliary contact latch snap (410 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Starter enclosure resonance (150 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Mechanical auxiliary contact latch snap (410 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Starter enclosure resonance (150 Hz)
             }
 
             // Dark Athena EVA Solar Collector Photovoltaic Array Primary Sun-Tracking Gimbal Elevation/Pitch Quadrant Worm Gear Backlash Vernier Squeeze (ADR 0355)
@@ -9967,8 +10068,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_RETURN);
                 SendKeyTap(VK_SPACE);
                 SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.95f; // Eccentric backlash detent click (410 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Quadrant gear mesh resonance (160 Hz)
+                HapticRequest(1, (0.95f), kHapticUi); // Eccentric backlash detent click (410 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Quadrant gear mesh resonance (160 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Motor Starter Thermal Overload Relay Manual Reset Plunger Trip (ADR 0356)
@@ -9987,8 +10088,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_RETURN);
                 SendKeyTap(VK_SPACE);
                 SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.95f; // Bimetallic overload snap (410 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Starter frame acoustic vibration (150 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Bimetallic overload snap (410 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Starter frame acoustic vibration (150 Hz)
             }
 
             // Dark Athena EVA Solar Collector Photovoltaic Array Primary Sun-Tracking Gimbal Pitch Quadrant Drive Pinion Tooth Grease Port Needle Lubrication (ADR 0359)
@@ -10008,8 +10109,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap('Q');
                 SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Grease port needle seating click (420 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Quadrant gear casing acoustic vibration (165 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Grease port needle seating click (420 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Quadrant gear casing acoustic vibration (165 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Motor Starter Phase Reversal Protective Relay Latch Reset (ADR 0360)
@@ -10029,8 +10130,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap('Q');
                 SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Solid-state protective relay latch snap (420 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Starter enclosure acoustic resonance (155 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Solid-state protective relay latch snap (420 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Starter enclosure acoustic resonance (155 Hz)
             }
 
             // Dark Athena EVA Solar Collector Photovoltaic Array Primary Sun-Tracking Gimbal Pitch Quadrant Drive Pinion Bearing Retainer Castle Nut Cotter Pin Insertion & Tine Spread (ADR 0363)
@@ -10050,8 +10151,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap('Q');
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Cotter pin tine spread snap (425 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Bearing retainer housing resonance (170 Hz)
+                HapticRequest(1, (0.95f), kHapticFinisher); // Cotter pin tine spread snap (425 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Bearing retainer housing resonance (170 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Motor Starter Phase Loss Sensor Test Button Actuation (ADR 0364)
@@ -10071,8 +10172,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 SendKeyTap('Q');
                 SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Micro-switch tactile snap (425 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Starter frame acoustic resonance (160 Hz)
+                HapticRequest(1, (0.95f), kHapticUi); // Micro-switch tactile snap (425 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Starter frame acoustic resonance (160 Hz)
             }
 
             // Dark Athena EVA Solar Collector Photovoltaic Array Primary Sun-Tracking Gimbal Pitch Quadrant Drive Pinion Bearing Oil Seal Press Ring Snap Ring Seating (ADR 0367)
@@ -10093,8 +10194,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 SendKeyTap(VK_RETURN);
                 SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Circlip detent expansion snap (430 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Bearing cover acoustic vibration (175 Hz)
+                HapticRequest(1, (0.95f), kHapticUi); // Circlip detent expansion snap (430 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Bearing cover acoustic vibration (175 Hz)
             }
 
             // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Motor Starter Phase Unbalance Relay Trip Sensitivity Trimmer Potentiometer Adjustment (ADR 0368)
@@ -10115,8 +10216,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 SendKeyTap(VK_RETURN);
                 SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Trimmer wiper micro-click (430 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Starter chassis acoustic resonance (165 Hz)
+                HapticRequest(1, (0.95f), kHapticUi); // Trimmer wiper micro-click (430 Hz)
+                HapticRequest(0, (0.55f), kHapticLadder);  // Starter chassis acoustic resonance (165 Hz)
             }
 #endif
         }
@@ -10139,7 +10240,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             s_eyeshineActive = !s_eyeshineActive;
             VR_LOG_INFO("Tactical Gesture: EYESHINE %s (Right Temple Tap)", s_eyeshineActive ? "ACTIVATED" : "DEACTIVATED");
             SendGestureTap('Q', "tactical/eyeshine"); // Track C #15
-            vrState.rightHapticPulse = 0.85f; // High-resonance optical buzz
+            HapticRequest(1, (0.85f), kHapticReload); // High-resonance optical buzz
         }
 
         // Left Hand -> Tactical Shoulder Flashlight (ADR 0380: 3D Anatomical Bounding Box)
@@ -10152,7 +10253,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             s_flashlightActive = !s_flashlightActive;
             VR_LOG_INFO("Tactical Gesture: SHOULDER FLASHLIGHT %s (Left Shoulder Tap)", s_flashlightActive ? "ACTIVATED" : "DEACTIVATED");
             SendGestureTap('F', "tactical/flashlight"); // Track C #15
-            vrState.leftHapticPulse = 0.75f; // Mechanical click pulse
+            HapticRequest(0, (0.75f), kHapticReload); // Mechanical click pulse
         }
 
         // Tactical Radio Transceiver Intercept / Eavesdropping (ADR 0071)
@@ -10169,8 +10270,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastRadioInterceptTime = now;
                 VR_LOG_INFO("Tactical Intercept: GUARD RADIO TRANSCEIVER EAVESDROPPING ENGAGED");
                 SendGestureTap(VK_TAB, "tactical/radio-intercept"); // Track C #15
-                if (rightAtEar) vrState.rightHapticPulse = 0.40f; // Squelch burst (220 Hz)
-                if (leftAtEar) vrState.leftHapticPulse = 0.40f;
+                if (rightAtEar) HapticRequest(1, (0.40f), kHapticUi); // Squelch burst (220 Hz)
+                if (leftAtEar) HapticRequest(0, (0.40f), kHapticUi);
             }
         } else {
             s_radioHoldStartTime = 0;
@@ -10187,8 +10288,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             s_eyeshineActive = !s_eyeshineActive; // GH #35: visor toggles the single source
             VR_LOG_INFO("Orbital EVA Gesture: POLARIZED SOLAR RADIATION VISOR PULLED DOWN");
             SendGestureTap('Q', "tactical/visor"); // Track C #15
-            if (rightAtBrow) vrState.rightHapticPulse = 0.65f; // Solid mechanical visor latch click (150 Hz)
-            if (leftAtBrow) vrState.leftHapticPulse = 0.65f;
+            if (rightAtBrow) HapticRequest(1, (0.65f), kHapticLadder); // Solid mechanical visor latch click (150 Hz)
+            if (leftAtBrow) HapticRequest(0, (0.65f), kHapticLadder);
         }
     }
 
@@ -10220,28 +10321,28 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             switch (s_activeWeaponSlot) {
                 case 3: // Melee / Shivs / Ulaks
                     s_recoilKickPitch = 0.005f;
-                    vrState.rightHapticPulse = 0.45f;
+                    HapticRequest(1, (0.45f), kHapticUi);
                     break;
                 case 2: // Sidearm / Pistol / Tranq Gun
                     s_recoilKickPitch = s_twoHandedStabilizationActive ? 0.012f : 0.024f;
-                    vrState.rightHapticPulse = s_twoHandedStabilizationActive ? 0.50f : 0.62f;
-                    if (s_twoHandedStabilizationActive) vrState.leftHapticPulse = 0.35f;
+                    HapticRequest(1, (s_twoHandedStabilizationActive ? 0.50f : 0.62f), kHapticLadder);
+                    if (s_twoHandedStabilizationActive) HapticRequest(0, (0.35f), kHapticUi);
                     break;
                 case 1: // Primary Shotgun / Combat Long-Arm
                     s_recoilKickPitch = s_twoHandedStabilizationActive ? 0.028f : 0.055f;
-                    vrState.rightHapticPulse = s_twoHandedStabilizationActive ? 0.80f : 0.95f;
-                    if (s_twoHandedStabilizationActive) vrState.leftHapticPulse = 0.65f;
+                    HapticRequest(1, (s_twoHandedStabilizationActive ? 0.80f : 0.95f), kHapticFinisher);
+                    if (s_twoHandedStabilizationActive) HapticRequest(0, (0.65f), kHapticLadder);
                     break;
                 case 4: // Tactical Assault Rifle / Ordnance
                     s_recoilKickPitch = s_twoHandedStabilizationActive ? 0.015f : 0.028f;
-                    vrState.rightHapticPulse = s_twoHandedStabilizationActive ? 0.60f : 0.72f;
-                    if (s_twoHandedStabilizationActive) vrState.leftHapticPulse = 0.45f;
+                    HapticRequest(1, (s_twoHandedStabilizationActive ? 0.60f : 0.72f), kHapticReload);
+                    if (s_twoHandedStabilizationActive) HapticRequest(0, (0.45f), kHapticUi);
                     break;
                 case 5: // Heavy Weapon / SCAR Gun / Rotary Chaingun
                 default:
                     s_recoilKickPitch = s_twoHandedStabilizationActive ? 0.025f : 0.065f;
-                    vrState.rightHapticPulse = s_twoHandedStabilizationActive ? 0.85f : 0.98f;
-                    if (s_twoHandedStabilizationActive) vrState.leftHapticPulse = 0.75f;
+                    HapticRequest(1, (s_twoHandedStabilizationActive ? 0.85f : 0.98f), kHapticFinisher);
+                    if (s_twoHandedStabilizationActive) HapticRequest(0, (0.75f), kHapticReload);
                     break;
             }
         }
@@ -10257,9 +10358,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             // Automatic fire / Rotary chaingun cycling every 90ms
             if (now - s_lastCyclicFireHaptic > 90) {
                 s_lastCyclicFireHaptic = now;
-                vrState.rightHapticPulse = 0.68f;
+                HapticRequest(1, (0.68f), kHapticLadder);
                 if (s_twoHandedStabilizationActive) {
-                    vrState.leftHapticPulse = 0.42f; // Foregrip cyclic transmission
+                    HapticRequest(0, (0.42f), kHapticAmbient); // Foregrip cyclic transmission
                 }
             }
         }
@@ -10273,8 +10374,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (isDualHandBracedChaingun && (s_triggerHoldStartTime != 0) && (now - s_triggerHoldStartTime > 300)) {
         if (now - s_lastRecoilCompTime > 90) {
             s_lastRecoilCompTime = now;
-            vrState.rightHapticPulse = 0.65f; // Mechanical bolt cycling (160 Hz)
-            vrState.leftHapticPulse = 0.70f;  // Heavy hydraulic chassis counter-torque (110 Hz)
+            HapticRequest(1, (0.65f), kHapticLadder); // Mechanical bolt cycling (160 Hz)
+            HapticRequest(0, (0.70f), kHapticReload);  // Heavy hydraulic chassis counter-torque (110 Hz)
             s_recoilKickPitch *= 0.35f;       // Active kinematic muzzle climb clamp
         }
     }
@@ -10290,14 +10391,14 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         }
         DWORD chargeElapsed = now - s_tranqChargeStartTime;
         float chargeRatio = (chargeElapsed < 800) ? (chargeElapsed / 800.0f) : 1.0f;
-        vrState.rightHapticPulse = 0.20f + 0.50f * chargeRatio; // Escalating electrostatic capacitor hum (80 -> 260 Hz)
+        HapticRequest(1, (0.20f + 0.50f * chargeRatio), kHapticUi); // Escalating electrostatic capacitor hum (80 -> 260 Hz)
     } else {
         if (s_isChargingTranq) {
             s_isChargingTranq = false;
             DWORD chargeTotal = now - s_tranqChargeStartTime;
             if (chargeTotal > 450) {
                 VR_LOG_INFO("Tactical Weapon: TRANQ GUN PEAK CHARGE DART DISCHARGED (Charge: %ums)", chargeTotal);
-                vrState.rightHapticPulse = 0.85f; // Electric discharge snap (280 Hz)
+                HapticRequest(1, (0.85f), kHapticReload); // Electric discharge snap (280 Hz)
             }
         }
     }
@@ -10313,11 +10414,11 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_currentBlockEngaged = true;
                 if (s_physicalBlockEngaged) {
                     VR_LOG_INFO("Combat State: BOXER GUARD / BLOCK MODE engaged (Physical Gesture)");
-                    vrState.leftHapticPulse = 0.35f;
-                    vrState.rightHapticPulse = 0.35f;
+                    HapticRequest(0, (0.35f), kHapticUi);
+                    HapticRequest(1, (0.35f), kHapticUi);
                 } else {
                     VR_LOG_INFO("Combat State: AIM / BLOCK engaged (Left Trigger)");
-                    vrState.leftHapticPulse = 0.3f;
+                    HapticRequest(0, (0.3f), kHapticUi);
                 }
             }
         } else {
@@ -10340,13 +10441,13 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     lSpeed, lVel.x, lVel.y, lVel.z);
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                vrState.leftHapticPulse = 0.60f; // Tactile release impulse
+                HapticRequest(0, (0.60f), kHapticLadder); // Tactile release impulse
             } else {
                 SendKey('E', false); // Gentle drop at feet
             }
         } else {
             SendKey('E', true);
-            vrState.leftHapticPulse = 0.35f; // Object grab latch
+            HapticRequest(0, (0.35f), kHapticUi); // Object grab latch
         }
         s_leftGripDown = wantLeftGrip;
     }
@@ -10356,7 +10457,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     bool cuppedLeftHand = (vrState.leftController.grip > 0.40f && vrState.leftController.grip < 0.85f);
     if (cuppedLeftHand && lSpeed > 0.70f && !s_physicalBlockEngaged && (now - s_lastDiceRattleTime > 120)) {
         s_lastDiceRattleTime = now;
-        vrState.leftHapticPulse = 0.30f; // Rapid bone-on-bone dice rattle micro-tap (160 Hz)
+        HapticRequest(0, (0.30f), kHapticUi); // Rapid bone-on-bone dice rattle micro-tap (160 Hz)
     }
 
     // Interactive Inmate Gambling Card Flipping & Dealing (ADR 0075)
@@ -10371,12 +10472,12 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         VR_LOG_INFO("Diegetic Interaction: INMATE GAMBLING CARD FLIPPED / DEALT (Vx: %.2f, Vz: %.2f)", rVel.x, rVel.z);
         SendKeyTap('E');
         SendKeyTap(VK_RETURN);
-        vrState.rightHapticPulse = 0.35f; // Crisp paper card friction micro-haptic (240 Hz)
+        HapticRequest(1, (0.35f), kHapticUi); // Crisp paper card friction micro-haptic (240 Hz)
     }
 
     // Inmate Pit Brawl Dirt / Ash Throw Blind (ADR 0065)
     static DWORD s_lastAshThrowTime = 0;
-    bool ashThrowFlick = (s_isPhysicallyCrouched || s_isDeepProne) &&
+    bool ashThrowFlick = (s_posture.isPhysicallyCrouched || s_posture.isDeepProne) &&
                          (vrState.rightController.grip < 0.40f && vrState.rightController.trigger < 0.40f) &&
                          (rVel.y > 0.80f && rVel.z < -0.80f);
     if (ashThrowFlick && !meleeFiredThisFrame && (now - s_lastAshThrowTime > 1200)) { // GH #31
@@ -10385,12 +10486,12 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         SendKeyTap('E');
         mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
         mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-        vrState.rightHapticPulse = 0.50f; // Fine particulate scatter burst (180 Hz)
+        HapticRequest(1, (0.50f), kHapticUi); // Fine particulate scatter burst (180 Hz)
     }
 
     // Inmate Pit Brawl Sand / Ash Throw Two-Handed Fan Scatter (ADR 0085)
     static DWORD s_lastFanScatterTime = 0;
-    bool bothHandsLowSand = (s_isPhysicallyCrouched || s_isDeepProne) &&
+    bool bothHandsLowSand = (s_posture.isPhysicallyCrouched || s_posture.isDeepProne) &&
                             (leftLocal.y < -0.40f && rightLocal.y < -0.40f) &&
                             (vrState.leftController.grip < 0.45f && vrState.rightController.grip < 0.45f);
     bool fanScatterOutward = (lVel.x < -0.80f && rVel.x > 0.80f) && (lVel.y > 0.40f || rVel.y > 0.40f);
@@ -10400,8 +10501,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         SendKeyTap('E');
         mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
         mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-        vrState.leftHapticPulse = 0.65f; // Dual wide-arc particulate scatter pulses (180 Hz)
-        vrState.rightHapticPulse = 0.65f;
+        HapticRequest(0, (0.65f), kHapticLadder); // Dual wide-arc particulate scatter pulses (180 Hz)
+        HapticRequest(1, (0.65f), kHapticLadder);
     }
 
     // Inmate Pit Brawl Dirt / Ash Two-Handed Fan Clench & Burst (ADR 0104)
@@ -10423,8 +10524,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         if (!s_handsWereClenchedChest) {
             s_handsWereClenchedChest = true;
             s_fanClenchStartTime = now;
-            vrState.leftHapticPulse = 0.45f;  // Friction grind during clench (200 Hz)
-            vrState.rightHapticPulse = 0.45f;
+            HapticRequest(0, (0.45f), kHapticUi);  // Friction grind during clench (200 Hz)
+            HapticRequest(1, (0.45f), kHapticUi);
         }
     } else if (s_handsWereClenchedChest) {
         // Evaluate burst if fists were clenched together recently
@@ -10437,8 +10538,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                 SendKeyTap(VK_TAB);
-                vrState.leftHapticPulse = 0.70f;  // Wide particulate cloud rush (175 Hz)
-                vrState.rightHapticPulse = 0.70f;
+                HapticRequest(0, (0.70f), kHapticReload);  // Wide particulate cloud rush (175 Hz)
+                HapticRequest(1, (0.70f), kHapticReload);
             }
         }
         if (!bothFanGripsClenched || distHandsFan > 0.35f) {
@@ -10461,18 +10562,18 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         VR_LOG_INFO("Combat Defense: CORNEAL BLINK / DIRT WIPED FROM EYES (%s)",
             rapidHeadShake ? "Rapid Head Shake" : "Forearm Eye Wipe");
         SendKeyTap(VK_SPACE); // Visual overlay recovery accelerator
-        vrState.rightHapticPulse = 0.30f; // Fine corneal blink micro-haptic (180 Hz)
-        vrState.leftHapticPulse = 0.30f;
+        HapticRequest(1, (0.30f), kHapticUi); // Fine corneal blink micro-haptic (180 Hz)
+        HapticRequest(0, (0.30f), kHapticUi);
     }
 
     // Kinematic Body / Heavy Object Drag Resistance (ADR 0020):
     // When crouched and hauling an object/corpse backwards or sideways, emit periodic drag friction pulses
     static DWORD s_lastDragPulseTime = 0;
-    if (s_leftGripDown && (s_isPhysicallyCrouched || s_isStealthPeeking)) {
+    if (s_leftGripDown && (s_posture.isPhysicallyCrouched || s_posture.isStealthPeeking)) {
         float moveMagnitude = fabsf(vrState.leftController.thumbstickX) + fabsf(vrState.leftController.thumbstickY);
         if (moveMagnitude > 0.25f && (now - s_lastDragPulseTime > 450)) {
             s_lastDragPulseTime = now;
-            vrState.leftHapticPulse = 0.38f; // Low-frequency drag friction rumble (85 Hz)
+            HapticRequest(0, (0.38f), kHapticAmbient); // Low-frequency drag friction rumble (85 Hz)
         }
     }
 
@@ -10484,7 +10585,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         s_inspectingItem = wantInspect;
         if (s_inspectingItem) {
             VR_LOG_INFO("Diegetic Interaction: COLLECTIBLE INSPECTION / CIGARETTE PACK (Eye Level: %.2fm)", leftLocal.y);
-            vrState.leftHapticPulse = 0.25f; // Tactile inspection buzz (180 Hz)
+            HapticRequest(0, (0.25f), kHapticUi); // Tactile inspection buzz (180 Hz)
         }
     }
 
@@ -10500,14 +10601,14 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             s_isThroatGripping = true;
             VR_LOG_INFO("Diegetic Interaction: NPC THROAT / COLLAR GRIP engaged (Pos: [%.2f, %.2f, %.2f])",
                 leftLocal.x, leftLocal.y, leftLocal.z);
-            vrState.leftHapticPulse = 0.45f; // Throaty struggle pulse (120 Hz)
+            HapticRequest(0, (0.45f), kHapticUi); // Throaty struggle pulse (120 Hz)
         }
         // Physical Forward/Back Shake: |lVel.z| > 0.70 m/s
         if (fabsf(lVel.z) > 0.70f && (now - s_lastShakedownPulseTime > 350)) {
             s_lastShakedownPulseTime = now;
             VR_LOG_INFO("Diegetic Interaction: PHYSICAL SHAKEDOWN GESTURE executed (VelZ: %.2f m/s)", lVel.z);
             SendKeyTap('E'); // Advance extortion/interrogation dialogue
-            vrState.leftHapticPulse = 0.75f; // Compliance snap haptic (220 Hz)
+            HapticRequest(0, (0.75f), kHapticReload); // Compliance snap haptic (220 Hz)
         }
     } else {
         if (s_isThroatGripping) {
@@ -10520,7 +10621,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // Sneaking in crouch/prone with left arm wrapped across chest level (Z in [-0.35, -0.15]m, Y in [-0.20, +0.10]m) with Left Grip
     static bool s_isChokeholding = false;
     static DWORD s_lastChokeStruggleTime = 0;
-    bool inChokeholdZone = (s_isPhysicallyCrouched || s_isStealthPeeking || s_isDeepProne) &&
+    bool inChokeholdZone = (s_posture.isPhysicallyCrouched || s_posture.isStealthPeeking || s_posture.isDeepProne) &&
                            s_leftGripDown && (leftLocal.z > -0.35f && leftLocal.z < -0.15f) &&
                            (leftLocal.y > -0.20f && leftLocal.y < 0.10f) &&
                            (fabsf(leftLocal.x) < 0.25f);
@@ -10528,11 +10629,11 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         if (!s_isChokeholding) {
             s_isChokeholding = true;
             VR_LOG_INFO("Stealth Takedown: REAR CHOKEHOLD GRAPPLE engaged");
-            vrState.leftHapticPulse = 0.45f; // Rhythmic struggle pulse (100 Hz)
+            HapticRequest(0, (0.45f), kHapticUi); // Rhythmic struggle pulse (100 Hz)
         }
         if (now - s_lastChokeStruggleTime > 300) {
             s_lastChokeStruggleTime = now;
-            vrState.leftHapticPulse = 0.40f;
+            HapticRequest(0, (0.40f), kHapticUi);
         }
         // Cervical Twist Finisher: rapid lateral jerk of right hand (|rVel.x| > 0.80 m/s)
         if ((fabsf(rVel.x) > 0.80f || fabsf(rVel.y) > 0.80f) && !meleeFiredThisFrame) { // GH #31: melee has priority
@@ -10540,8 +10641,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             VR_LOG_INFO("Stealth Takedown: SILENT CERVICAL NECK SNAP FINISHER executed (Vx: %.2f m/s)", rVel.x);
             mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
             mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-            vrState.rightHapticPulse = 0.95f; // Bone-cracking crunch (280 Hz)
-            vrState.leftHapticPulse = 0.95f;
+            HapticRequest(1, (0.95f), kHapticFinisher); // Bone-cracking crunch (280 Hz)
+            HapticRequest(0, (0.95f), kHapticFinisher);
         }
     } else {
         if (s_isChokeholding) {
@@ -10552,20 +10653,20 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
     // Inmate Bunk Mattress Stash Search (ADR 0050)
     static DWORD s_lastBunkSearchTime = 0;
-    bool leftHoldingMattress = (s_isPhysicallyCrouched || s_isDeepProne) &&
+    bool leftHoldingMattress = (s_posture.isPhysicallyCrouched || s_posture.isDeepProne) &&
                                s_leftGripDown && (leftLocal.y > -0.55f && leftLocal.y < -0.25f);
     bool rightSweepingUnder = (rightLocal.z < -0.30f) && (fabsf(rVel.x) > 0.35f);
     if (leftHoldingMattress && rightSweepingUnder && (now - s_lastBunkSearchTime > 900)) {
         s_lastBunkSearchTime = now;
         VR_LOG_INFO("Environmental Gesture: INMATE BUNK MATTRESS STASH SEARCH (SweepVx: %.2f m/s)", rVel.x);
         SendKeyTap('E');
-        vrState.rightHapticPulse = 0.60f; // Metallic discovery chime haptic (200 Hz)
-        vrState.leftHapticPulse = 0.30f;
+        HapticRequest(1, (0.60f), kHapticUi); // Metallic discovery chime haptic (200 Hz)
+        HapticRequest(0, (0.30f), kHapticUi);
     }
 
     // Inmate Bunk Shiv Sheath Concealment Under Mattress Frame (ADR 0110)
     static DWORD s_lastBunkConcealTime = 0;
-    bool leftLiftingMattress = (s_isPhysicallyCrouched || s_isDeepProne) &&
+    bool leftLiftingMattress = (s_posture.isPhysicallyCrouched || s_posture.isDeepProne) &&
                                s_leftGripDown && (leftLocal.y > -0.45f && leftLocal.y < -0.15f);
     bool rightThrustingIntoSlat = (rightLocal.z > -0.42f && rightLocal.z < -0.14f) && (rVel.z < -0.65f);
     if (leftLiftingMattress && rightThrustingIntoSlat && (now - s_lastBunkConcealTime > 1500)) {
@@ -10573,8 +10674,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         VR_LOG_INFO("Environmental Gesture: INMATE BUNK SHIV SHEATH CONCEALED UNDER MATTRESS FRAME (Vz: %.2f m/s)", rVel.z);
         SendKeyTap('3'); // Holster / stow shiv weapon
         SendKeyTap('E');
-        vrState.leftHapticPulse = 0.35f;  // Mattress wire tension hum (120 Hz)
-        vrState.rightHapticPulse = 0.60f; // Spring-steel sheath latch click (240 Hz)
+        HapticRequest(0, (0.35f), kHapticUi);  // Mattress wire tension hum (120 Hz)
+        HapticRequest(1, (0.60f), kHapticLadder); // Spring-steel sheath latch click (240 Hz)
     }
 
     // Right Grip -> Weapon Reload ('R') (suppressed during ladder climb)
@@ -10582,7 +10683,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (wantRightGrip != s_rightGripDown) {
         SendKey('R', wantRightGrip);
         s_rightGripDown = wantRightGrip;
-        if (wantRightGrip) vrState.rightHapticPulse = 0.5f;
+        if (wantRightGrip) HapticRequest(1, (0.5f), kHapticUi);
     }
 
     // 10. Face Buttons Mapping (ADR 0410: Unified Action & Dialogue Confirmation)
@@ -10597,26 +10698,26 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (btnA != prevBtnA) {
         SendKey('E', btnA);
         SendKey(VK_RETURN, btnA);
-        if (btnA) vrState.rightHapticPulse = 0.35f;
+        if (btnA) HapticRequest(1, (0.35f), kHapticUi);
     }
 
     // BUTTON B -> Jump (Space) & Crouch-Jump Mantle Clearance (ADR 0025)
     if (btnB != prevBtnB) {
-        if (btnB && s_isPhysicallyCrouched) {
+        if (btnB && s_posture.isPhysicallyCrouched) {
             VR_LOG_INFO("Movement Stance: PHYSICAL CROUCH-JUMP / MANTLE CLEARANCE executed");
             SendKey('C', true);
             SendKey(VK_SPACE, true);
-            vrState.rightHapticPulse = 0.45f;
+            HapticRequest(1, (0.45f), kHapticUi);
         } else {
             SendKey(VK_SPACE, btnB);
         }
-        if (btnB && !s_isPhysicallyCrouched) vrState.rightHapticPulse = 0.30f;
+        if (btnB && !s_posture.isPhysicallyCrouched) HapticRequest(1, (0.30f), kHapticAmbient);
     }
 
     // BUTTON X -> Crouch Toggle ('C')
     if (btnX && !prevBtnX) {
         SendKeyTap('C');
-        vrState.leftHapticPulse = 0.30f;
+        HapticRequest(0, (0.30f), kHapticUi);
     }
 
     // Dual Thumbstick Click -> Emergency Ejection / Drone Neural Disconnect (ADR 0031)
@@ -10639,14 +10740,14 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             SendKeyTap(VK_ESCAPE);
             SendKeyTap('E');
             SendKeyTap(VK_SPACE);
-            vrState.leftHapticPulse = 0.95f; // Explosive canopy bolt decompression
-            vrState.rightHapticPulse = 0.95f;
+            HapticRequest(0, (0.95f), kHapticFinisher); // Explosive canopy bolt decompression
+            HapticRequest(1, (0.95f), kHapticFinisher);
         } else {
             VR_LOG_INFO("Cybernetic Uplink: EMERGENCY NEURAL EJECTION / DRONE DISCONNECT triggered (Dual-Stick Click)");
             SendKeyTap(VK_ESCAPE);
             SendKeyTap('E');
-            vrState.leftHapticPulse = 0.85f;  // Intense static burst (280 Hz)
-            vrState.rightHapticPulse = 0.85f;
+            HapticRequest(0, (0.85f), kHapticReload);  // Intense static burst (280 Hz)
+            HapticRequest(1, (0.85f), kHapticReload);
         }
     } else {
         // Left Thumbstick Click -> Sprint Toggle is handled in locomotion section.
@@ -10658,10 +10759,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             vrState.shouldRecenter = true;
             s_hasPrevHmdOrientation = false;
             if (vrState.hmdPose.isValid) {
-                s_standingEyeHeight = vrState.hmdPose.position.y + (g_vrConfig.seated ? g_vrConfig.seatedEyeOffset : 0.0f); // Track C #11 + GH #37 edge
-                VR_LOG_INFO("Right Stick Click: HMD recentered and standing eye height recalibrated to %.2fm", s_standingEyeHeight);
+                s_posture.standingEyeHeight = vrState.hmdPose.position.y + (g_vrConfig.seated ? g_vrConfig.seatedEyeOffset : 0.0f); // Track C #11 + GH #37 edge
+                VR_LOG_INFO("Right Stick Click: HMD recentered and standing eye height recalibrated to %.2fm", s_posture.standingEyeHeight);
             }
-            vrState.rightHapticPulse = 0.6f;
+            HapticRequest(1, (0.6f), kHapticLadder);
         }
     }
 
@@ -10669,9 +10770,18 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // GH #18/#20: the single Menu handler (edge-triggered, logs once).
     if (menuEdge) {
         SendKeyTap(VK_ESCAPE);
-        MergeHaptic(vrState.leftHapticPulse, 0.40f); // GH #32
+        HapticRequest(0, 0.40f, kHapticUi); // GH #32
         VR_LOG_INFO("Menu Button tapped (VK_ESCAPE)");
     }
+
+    // GH #32: single haptic publish point. Per side the highest-priority
+    // request wins (ties -> max amplitude); the winner max-merges over the
+    // decayed carry so a fresh pulse never loses to stale state, while an
+    // idle frame simply keeps the decayed value.
+    if (s_hapticArbiter.HasRequest(0) && s_hapticArbiter.Winner(0) > vrState.leftHapticPulse)
+        vrState.leftHapticPulse = s_hapticArbiter.Winner(0);
+    if (s_hapticArbiter.HasRequest(1) && s_hapticArbiter.Winner(1) > vrState.rightHapticPulse)
+        vrState.rightHapticPulse = s_hapticArbiter.Winner(1);
 
     s_prevButtons = btns;
 }
