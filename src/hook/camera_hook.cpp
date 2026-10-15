@@ -1251,7 +1251,53 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             bool outsideTripDrive = (rVel.z < -1.10f && rVel.y < -0.75f);
             bool isOutsideTripMount = outsideTripHook && outsideTripDrive;
 
-            if (isBatonJavelinThrust && (now - s_lastBatonJavelinTime > 1800)) {
+            // Inmate Pit Brawl Kimura Shoulder Lock & Arm Fracture (ADR 0181)
+            static DWORD s_lastKimuraTime = 0;
+            bool kimuraGrip = (handsDistSledge < 0.25f &&
+                               vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
+                               leftLocal.y > -0.20f && leftLocal.y < 0.20f && rightLocal.y > -0.20f && rightLocal.y < 0.20f);
+            bool kimuraCrank = (rVel.y > 1.05f && fabsf(rVel.x) > 0.85f);
+            bool isKimuraFracture = kimuraGrip && kimuraCrank;
+
+            // Security Guard Stun Baton Radial Kinetic Sweep & Electrical Stun Ring (ADR 0182)
+            static DWORD s_lastRadialSweepTime = 0;
+            bool batonRadialGrip = (handsDistSledge < 0.25f &&
+                                    vrState.rightController.grip > 0.60f && vrState.rightController.trigger > 0.65f &&
+                                    vrState.leftController.grip > 0.50f);
+            bool batonRadialSweep = (fabsf(rVel.x) > 1.35f && fabsf(lVel.x) > 1.10f &&
+                                     ((rVel.x > 0.0f && lVel.x > 0.0f) || (rVel.x < 0.0f && lVel.x < 0.0f)));
+            bool isBatonRadialSweep = batonRadialGrip && batonRadialSweep;
+
+            if (isBatonRadialSweep && (now - s_lastRadialSweepTime > 2000)) {
+                s_lastRadialSweepTime = now;
+                s_lastPunchTime = now;
+                char dirKey = (rVel.x > 0.0f) ? 'D' : 'A';
+                VR_LOG_INFO("Tactical Melee: STUN BATON RADIAL KINETIC SWEEP & STUN RING EXECUTED (Dir: %c, Rx: %.2f)", dirKey, rVel.x);
+                SendKey(dirKey, true);
+                SendKey(VK_SPACE, true);
+                SendKey('Q', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('Q', false);
+                SendKey(VK_SPACE, false);
+                SendKey(dirKey, false);
+                vrState.rightHapticPulse = 0.98f; // Radial discharge blast (310 Hz)
+                vrState.leftHapticPulse = 0.85f;  // Off-hand follow-through ionization (280 Hz)
+            } else if (isKimuraFracture && (now - s_lastKimuraTime > 2000)) {
+                s_lastKimuraTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL KIMURA SHOULDER LOCK & FRACTURE EXECUTED (Ry: %.2f, Rx: %.2f)", rVel.y, rVel.x);
+                SendKey('S', true);
+                SendKey('A', true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, false);
+                SendKey('A', false);
+                SendKey('S', false);
+                vrState.leftHapticPulse = 0.75f;  // Wrist bind resistance (190 Hz)
+                vrState.rightHapticPulse = 0.98f; // Humerus fracture crack (320 Hz)
+            } else if (isBatonJavelinThrust && (now - s_lastBatonJavelinTime > 1800)) {
                 s_lastBatonJavelinTime = now;
                 s_lastPunchTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON FORWARD TWO-HANDED JAVELIN THRUST EXECUTED (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
@@ -3541,6 +3587,42 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 vrState.rightHapticPulse = 0.90f; // Turbulent hydraulic drain surge rumble (90 Hz)
                 vrState.leftHapticPulse = 0.50f;
+            }
+
+            // Dark Athena EVA Solar Array Wing Jettison Explosive Bolt Shear (ADR 0179)
+            static DWORD s_lastWingJettisonTime = 0;
+            bool bothAtWingJettison = (twoHandDist < 0.25f &&
+                                       rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > 0.10f && rightLocal.y < 0.42f &&
+                                       vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f);
+            bool wingJettisonDownwardShear = (lVel.y < -0.85f && rVel.y < -0.85f);
+            if (bothAtWingJettison && wingJettisonDownwardShear && (now - s_lastWingJettisonTime > 2500)) {
+                s_lastWingJettisonTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA SOLAR WING JETTISON BOLTS DETONATED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap(VK_TAB);
+                SendKeyTap(VK_RETURN);
+                vrState.leftHapticPulse = 0.98f;  // Explosive bolt severance shockwave (280 Hz)
+                vrState.rightHapticPulse = 0.98f;
+            }
+
+            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Purge Steam Lance (ADR 0180)
+            static DWORD s_lastPurgeLanceTime = 0;
+            bool twoHandAtPurgeLance = (twoHandDist < 0.28f &&
+                                        rightLocal.z > -0.42f && rightLocal.z < -0.16f && rightLocal.y > -0.25f && rightLocal.y < 0.20f &&
+                                        vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f &&
+                                        vrState.rightController.trigger > 0.65f);
+            bool purgeLanceThrust = (rVel.z < -0.90f || lVel.z < -0.90f);
+            if (twoHandAtPurgeLance && purgeLanceThrust && (now - s_lastPurgeLanceTime > 1800)) {
+                s_lastPurgeLanceTime = now;
+                VR_LOG_INFO("Environmental Gesture: HYDROPONICS PURGE STEAM LANCE BLASTED (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
+                SendKeyTap('E');
+                SendKeyTap('Q');
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKeyTap(VK_SPACE);
+                vrState.rightHapticPulse = 0.95f; // Steam manifold purge blast (240 Hz)
+                vrState.leftHapticPulse = 0.70f;  // Foregrip steam vibration (110 Hz)
             }
         }
     }
