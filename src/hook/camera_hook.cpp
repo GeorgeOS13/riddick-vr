@@ -1672,6 +1672,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                                rVel.y < -1.55f && lVel.y < -1.30f &&
                                                fabsf(rVel.x - lVel.x) > 0.90f);
 
+            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Cervical Compression Ground Finish & Sternum Knee Drop (ADR 0261)
+            static DWORD s_lastSternumKneeDropTime = 0;
+            static char s_sternumKneeDropDirKey = 'A';
+            bool sternumKneeDropStance = (handsDistSledge < 0.26f &&
+                                          leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                          vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
+            bool sternumKneeDropThrow = (sternumKneeDropStance && rVel.y < -1.55f &&
+                                         lVel.y < -1.30f && fabsf(lVel.x) > 0.85f);
+            if (sternumKneeDropThrow && (now - s_lastSternumKneeDropTime > 2000)) {
+                s_sternumKneeDropDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+            }
+
+            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Pulse Discharge Wave (ADR 0262)
+            static DWORD s_lastKineticPulseWaveTime = 0;
+            bool kineticPulseWaveStance = (handsDistSledge < 0.28f &&
+                                           vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
+                                           vrState.rightController.trigger > 0.65f);
+            bool kineticPulseWavePlunge = (kineticPulseWaveStance && isJumpingStance &&
+                                           rVel.y < -1.60f && lVel.y < -1.35f &&
+                                           fabsf(rVel.x - lVel.x) > 0.95f);
+
             // Inmate Pit Brawl Outside Leg Hook Sweep & Ground Knee Drop (ADR 0209)
             static DWORD s_lastOutsideLegSweepTime = 0;
             static DWORD s_outsideLegSweepHookTime = 0;
@@ -1718,7 +1739,41 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_crossBlockHoldStart = 0;
             }
 
-            if (omnidirectionalPulsePlunge && (now - s_lastOmnidirectionalPulseTime > 2000)) {
+            if (kineticPulseWavePlunge && (now - s_lastKineticPulseWaveTime > 2000)) {
+                s_lastKineticPulseWaveTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL KINETIC PULSE WAVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
+                SendKey(VK_SPACE, true);
+                SendKey('W', true);
+                SendKey('Q', true);
+                SendKey(VK_TAB, true);
+                SendKey(VK_RETURN, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_TAB, false);
+                SendKey('Q', false);
+                SendKey('W', false);
+                SendKey(VK_SPACE, false);
+                vrState.rightHapticPulse = 0.98f; // Kinetic plasma detonation wave (360 Hz)
+                vrState.leftHapticPulse = 0.98f;  // Structural deck recoil (90 Hz)
+            } else if (sternumKneeDropThrow && (now - s_lastSternumKneeDropTime > 2000)) {
+                s_lastSternumKneeDropTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER STERNUM KNEE DROP EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_sternumKneeDropDirKey, rVel.y, lVel.y);
+                SendKey('W', true);
+                SendKey(s_sternumKneeDropDirKey, true);
+                SendKey('C', true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, false);
+                SendKey('C', false);
+                SendKey(s_sternumKneeDropDirKey, false);
+                SendKey('W', false);
+                vrState.rightHapticPulse = 0.98f; // Sternum bone fracture shockwave (360 Hz)
+                vrState.leftHapticPulse = 0.92f;  // Collar tie tension (240 Hz)
+            } else if (omnidirectionalPulsePlunge && (now - s_lastOmnidirectionalPulseTime > 2000)) {
                 s_lastOmnidirectionalPulseTime = now;
                 s_lastPunchTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL DECK ARC PULSE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
@@ -5385,6 +5440,42 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 vrState.rightHapticPulse = 0.95f; // Saddle clamp torque stop (280 Hz)
                 vrState.leftHapticPulse = 0.55f;  // Shielded cable compression (140 Hz)
+            }
+
+            // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Axial Play Vernier Caliper Storage Pouch Retention D-Ring Carabiner Clip (ADR 0259)
+            static DWORD s_lastPouchCarabinerTime = 0;
+            bool handAtPouchDRing = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > -0.45f && leftLocal.y < -0.10f &&
+                                     vrState.leftController.grip > 0.55f);
+            bool handOnCarabinerGate = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
+                                        vrState.rightController.trigger > 0.50f);
+            bool pouchCarabinerSnap = (rVel.z < -0.80f);
+            if (handAtPouchDRing && handOnCarabinerGate && pouchCarabinerSnap && (now - s_lastPouchCarabinerTime > 1800)) {
+                s_lastPouchCarabinerTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA TRUSS VERNIER POUCH CARABINER SNAPPED (Rz: %.2f)", rVel.z);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap(VK_TAB);
+                SendKeyTap('Q');
+                vrState.rightHapticPulse = 0.98f; // Spring-steel carabiner gate snap (290 Hz)
+                vrState.leftHapticPulse = 0.60f;  // Titanium D-ring tension (140 Hz)
+            }
+
+            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Cable Shield Grounding Lug Screw (ADR 0260)
+            static DWORD s_lastTachGroundScrewTime = 0;
+            bool handAtPedestalBoss = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
+                                       vrState.leftController.grip > 0.55f);
+            bool handOnGroundScrew = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
+                                      vrState.rightController.trigger < 0.40f);
+            bool tachGroundScrewTorque = (fabsf(rVel.x) > 0.65f);
+            if (handAtPedestalBoss && handOnGroundScrew && tachGroundScrewTorque && (now - s_lastTachGroundScrewTime > 1800)) {
+                s_lastTachGroundScrewTime = now;
+                VR_LOG_INFO("Environmental Gesture: DRAFT FAN TACHOMETER GROUND SCREW TORQUED (Rx: %.2f)", rVel.x);
+                SendKeyTap('E');
+                SendKeyTap('Q');
+                SendKeyTap(VK_TAB);
+                SendKeyTap(VK_RETURN);
+                vrState.rightHapticPulse = 0.98f; // Grounding screw torque stop (290 Hz)
+                vrState.leftHapticPulse = 0.60f;  // Braided copper wire compression (150 Hz)
             }
         }
     }
