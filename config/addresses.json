@@ -1,0 +1,45 @@
+{
+  "$schema": "riddick-vr-sigscan-table/1",
+  "game": "DarkAthena.exe",
+  "game_version_pin": "Steam build 1.1 (md5 pinned at validation time)",
+  "pointer_size": 4,
+  "note": "TRACK C #34 FIRST STEP ONLY: scaffold table + validator self-test. Keystroke emulation remains the active input path; NOTHING here is called by the hook yet.",
+  "entries": [
+    {
+      "id": "RndrGL.PresentHook",
+      "module": "RndrGL.dll",
+      "pattern": "REDACTED-example-00-11-22-??-44",
+      "offset": 0,
+      "kind": "render",
+      "status": "candidate-unverified",
+      "description": "SwapBuffers/GDI present interception point for the stereo blit."
+    },
+    {
+      "id": "Player.FireAction",
+      "module": "DarkAthena.exe",
+      "pattern": "REDACTED-example-8B-??-E8-??-??-??-??-85-C0",
+      "offset": 0,
+      "kind": "player-action",
+      "status": "candidate-unverified",
+      "description": "Primary-fire action dispatch candidate (REA workflow target #1)."
+    },
+    {
+      "id": "Player.ReloadAction",
+      "module": "DarkAthena.exe",
+      "pattern": "REDACTED-example-53-56-57-8B-??-E8",
+      "offset": 0,
+      "kind": "player-action",
+      "status": "candidate-unverified",
+      "description": "Reload action dispatch candidate (REA workflow target #2)."
+    },
+    {
+      "id": "Player.UseAction",
+      "module": "DarkAthena.exe",
+      "pattern": "REDACTED-example-55-8B-EC-83-EC-??-53",
+      "offset": 0,
+      "kind": "player-action",
+      "status": "candidate-unverified",
+      "description": "Use/interact action dispatch candidate (REA workflow target #3)."
+    }
+  ]
+}

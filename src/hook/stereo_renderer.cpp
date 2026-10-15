@@ -561,14 +561,19 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
             // the same backbuffer). Apply a small half-IPD horizontal shift per
             // eye as a convergence cue. This does NOT synthesize true parallax
             // (occlusion/disparity need an engine-level dual-view render).
-            // TODO: picks/crosshair at vrActive depth via CameraHook-projected
-            // dual frustum blits once the engine exposes per-eye viewports.
+            // Track C #9: comfort vignette adds a motion-scaled extra shift.
             // Desktop mirror is untouched: only eye-FBO source rects shift.
             GLint halfIpdPx = (std::max)(1, srcW / 240);
-            GLint leftSrcX0 = srcX - halfIpdPx;
-            GLint leftSrcX1 = srcX + srcW - halfIpdPx;
-            GLint rightSrcX0 = srcX + halfIpdPx;
-            GLint rightSrcX1 = srcX + srcW + halfIpdPx;
+            GLint comfortPx = 0;
+            if (m_sharedState.comfortVignette > 0.01f) {
+                int shiftPx = static_cast<int>(srcW * m_hudConvergenceOffset * m_sharedState.comfortVignette);
+                comfortPx = (shiftPx > 1) ? shiftPx : 1;
+            }
+            GLint leftSrcX0 = srcX - halfIpdPx - comfortPx;
+            GLint leftSrcX1 = srcX + srcW - halfIpdPx - comfortPx;
+            GLint rightSrcX0 = srcX + halfIpdPx + comfortPx;
+            GLint rightSrcX1 = srcX + srcW + halfIpdPx + comfortPx;
+
 
             // Read from default backbuffer 0
             OpenGLProxy::real_glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */, 0);

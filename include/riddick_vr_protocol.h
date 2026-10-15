@@ -7,7 +7,7 @@
 #define RIDDICK_VR_IPC_FRAME_CONSUMED_EVENT "Local\\RiddickVR_FrameConsumed"
 #define RIDDICK_VR_IPC_MUTEX_NAME "Local\\RiddickVR_Mutex"
 
-#define RIDDICK_VR_PROTOCOL_VERSION 1
+#define RIDDICK_VR_PROTOCOL_VERSION 2 // +comfortVignette field (Track C #9)
 // GH #28: version negotiation range. v1 layout is frozen; newer hosts must
 // still accept readers/writers advertising MIN..CURRENT. Bump CURRENT only
 // with a layout change, and keep MIN at the oldest layout the host can parse.
@@ -90,6 +90,7 @@ struct RiddickVRSharedState {
     bool eyeshineActive;     // Riddick Eyeshine night vision mode active (ADR 0022)
     bool flashlightActive;   // Tactical shoulder flashlight active
     uint16_t reservedFlags;  // 4-byte alignment padding
+    float comfortVignette;   // Track C #9: 0..1 motion comfort level (thumbstick move/turn)
     uint32_t clientFrameCount;
     uint32_t heartbeatTimestamp;
 };

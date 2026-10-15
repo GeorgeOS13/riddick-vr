@@ -1,6 +1,9 @@
 #include "camera_hook.h"
 #include "logging.h"
 #include "opengl_proxy.h"
+#include "vr_config.h"
+#include "gesture_tap.h"
+#include <algorithm>
 #include <cmath>
 
 namespace RiddickVR {
@@ -14,12 +17,29 @@ CameraHook& CameraHook::Instance() {
     return s_instance;
 }
 
+// Adaptive physical crouching, two-handed stabilization, and decoupled aim state (ADR 0004, 0005, 0008)
+static float s_standingEyeHeight = 0.0f;
+static bool s_twoHandedStabilizationActive = false;
+static bool s_physicalBlockEngaged = false;
+static DWORD s_lastReloadGestureTime = 0;
+static bool s_isAimingOrBlocking = false;
+static bool s_isPhysicalADS = false;
+static RiddickVRTrackedPose s_stabilizedAimPose{};
+static bool s_hasStabilizedPose = false;
+
+
 bool CameraHook::Initialize() {
     if (m_initialized) return true;
 
     m_moduleBase = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
     VR_LOG_INFO("Initializing CameraHook. Game module base: 0x%p", (void*)m_moduleBase);
     EnsureGameHwnd(); // GH #33: cache game HWND for the foreground guard
+
+    LoadVRConfig(); // Track C #10: riddick_vr.ini (snap/deadzone/comfort/seated/scale/southpaw/debounce)
+    if (g_vrConfig.standingEyeHeight > 0.2f) {
+        s_standingEyeHeight = g_vrConfig.standingEyeHeight;
+        VR_LOG_INFO("Standing eye height overridden from INI: %.2fm", s_standingEyeHeight);
+    }
 
     if (ScanForCameraSignature()) {
         VR_LOG_INFO("Camera structure identified in game memory!");
@@ -120,6 +140,9 @@ static void SendKeyTap(WORD vk) {
     Sleep(15);
     SendKey(vk, false);
 }
+// NOTE (merge A+B+C): SendKey/SendKeyTap stay guarded here (GH #33); gesture_tap.{h,cpp}
+// provides debounced SendGestureTap which routes through its own SendKey copy -
+// foreground guard is ported there post-merge (see gesture_tap.cpp).
 
 // VR-First 1:1 Physical Interaction Anchor State (ADR 0406)
 // Prevents engine action cutscene cameras (usethirdperson = 1 during NanoMED healing and ladders)
@@ -292,11 +315,14 @@ static RiddickVRVector3 WorldToHmdLocal(const RiddickVRVector3& worldPos, const 
             float ry = dy + qw * ty + (qz * tx - qx * tz);
             float rz = dz + qw * tz + (qx * ty - qy * tx);
 
-            return { rx, ry, rz };
+            // Track C #13: world scale multiplier on interaction volumes.
+            float ws = GetWorldScale();
+            return { rx * ws, ry * ws, rz * ws };
         }
     }
 
-    return { dx, dy, dz };
+    float wsFallback = GetWorldScale(); // Track C #13
+    return { dx * wsFallback, dy * wsFallback, dz * wsFallback };
 }
 
 // Adaptive physical crouching, two-handed stabilization, and decoupled aim state (ADR 0004, 0005, 0008)
@@ -311,6 +337,71 @@ static bool s_hasStabilizedPose = false;
 // GH #35: single eyeshine source of truth, toggled by all emitters (Button Y,
 // temple tap, EVA visor pull) and published once per frame at the end of Update.
 static bool s_eyeshineActive = false;
+// ---------------------------------------------------------------------------
+// Track C #17, FIRST STEP ONLY: begin decomposing CameraHook::Update.
+// Update currently owns ~478 function statics across sections 0-10. Full
+// split plan (follow-ups, one section per change, statics -> explicit state):
+//   0 Head-look/mouse emulation -> UpdateHeadLook (head_look.cpp)
+//   1 Crouch/height/lean        -> UpdatePosture (posture.cpp)
+//   2 Ladders/mantle            -> UpdateClimbing (climbing.cpp)
+//   2b NanoMED cartridge/palm   -> UpdateNanoMED (nanomed.cpp)
+//   3 Locomotion deadzone       -> UpdateLocomotion (locomotion.cpp)
+//   4 Snap/smooth turn (+4b)    -> UpdateLocomotionTurn (locomotion.cpp)
+//   5 Melee gestures            -> UpdateMelee (melee.cpp, per-weapon tables)
+//   6 Reload/holster/grenade    -> UpdateReloadGestures (reload.cpp)
+//   7 Eyeshine/flashlight       -> UpdateTacticalGear (tactical.cpp)
+//   8 Aim/block/fire            -> UpdateAimAndFire (aim.cpp)
+//   9 Grips/throw/drag          -> UpdateGrips (grips.cpp)
+//   10 Buttons/menus            -> UpdateButtons (buttons.cpp)
+// First step (this change, same file, no behavior change): three static
+// helpers with explicit state structs for locomotion intent, reload
+// detection, and NanoMED volumes. Call sites below delegate the pure
+// detection math; side effects (keys/haptics/logs) stay in Update.
+// ---------------------------------------------------------------------------
+struct LocomotionIntent { bool fwd = false; bool back = false; bool left = false; bool right = false; };
+
+static LocomotionIntent ComputeLocomotionIntent(float stickLX, float stickLY, float deadzone) {
+    LocomotionIntent out;
+    float moveMag = sqrtf(stickLX * stickLX + stickLY * stickLY);
+    if (moveMag >= deadzone) {
+        float dirX = stickLX / moveMag;
+        float dirY = stickLY / moveMag;
+        // Angular deadband around forward/backward axis (same thresholds as inline code).
+        constexpr float FORWARD_THRESHOLD = 0.35f;
+        constexpr float STRAFE_THRESHOLD = 0.42f;
+        if (dirY > FORWARD_THRESHOLD) out.fwd = true;
+        else if (dirY < -FORWARD_THRESHOLD) out.back = true;
+        if (dirX > STRAFE_THRESHOLD) out.right = true;
+        else if (dirX < -STRAFE_THRESHOLD) out.left = true;
+    }
+    return out;
+}
+
+struct ReloadGestureRequest { bool cellEject = false; bool magInsert = false; bool waistPouch = false; };
+
+static ReloadGestureRequest DetectReloadGesture(float handDist, float offGrip, float offVelY, float offLocalY, float offLocalX) {
+    ReloadGestureRequest out;
+    out.cellEject = (handDist < 0.18f && offGrip > 0.50f && offVelY < -0.70f);
+    out.magInsert = (handDist < 0.18f && offGrip > 0.50f && offVelY > 0.35f);
+    out.waistPouch = (offLocalY < -0.38f && offLocalX > -0.35f && offLocalX < -0.05f && offGrip > 0.50f);
+    return out;
+}
+
+struct NanoMedVolumes { bool inReceiver = false; bool leftContact = false; bool rightContact = false; };
+
+static NanoMedVolumes DetectNanoMEDContact(const RiddickVRVector3& domLocal,
+                                           const RiddickVRVector3& leftLocal, const RiddickVRVector3& rightLocal,
+                                           bool leftPalmFlat, bool rightPalmFlat) {
+    NanoMedVolumes out;
+    out.inReceiver = (domLocal.z >= -0.62f && domLocal.z <= -0.20f) &&
+                     (domLocal.y >= 0.05f && domLocal.y <= 0.42f) &&
+                     (fabsf(domLocal.x) < 0.30f);
+    out.leftContact = leftPalmFlat && (leftLocal.z >= -0.65f && leftLocal.z <= -0.22f) &&
+                      (leftLocal.y >= -0.25f && leftLocal.y <= 0.25f) && (fabsf(leftLocal.x) < 0.28f);
+    out.rightContact = rightPalmFlat && (rightLocal.z >= -0.65f && rightLocal.z <= -0.22f) &&
+                       (rightLocal.y >= -0.25f && rightLocal.y <= 0.25f) && (fabsf(rightLocal.x) < 0.28f);
+    return out;
+}
 
 void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (!m_initialized || !vrState.vrActive) return;
@@ -334,6 +425,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     }
 
     uint32_t btns = vrState.rightController.buttons | vrState.leftController.buttons;
+    // Track C #14 (southpaw): dominant/off-hand aliases resolved once in the
+    // input mapping section. Default (southpaw=0): dom=right, off=left.
+    const RiddickVRControllerInput& domCtrl = g_vrConfig.southpaw ? vrState.leftController : vrState.rightController;
+    const RiddickVRControllerInput& offCtrl = g_vrConfig.southpaw ? vrState.rightController : vrState.leftController;
     static uint32_t s_prevButtons = 0;
     static bool s_wasIn3D = false;
 
@@ -439,7 +534,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 // Decoupled Motion Controller Aim Steering:
                 // Extract relative orientation between HMD and weapon aim controller: Q_rel = Q_hmd^-1 * Q_ctrl
                 const auto& ctrlPose = (s_twoHandedStabilizationActive && s_hasStabilizedPose) ?
-                    s_stabilizedAimPose : (vrState.rightController.aimPose.isValid ? vrState.rightController.aimPose : vrState.rightController.gripPose);
+                    s_stabilizedAimPose : (domCtrl.aimPose.isValid ? domCtrl.aimPose : domCtrl.gripPose); // Track C #14
 
                 float deltaCtrlYaw = 0.0f;
                 float deltaCtrlPitch = 0.0f;
@@ -450,13 +545,14 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 bool isActivelyAiming = false;
 
                 bool isReloading = (now - s_lastReloadGestureTime <= 1100);
-                bool isAiming = s_isAimingOrBlocking || (vrState.leftController.trigger > 0.5f);
+                bool isAiming = s_isAimingOrBlocking || (offCtrl.trigger > 0.5f); // Track C #14
 
                 // ADR 0383: Physical 6DOF Aim-Down-Sights (ADS) Eye-Relief Alignment & Parallax Mitigation
                 static DWORD s_adsEnterStartTime = 0;
                 static bool s_adsHapticFired = false;
 
                 RiddickVRVector3 ctrlLocal = WorldToHmdLocal(ctrlPose.position, vrState.hmdPose);
+                if (g_vrConfig.southpaw) ctrlLocal.x = -ctrlLocal.x; // Track C #14: mirror into right-eye corridor frame
                 // Dominant eye sight line corridor:
                 // Y: [-0.18m, 0.08m] (chin to eye level)
                 // Z: [-0.36m, -0.10m] (10cm to 36cm eye relief)
@@ -636,9 +732,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     static bool s_isDeepProne = false;
     static bool s_flashlightActive = false;
 
-    // Reset calibration on recenter edge (GH #37, e.g. via IPC flag)
+    // Reset calibration on recenter edge (GH #37) + seated offset (Track C #11).
     if (recenterEdge && vrState.hmdPose.isValid) {
-        s_standingEyeHeight = vrState.hmdPose.position.y;
+        s_standingEyeHeight = vrState.hmdPose.position.y + (g_vrConfig.seated ? g_vrConfig.seatedEyeOffset : 0.0f); // Track C #11 + GH #37 edge
         VR_LOG_INFO("Standing eye height calibrated on recenter: %.2fm", s_standingEyeHeight);
     }
 
@@ -647,7 +743,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
         // Initial calibration
         if (s_standingEyeHeight <= 0.001f && currentY > 0.1f) {
-            s_standingEyeHeight = currentY;
+            s_standingEyeHeight = currentY + (g_vrConfig.seated ? g_vrConfig.seatedEyeOffset : 0.0f); // Track C #11
             VR_LOG_INFO("Initial standing eye height calibrated: %.2fm", s_standingEyeHeight);
         }
 
@@ -679,6 +775,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             constexpr float FALLBACK_RELEASE_THRESHOLD = -0.18f;
             wantCrouch = s_isPhysicallyCrouched ? (currentY < FALLBACK_RELEASE_THRESHOLD) : (currentY < FALLBACK_CROUCH_THRESHOLD);
         }
+        if (g_vrConfig.seated) wantCrouch = false; // Track C #11: no physical auto-crouch while seated
 
         if (wantCrouch != s_isPhysicallyCrouched) {
             s_isPhysicallyCrouched = wantCrouch;
@@ -697,6 +794,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         } else {
             wantProne = (currentY < -0.45f);
         }
+        if (g_vrConfig.seated) wantProne = false; // Track C #11: seated players never auto-prone
 
         if (wantProne != s_isDeepProne) {
             s_isDeepProne = wantProne;
@@ -895,10 +993,17 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     static DWORD s_lastCartridgeDrawTime = 0;
     static DWORD s_lastCartridgeInsertTime = 0;
     static bool s_nanoMedPalmActive = false;
+    // Track C #14: dominant-hand holster path resolves via southpaw.
+    const RiddickVRVector3& domHandLocal = g_vrConfig.southpaw ? leftLocal : rightLocal;
+    float domHandVelY = g_vrConfig.southpaw ? lVel.y : rVel.y;
+    // Track C #17: palm-flat state hoisted for DetectNanoMEDContact (pure move).
+    bool leftPalmFlat = (vrState.leftController.trigger < 0.20f && vrState.leftController.grip < 0.25f);
+    bool rightPalmFlat = (vrState.rightController.trigger < 0.20f && vrState.rightController.grip < 0.25f);
+    NanoMedVolumes nanoVol = DetectNanoMEDContact(domHandLocal, leftLocal, rightLocal, leftPalmFlat, rightPalmFlat);
 
     // A. Hip Holster Cartridge Draw
     if (!s_holdingNanoMedCartridge) {
-        if (rightLocal.y < -0.38f && vrState.rightController.grip > 0.60f && (now - s_lastCartridgeDrawTime > 1200)) {
+        if (domHandLocal.y < -0.38f && domCtrl.grip > 0.60f && (now - s_lastCartridgeDrawTime > 1200)) {
             s_holdingNanoMedCartridge = true;
             s_lastCartridgeDrawTime = now;
             vrState.rightHapticPulse = 0.50f; // Firm cartridge draw snap
@@ -906,7 +1011,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         }
     } else {
         // Return cartridge to holster if grip released away from station
-        if (vrState.rightController.grip < 0.30f && (rightLocal.z > -0.20f || rightLocal.y < 0.0f)) {
+        if (domCtrl.grip < 0.30f && (domHandLocal.z > -0.20f || domHandLocal.y < 0.0f)) {
             s_holdingNanoMedCartridge = false;
             vrState.rightHapticPulse = 0.20f;
             VR_LOG_INFO("Diegetic Interaction: NANOMED CARTRIDGE RETURNED TO HOLSTER");
@@ -915,32 +1020,25 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
     // B. Downward Cartridge Insertion into Overhead Station Receiver Slot
     if (s_holdingNanoMedCartridge) {
-        bool inReceiverVolume = (rightLocal.z >= -0.62f && rightLocal.z <= -0.20f) &&
-                                (rightLocal.y >= 0.05f && rightLocal.y <= 0.42f) &&
-                                (fabsf(rightLocal.x) < 0.30f);
-        if (inReceiverVolume && rVel.y < -0.22f && (now - s_lastCartridgeInsertTime > 1500)) {
+        bool inReceiverVolume = nanoVol.inReceiver; // Track C #17
+        if (inReceiverVolume && domHandVelY < -0.22f && (now - s_lastCartridgeInsertTime > 1500)) {
             s_holdingNanoMedCartridge = false;
             s_lastCartridgeInsertTime = now;
-            SendKeyTap('E');
+            SendGestureTap('E', "nanomed/cartridge-insert"); // Track C #15
             vrState.rightHapticPulse = 0.85f; // Heavy mechanical locking latch impact
             VR_LOG_INFO("Diegetic Interaction: NANOMED CARTRIDGE INSERTED INTO STATION RECEIVER (MSG_TRIGGERREFILL)");
         }
     }
 
     // C. Biometric Scanner Palm Contact (Open Palm on Health Station Scanner)
-    bool leftPalmFlat = (vrState.leftController.trigger < 0.20f && vrState.leftController.grip < 0.25f);
-    bool rightPalmFlat = (vrState.rightController.trigger < 0.20f && vrState.rightController.grip < 0.25f);
-
-    bool leftScannerContact = leftPalmFlat && (leftLocal.z >= -0.65f && leftLocal.z <= -0.22f) &&
-                              (leftLocal.y >= -0.25f && leftLocal.y <= 0.25f) && (fabsf(leftLocal.x) < 0.28f);
-    bool rightScannerContact = rightPalmFlat && (rightLocal.z >= -0.65f && rightLocal.z <= -0.22f) &&
-                               (rightLocal.y >= -0.25f && rightLocal.y <= 0.25f) && (fabsf(rightLocal.x) < 0.28f);
+    bool leftScannerContact = nanoVol.leftContact; // Track C #17
+    bool rightScannerContact = nanoVol.rightContact;
 
     bool wantPalmActive = (leftScannerContact || rightScannerContact) && !s_holdingNanoMedCartridge && !s_physicalBlockEngaged;
     if (wantPalmActive) {
         if (!s_nanoMedPalmActive && (now - s_lastNanoMedTouchTime > 1200)) {
             s_lastNanoMedTouchTime = now;
-            SendKeyTap('E');
+            SendGestureTap('E', "nanomed/palm-scan"); // Track C #15
             VR_LOG_INFO("Diegetic Interaction: BIOMETRIC PALM SCANNER CONTACT ENGAGED (Left: %d, Right: %d)",
                 leftScannerContact ? 1 : 0, rightScannerContact ? 1 : 0);
         }
@@ -957,31 +1055,19 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
     // 3. Radial Locomotion Deadzone & Diagonal Movement Normalization (ADR 0372)
     static bool s_wPressed = false, s_sPressed = false, s_aPressed = false, s_dPressed = false;
-    constexpr float RADIAL_DEADZONE = 0.22f;
+    // (Track C #10: RADIAL_DEADZONE superseded by g_vrConfig.moveDeadzone above.)
     float stickLX = vrState.leftController.thumbstickX;
     float stickLY = vrState.leftController.thumbstickY;
     float moveMag = sqrtf(stickLX * stickLX + stickLY * stickLY);
 
-    bool wantW = false;
-    bool wantS = false;
-    bool wantA = false;
-    bool wantD = false;
-
-    if (moveMag >= RADIAL_DEADZONE) {
-        float dirX = stickLX / moveMag;
-        float dirY = stickLY / moveMag;
-
-        // Apply angular deadband around forward/backward axis (Â±25 degrees, sin(25Â°) â‰ˆ 0.42)
-        // This prevents unintentional sideways strafing drift when walking forward/backward
-        constexpr float FORWARD_THRESHOLD = 0.35f;
-        constexpr float STRAFE_THRESHOLD = 0.42f;
-
-        if (dirY > FORWARD_THRESHOLD) wantW = true;
-        else if (dirY < -FORWARD_THRESHOLD) wantS = true;
-
-        if (dirX > STRAFE_THRESHOLD) wantD = true;
-        else if (dirX < -STRAFE_THRESHOLD) wantA = true;
-    }
+    // Track C #17: intent detection delegated to ComputeLocomotionIntent
+    // (explicit LocomotionIntent state, same thresholds, no behavior change).
+    // Track C #10: radial deadzone from riddick_vr.ini (default 0.22).
+    LocomotionIntent locoIntent = ComputeLocomotionIntent(stickLX, stickLY, g_vrConfig.moveDeadzone);
+    bool wantW = locoIntent.fwd;
+    bool wantS = locoIntent.back;
+    bool wantA = locoIntent.left;
+    bool wantD = locoIntent.right;
 
     if (s_ladderClimbUp) wantW = true;
     if (s_ladderClimbDown) wantS = true;
@@ -1069,7 +1155,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         if (fabsf(stickX) > SNAP_THRESHOLD) {
             if (s_snapTurnArmed) {
                 s_snapTurnArmed = false;
-                int snapDelta = (stickX > 0.0f) ? 350 : -350;
+                int snapDelta = static_cast<int>(350.0f * (g_vrConfig.snapAngleDeg / 45.0f)) * ((stickX > 0.0f) ? 1 : -1); // Track C #10 INI angle
                 SendMouseMove(snapDelta, 0); // GH #33: SendInput helper
                 MergeHaptic(vrState.rightHapticPulse, 0.25f); // GH #32: crisp tactile click on snap
             }
@@ -1079,11 +1165,11 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     } else {
         // Pure Smooth Turn: continuous rotation with progressive cubic curve and sub-pixel accumulation
         // Zero truncation stutter or sudden snaps at stick limits
-        constexpr float SMOOTH_DEADZONE = 0.20f;
+        const float SMOOTH_DEADZONE = g_vrConfig.turnDeadzone; // Track C #10 (default 0.20)
         static float s_accumulatedSmoothTurnX = 0.0f;
         if (fabsf(stickX) > SMOOTH_DEADZONE) {
             float norm = (fabsf(stickX) - SMOOTH_DEADZONE) / (1.0f - SMOOTH_DEADZONE);
-            float curvedSpeed = norm * norm * 20.0f; // Smooth progressive velocity
+            float curvedSpeed = norm * norm * g_vrConfig.smoothTurnSpeed; // Track C #10 INI (default 20.0)
             // GH #23: guard corrupt stick input before accumulation.
             if (curvedSpeed != curvedSpeed || fabsf(curvedSpeed) > 1e6f) {
                 curvedSpeed = 0.0f;
@@ -1136,6 +1222,19 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             s_stickYUpArmed = true;
             s_stickYDownArmed = true;
         }
+    }
+
+    // Track C #9: comfort vignette proxy. Thumbstick move/turn activity drives
+    // vrState.comfortVignette (0..1, INI toggle + gain); StereoRenderer applies
+    // it to the HUD convergence cue as a subtle comfort proxy. FOLLOW-UP: true
+    // post-process peripheral vignette via shader injection (not implemented yet).
+    {
+        float turnMag = fabsf(stickX);
+        float moveActive = (moveMag >= g_vrConfig.moveDeadzone) ? 0.5f : 0.0f;
+        float turnActive = (turnMag >= g_vrConfig.turnDeadzone) ? 0.5f : 0.0f;
+        float comfortTarget = g_vrConfig.comfortEnabled ? (moveActive + turnActive) * g_vrConfig.comfortStrength : 0.0f;
+        if (comfortTarget > 1.0f) comfortTarget = 1.0f;
+        vrState.comfortVignette += (comfortTarget - vrState.comfortVignette) * 0.2f;
     }
 
     static DWORD s_lastPunchTime = 0;
@@ -1205,16 +1304,16 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             VR_LOG_INFO("Physical Counter: GUARD RIFLE STRIP & MAG EJECTION DISARM (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
             mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
             mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-            SendKeyTap('R'); // Drop enemy magazine
-            SendKeyTap('1'); // Equip stripped firearm
+            SendGestureTap('R', "melee/rifle-strip-eject"); // Track C #15
+            SendGestureTap('1', "melee/rifle-strip-equip");
             vrState.rightHapticPulse = 0.95f; // Receiver wrenching shockwave (280 Hz)
             vrState.leftHapticPulse = 0.95f;
         } else if (isPocketAshRiposte && (now - s_lastPocketAshRiposteTime > 1600)) {
             s_lastPocketAshRiposteTime = now;
             s_lastPunchTime = now;
             VR_LOG_INFO("Physical Counter: POCKET ASH THROW BLIND & RIPOSTE (Ry: %.2f, Rz: %.2f)", rVel.y, rVel.z);
-            SendKeyTap('E');
-            SendKeyTap(VK_TAB);
+            SendGestureTap('E', "melee/ash-riposte"); // Track C #15
+            SendGestureTap(VK_TAB, "melee/ash-riposte-tab");
             SendKey('W', true);
             mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
             mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
@@ -1223,10 +1322,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         } else if (isShieldPryDisarm) {
             s_lastPunchTime = now;
             VR_LOG_INFO("Physical Counter: RIOT SHIELD WEDGE PRY & DISARM (Lx: %.2f, Rx: %.2f)", lVel.x, rVel.x);
-            SendKeyTap('E');
+            SendGestureTap('E', "melee/shield-pry"); // Track C #15
             mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
             mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-            SendKeyTap('1'); // Seize weapon slot
+            SendGestureTap('1', "melee/shield-seize");
             vrState.leftHapticPulse = 0.95f; // Metallic shear crack (280 Hz)
             vrState.rightHapticPulse = 0.95f;
         } else if (isEyeGougeRiposte) {
@@ -2701,116 +2800,116 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastPlasmaUniversalSingularityTime = now;
                 s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM UNIVERSAL SINGULARITY OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
                 SendKey('W', true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('C', true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap('Q', "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap('C', "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap('Q', "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-universal-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-universal-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey('C', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
                 SendKey('W', false);
-                SendKey(VK_SPACE, false);
+                // Track C #15: release folded into debounced tap above.
                 vrState.rightHapticPulse = 0.98f; // Resonant cataclysm universal singularity overdrive shockwave (550 Hz)
                 vrState.leftHapticPulse = 0.98f;  // Structural deck universal recoil (480 Hz)
                 goto combat_gesture_done;
@@ -2867,112 +2966,112 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastPlasmaMacrocosmSingularityTime = now;
                 s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM MACROCOSM SINGULARITY OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
                 SendKey('W', true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('C', true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap('Q', "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap('C', "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap('Q', "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-macrocosm-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-macrocosm-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey('C', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
                 SendKey('W', false);
-                SendKey(VK_SPACE, false);
+                // Track C #15: release folded into debounced tap above.
                 vrState.rightHapticPulse = 0.98f; // Resonant cataclysm macrocosm singularity overdrive shockwave (540 Hz)
                 vrState.leftHapticPulse = 0.98f;  // Structural deck macrocosm recoil (470 Hz)
                 goto combat_gesture_done;
@@ -3027,108 +3126,108 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastPlasmaTransCosmicSingularityTime = now;
                 s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM TRANS-COSMIC SINGULARITY OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
                 SendKey('W', true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('C', true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap('Q', "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap('C', "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap('Q', "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-trans-cosmic-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-trans-cosmic-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey('C', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
                 SendKey('W', false);
-                SendKey(VK_SPACE, false);
+                // Track C #15: release folded into debounced tap above.
                 vrState.rightHapticPulse = 0.98f; // Resonant cataclysm trans-cosmic singularity overdrive shockwave (530 Hz)
                 vrState.leftHapticPulse = 0.98f;  // Structural deck trans-cosmic recoil (460 Hz)
                 goto combat_gesture_done;
@@ -3181,102 +3280,102 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastPlasmaOmniverseSingularityTime = now;
                 s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM OMNIVERSE SINGULARITY OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
                 SendKey('W', true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('C', true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap('Q', "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap('C', "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap('Q', "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-omniverse-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey('C', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-omniverse-singularity-overdrive");
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
                 SendKey('W', false);
-                SendKey(VK_SPACE, false);
+                // Track C #15: release folded into debounced tap above.
                 vrState.rightHapticPulse = 0.98f; // Resonant cataclysm omniverse singularity overdrive shockwave (520 Hz)
                 vrState.leftHapticPulse = 0.98f;  // Structural deck omniverse recoil (450 Hz)
                 goto combat_gesture_done;
@@ -3326,94 +3425,94 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastPlasmaMultiverseSingularityTime = now;
                 s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM MULTIVERSE SINGULARITY OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
                 SendKey('W', true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('C', true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap('Q', "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap('C', "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap('Q', "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-multiverse-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-multiverse-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-multiverse-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey('C', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
                 SendKey('W', false);
-                SendKey(VK_SPACE, false);
+                // Track C #15: release folded into debounced tap above.
                 vrState.rightHapticPulse = 0.98f; // Resonant cataclysm multiverse singularity overdrive shockwave (510 Hz)
                 vrState.leftHapticPulse = 0.98f;  // Structural deck multiverse recoil (440 Hz)
                 goto combat_gesture_done;
@@ -3461,86 +3560,86 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastPlasmaContinuumSingularityTime = now;
                 s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM CONTINUUM SINGULARITY OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
                 SendKey('W', true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('C', true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap('Q', "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap('C', "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap('Q', "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-continuum-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-continuum-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-continuum-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey('C', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
                 SendKey('W', false);
-                SendKey(VK_SPACE, false);
+                // Track C #15: release folded into debounced tap above.
                 vrState.rightHapticPulse = 0.98f; // Resonant cataclysm continuum singularity overdrive shockwave (500 Hz)
                 vrState.leftHapticPulse = 0.98f;  // Structural deck continuum recoil (430 Hz)
                 goto combat_gesture_done;
@@ -3586,80 +3685,80 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastPlasmaInterdimensionalTime = now;
                 s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM INTERDIMENSIONAL OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-interdimensional-overdrive");
                 SendKey('W', true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('C', true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap('Q', "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap('C', "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap('Q', "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-interdimensional-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-interdimensional-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-interdimensional-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-interdimensional-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey('C', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-interdimensional-overdrive");
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
                 SendKey('W', false);
-                SendKey(VK_SPACE, false);
+                // Track C #15: release folded into debounced tap above.
                 vrState.rightHapticPulse = 0.98f; // Resonant cataclysm Interdimensional overdrive shockwave (500 Hz)
                 vrState.leftHapticPulse = 0.98f;  // Structural deck Interdimensional recoil (420 Hz)
                 goto combat_gesture_done;
@@ -3705,76 +3804,76 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastPlasmaTransdimensionalTime = now;
                 s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM TRANSDIMENSIONAL OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-transdimensional-overdrive");
                 SendKey('W', true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('C', true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap('Q', "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap('C', "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap('Q', "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-transdimensional-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-transdimensional-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-transdimensional-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-transdimensional-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey('C', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-transdimensional-overdrive");
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
                 SendKey('W', false);
-                SendKey(VK_SPACE, false);
+                // Track C #15: release folded into debounced tap above.
                 vrState.rightHapticPulse = 0.98f; // Resonant cataclysm Transdimensional overdrive shockwave (490 Hz)
                 vrState.leftHapticPulse = 0.98f;  // Structural deck Transdimensional recoil (410 Hz)
                 goto combat_gesture_done;
@@ -3818,72 +3917,72 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastPlasmaHyperdimensionalTime = now;
                 s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM HYPERDIMENSIONAL OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-hyperdimensional-overdrive");
                 SendKey('W', true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('C', true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap('Q', "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap('C', "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap('Q', "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-hyperdimensional-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-hyperdimensional-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-hyperdimensional-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-hyperdimensional-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey('C', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-hyperdimensional-overdrive");
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
                 SendKey('W', false);
-                SendKey(VK_SPACE, false);
+                // Track C #15: release folded into debounced tap above.
                 vrState.rightHapticPulse = 0.98f; // Resonant cataclysm Hyperdimensional overdrive shockwave (480 Hz)
                 vrState.leftHapticPulse = 0.98f;  // Structural deck Hyperdimensional recoil (400 Hz)
                 goto combat_gesture_done;
@@ -4022,64 +4121,64 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastPlasmaOmniverseTime = now;
                 s_lastFinisherTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM OMNIVERSE OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-overdrive");
                 SendKey('W', true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('C', true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap('Q', "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap('C', "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap('Q', "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-omniverse-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey('C', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-overdrive");
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
                 SendKey('W', false);
-                SendKey(VK_SPACE, false);
+                // Track C #15: release folded into debounced tap above.
                 vrState.rightHapticPulse = 0.98f; // Resonant cataclysm Omniverse overdrive shockwave (460 Hz)
                 vrState.leftHapticPulse = 0.98f;  // Structural deck Omniverse recoil (380 Hz)
                 goto combat_gesture_done;
@@ -6455,23 +6554,26 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // Suppress reload when already in two-handed stabilization to prevent accidental reloads while aiming.
     // Off-hand reaching to dominant weapon receiver requires upward seating motion (lVel.y > 0.35 m/s).
     // Waist pouch reach strictly tracks off-hand (leftLocal), eliminating accidental reloads when resting dominant arm.
+    // Track C #17: detection delegated to DetectReloadGesture (explicit
+    // ReloadGestureRequest state, same thresholds, no behavior change).
+    // Track C #14: off-hand (waist pouch / mag-well) resolves via southpaw.
+    // Track C #15: taps funnel through debounced SendGestureTap.
+    const RiddickVRVector3& offHandLocal = g_vrConfig.southpaw ? rightLocal : leftLocal;
+    float offHandVelY = g_vrConfig.southpaw ? rVel.y : lVel.y;
+    ReloadGestureRequest reloadReq = DetectReloadGesture(reloadHandDist, offCtrl.grip, offHandVelY,
+                                                         offHandLocal.y, offHandLocal.x);
     if (!s_physicalBlockEngaged && !isClimbingActive && !s_twoHandedStabilizationActive && (now - s_lastReloadGestureTime > 1200)) {
-        bool offHandMagInsert = (reloadHandDist < 0.18f && vrState.leftController.grip > 0.50f && lVel.y > 0.35f);
-        bool offHandWaistPouch = (leftLocal.y < -0.38f && leftLocal.x > -0.35f && leftLocal.x < -0.05f && vrState.leftController.grip > 0.50f);
-
-        // Cybernetic Drone HUD Battery Power Cell Hot-Swap Ejection (ADR 0082)
-        bool cellEjectFlick = (reloadHandDist < 0.18f && vrState.leftController.grip > 0.50f && lVel.y < -0.70f);
-        if (cellEjectFlick) {
+        if (reloadReq.cellEject) {
             s_lastReloadGestureTime = now;
-            VR_LOG_INFO("Tactical Weapon: POWER CELL HOT-SWAP EJECTED (Vy: %.2f m/s, Dist: %.2fm)", lVel.y, reloadHandDist);
-            SendKeyTap('R');
+            VR_LOG_INFO("Tactical Weapon: POWER CELL HOT-SWAP EJECTED (Vy: %.2f m/s, Dist: %.2fm)", offHandVelY, reloadHandDist);
+            SendGestureTap('R', "reload/powercell-eject");
             MergeHaptic(vrState.leftHapticPulse, 0.75f); // GH #32: magnetic cell disconnect snap (140 Hz)
             MergeHaptic(vrState.rightHapticPulse, 0.50f);
-        } else if (offHandMagInsert || offHandWaistPouch) {
+        } else if (reloadReq.magInsert || reloadReq.waistPouch) {
             s_lastReloadGestureTime = now;
             VR_LOG_INFO("Tactical Gesture: MANUAL WEAPON RELOAD triggered (%s, HandDist: %.2fm, LeftY: %.2f)",
-                offHandMagInsert ? "Weapon Receiver / Mag-Well" : "Waist Ammo Pouch", reloadHandDist, leftLocal.y);
-            SendKeyTap('R');
+                reloadReq.magInsert ? "Weapon Receiver / Mag-Well" : "Waist Ammo Pouch", reloadHandDist, offHandLocal.y);
+            SendGestureTap('R', "reload/manual");
             MergeHaptic(vrState.leftHapticPulse, 0.55f); // GH #32
             MergeHaptic(vrState.rightHapticPulse, 0.75f);
         }
@@ -6840,17 +6942,24 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // - Hand at Ankle Boot (Y < -0.65m, grip > 0.50) while Crouched: Stashes / Retrieves Contraband (ADR 0038)
     static DWORD s_lastHolsterTime = 0;
     static int s_activeWeaponSlot = 1; // ADR 0376: 1: Primary, 2: Sidearm, 3: Melee/Blades, 4: Ordnance, 5: Heavy
+    // Track C #14: southpaw mirrors dom/off-hand holster zones (X-mirrored copies
+    // so physical-side predicates keep working; haptics stay on physical hands).
+    RiddickVRVector3 domHolster = g_vrConfig.southpaw ? leftLocal : rightLocal;
+    RiddickVRVector3 offHolster = g_vrConfig.southpaw ? rightLocal : leftLocal;
+    float domHolsterGrip = g_vrConfig.southpaw ? vrState.leftController.grip : vrState.rightController.grip;
+    float offHolsterGrip = g_vrConfig.southpaw ? vrState.rightController.grip : vrState.leftController.grip;
+    if (g_vrConfig.southpaw) { domHolster.x = -domHolster.x; offHolster.x = -offHolster.x; }
     bool inGuardPose = (leftLocal.z < -0.10f && rightLocal.z < -0.10f && leftLocal.y > -0.38f && rightLocal.y > -0.38f && fabsf(leftLocal.x - rightLocal.x) < 0.50f);
     if (!isClimbingActive && !s_physicalBlockEngaged && !inGuardPose && !s_twoHandedStabilizationActive && (now - s_lastHolsterTime > 900)) {
-        bool rightOverShoulder = (rightLocal.y > 0.15f && rightLocal.z > -0.05f && vrState.rightController.grip > 0.50f);
-        bool rightAtChest = (rightLocal.y >= -0.45f && rightLocal.y <= -0.22f && fabsf(rightLocal.x) < 0.14f && rightLocal.z > -0.16f && vrState.rightController.grip > 0.50f);
-        bool rightLowSpine = (rightLocal.y < -0.30f && rightLocal.z > -0.05f && fabsf(rightLocal.x) < 0.15f && vrState.rightController.grip > 0.50f);
-        bool rightAtHip = (rightLocal.y < -0.32f && rightLocal.x > 0.14f && vrState.rightController.grip > 0.50f);
-        bool leftAtHip = (leftLocal.y < -0.32f && leftLocal.x < -0.14f && vrState.leftController.grip > 0.50f);
-        bool leftAtBootSheath = (leftLocal.y < -0.60f && leftLocal.x >= -0.25f && leftLocal.x <= 0.0f && vrState.leftController.grip > 0.50f);
-        bool rightAtBootSheath = (rightLocal.y < -0.60f && rightLocal.x >= -0.25f && rightLocal.x <= 0.0f && vrState.rightController.grip > 0.50f);
-        bool rightAtAnkle = (rightLocal.y < -0.65f && vrState.rightController.grip > 0.50f);
-        bool leftAtAnkle = (leftLocal.y < -0.65f && vrState.leftController.grip > 0.50f);
+        bool rightOverShoulder = (domHolster.y > 0.15f && domHolster.z > -0.05f && domHolsterGrip > 0.50f); // Track C #14
+        bool rightAtChest = (domHolster.y >= -0.45f && domHolster.y <= -0.22f && fabsf(domHolster.x) < 0.14f && domHolster.z > -0.16f && domHolsterGrip > 0.50f); // Track C #14
+        bool rightLowSpine = (domHolster.y < -0.30f && domHolster.z > -0.05f && fabsf(domHolster.x) < 0.15f && domHolsterGrip > 0.50f); // Track C #14
+        bool rightAtHip = (domHolster.y < -0.32f && domHolster.x > 0.14f && domHolsterGrip > 0.50f); // Track C #14
+        bool leftAtHip = (offHolster.y < -0.32f && offHolster.x < -0.14f && offHolsterGrip > 0.50f); // Track C #14
+        bool leftAtBootSheath = (offHolster.y < -0.60f && offHolster.x >= -0.25f && offHolster.x <= 0.0f && offHolsterGrip > 0.50f); // Track C #14
+        bool rightAtBootSheath = (domHolster.y < -0.60f && domHolster.x >= -0.25f && domHolster.x <= 0.0f && domHolsterGrip > 0.50f); // Track C #14
+        bool rightAtAnkle = (domHolster.y < -0.65f && domHolsterGrip > 0.50f); // Track C #14
+        bool leftAtAnkle = (offHolster.y < -0.65f && offHolsterGrip > 0.50f); // Track C #14
 
         if (rightOverShoulder) {
             s_lastHolsterTime = now;
@@ -6873,13 +6982,13 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         } else if ((s_isPhysicallyCrouched || s_isDeepProne) && (leftAtBootSheath || rightAtBootSheath)) {
             s_lastHolsterTime = now;
             s_activeWeaponSlot = 3;
-            VR_LOG_INFO("Holster Gesture: CONCEALED SHIV DRAWN FROM BOOT SHEATH (Y: %.2fm)", leftAtBootSheath ? leftLocal.y : rightLocal.y);
+            VR_LOG_INFO("Holster Gesture: CONCEALED SHIV DRAWN FROM BOOT SHEATH (Y: %.2fm)", leftAtBootSheath ? offHolster.y : domHolster.y);
             SendKeyTap('3'); // Equip shiv/knife slot
             if (leftAtBootSheath) vrState.leftHapticPulse = 0.45f; // Leather boot sheath friction click (160 Hz)
             if (rightAtBootSheath) vrState.rightHapticPulse = 0.45f;
         } else if ((s_isPhysicallyCrouched || s_isDeepProne) && (rightAtAnkle || leftAtAnkle)) {
             s_lastHolsterTime = now;
-            VR_LOG_INFO("Holster Gesture: CONTRABAND ANKLE BOOT POUCH accessed (HandY: %.2fm)", rightAtAnkle ? rightLocal.y : leftLocal.y);
+            VR_LOG_INFO("Holster Gesture: CONTRABAND ANKLE BOOT POUCH accessed (HandY: %.2fm)", rightAtAnkle ? domHolster.y : offHolster.y);
             SendKeyTap(VK_TAB); // Cube PDA / contraband manifest
             if (rightAtAnkle) vrState.rightHapticPulse = 0.35f; // Subtle fabric rustle (140 Hz)
             if (leftAtAnkle) vrState.leftHapticPulse = 0.35f;
@@ -10036,7 +10145,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             s_lastEyeshineTime = now;
             s_eyeshineActive = !s_eyeshineActive;
             VR_LOG_INFO("Tactical Gesture: EYESHINE %s (Right Temple Tap)", s_eyeshineActive ? "ACTIVATED" : "DEACTIVATED");
-            SendKeyTap('Q'); // Native Riddick Eyeshine key
+            SendGestureTap('Q', "tactical/eyeshine"); // Track C #15
             vrState.rightHapticPulse = 0.85f; // High-resonance optical buzz
         }
 
@@ -10049,7 +10158,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             s_lastFlashlightTime = now;
             s_flashlightActive = !s_flashlightActive;
             VR_LOG_INFO("Tactical Gesture: SHOULDER FLASHLIGHT %s (Left Shoulder Tap)", s_flashlightActive ? "ACTIVATED" : "DEACTIVATED");
-            SendKeyTap('F'); // Native Riddick Flashlight key
+            SendGestureTap('F', "tactical/flashlight"); // Track C #15
             vrState.leftHapticPulse = 0.75f; // Mechanical click pulse
         }
 
@@ -10066,7 +10175,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             } else if ((now - s_radioHoldStartTime >= 120) && (now - s_lastRadioInterceptTime > 1200)) {
                 s_lastRadioInterceptTime = now;
                 VR_LOG_INFO("Tactical Intercept: GUARD RADIO TRANSCEIVER EAVESDROPPING ENGAGED");
-                SendKeyTap(VK_TAB); // PDA / Tactical audio channel
+                SendGestureTap(VK_TAB, "tactical/radio-intercept"); // Track C #15
                 if (rightAtEar) vrState.rightHapticPulse = 0.40f; // Squelch burst (220 Hz)
                 if (leftAtEar) vrState.leftHapticPulse = 0.40f;
             }
@@ -10084,7 +10193,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             s_lastSolarVisorTime = now;
             s_eyeshineActive = !s_eyeshineActive; // GH #35: visor toggles the single source
             VR_LOG_INFO("Orbital EVA Gesture: POLARIZED SOLAR RADIATION VISOR PULLED DOWN");
-            SendKeyTap('Q'); // Toggle optical tint filter
+            SendGestureTap('Q', "tactical/visor"); // Track C #15
             if (rightAtBrow) vrState.rightHapticPulse = 0.65f; // Solid mechanical visor latch click (150 Hz)
             if (leftAtBrow) vrState.leftHapticPulse = 0.65f;
         }
@@ -10103,7 +10212,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // GH #24: press > 0.65 / release < 0.45 hysteresis so hover/gesture
     // jitter cannot desync the held fire state; suppressed while reloading,
     // guarding, or climbing (gesture volumes own the trigger there).
-    float trigVal = vrState.rightController.trigger;
+    // Track C #14 southpaw: dominant controller owns the trigger.
+    float trigVal = (g_vrConfig.southpaw ? vrState.leftController.trigger : vrState.rightController.trigger);
     bool wantRightTrigger = s_rightTriggerDown ? (trigVal >= 0.45f) : (trigVal > 0.65f);
     bool reloadActive = (now - s_lastReloadGestureTime <= 1100);
     if (wantRightTrigger && (reloadActive || s_physicalBlockEngaged || isClimbingActive)) {
@@ -10166,7 +10276,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
     // Heavy Mech Rotary Chaingun Dual-Hand Recoil Compensation (ADR 0107)
     static DWORD s_lastRecoilCompTime = 0;
-    bool isDualHandBracedChaingun = s_twoHandedStabilizationActive && (vrState.rightController.trigger > 0.80f) && (vrState.leftController.grip > 0.60f);
+    bool isDualHandBracedChaingun = s_twoHandedStabilizationActive && (domCtrl.trigger > 0.80f) && (offCtrl.grip > 0.60f); // Track C #14
     if (isDualHandBracedChaingun && (s_triggerHoldStartTime != 0) && (now - s_triggerHoldStartTime > 300)) {
         if (now - s_lastRecoilCompTime > 90) {
             s_lastRecoilCompTime = now;
@@ -10179,8 +10289,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // Security Tranq Gun Tactile Capacitor Charging (ADR 0039)
     static DWORD s_tranqChargeStartTime = 0;
     static bool s_isChargingTranq = false;
-    bool isAimingStance = (vrState.leftController.trigger > 0.40f) || s_twoHandedStabilizationActive;
-    if (isAimingStance && vrState.rightController.trigger > 0.35f && vrState.rightController.trigger < 0.90f) {
+    bool isAimingStance = (offCtrl.trigger > 0.40f) || s_twoHandedStabilizationActive; // Track C #14
+    if (isAimingStance && domCtrl.trigger > 0.35f && domCtrl.trigger < 0.90f) { // Track C #14
         if (!s_isChargingTranq) {
             s_isChargingTranq = true;
             s_tranqChargeStartTime = now;
@@ -10200,7 +10310,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     }
 
     // Block / Aim: Engaged physically via Boxer Guard pose OR manually via Left Trigger
-    bool wantBlock = s_physicalBlockEngaged || (vrState.leftController.trigger > 0.5f);
+    bool wantBlock = s_physicalBlockEngaged || (offCtrl.trigger > 0.5f); // Track C #14
     s_isAimingOrBlocking = wantBlock;
     if (wantBlock != s_currentBlockEngaged) {
         if (wantBlock) {
@@ -10555,7 +10665,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             vrState.shouldRecenter = true;
             s_hasPrevHmdOrientation = false;
             if (vrState.hmdPose.isValid) {
-                s_standingEyeHeight = vrState.hmdPose.position.y;
+                s_standingEyeHeight = vrState.hmdPose.position.y + (g_vrConfig.seated ? g_vrConfig.seatedEyeOffset : 0.0f); // Track C #11 + GH #37 edge
                 VR_LOG_INFO("Right Stick Click: HMD recentered and standing eye height recalibrated to %.2fm", s_standingEyeHeight);
             }
             vrState.rightHapticPulse = 0.6f;
