@@ -1110,7 +1110,44 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 }
             }
 
-            if (isCrossChestArcWall) {
+            // Inmate Pit Brawl Duck-Under Kidney Liver Counter-Jab (ADR 0157)
+            static DWORD s_lastKidneyCounterTime = 0;
+            bool duckUnderCrouch = (s_isPhysicallyCrouched || s_isDeepProne);
+            bool kidneyStrikeCorridor = (rightLocal.y > -0.35f && rightLocal.y < -0.05f);
+            bool kidneyCounterPunch = (fabsf(rVel.x) > 0.85f && rVel.z < -1.05f);
+            bool isDuckUnderKidneyCounter = duckUnderCrouch && kidneyStrikeCorridor && kidneyCounterPunch;
+
+            // Security Guard Stun Baton High-Voltage Capacitance Bleed Arc Trap (ADR 0158)
+            static DWORD s_lastBatonArcTrapTime = 0;
+            static DWORD s_batonArcTrapStart = 0;
+            bool batonAtConduitSurface = (handsDistSledge < 0.22f &&
+                                          rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > -0.30f && rightLocal.y < 0.10f &&
+                                          rSpeed < 0.12f &&
+                                          vrState.leftController.trigger > 0.70f && vrState.rightController.trigger > 0.70f);
+            bool isBatonArcTrapArmed = false;
+            if (batonAtConduitSurface) {
+                if (s_batonArcTrapStart == 0) s_batonArcTrapStart = now;
+                DWORD chargeDwell = now - s_batonArcTrapStart;
+                float dwellRatio = (chargeDwell < 400) ? (chargeDwell / 400.0f) : 1.0f;
+                vrState.leftHapticPulse = 0.40f + 0.50f * dwellRatio; // Capacitive transfer buzz (280 Hz)
+                vrState.rightHapticPulse = 0.40f + 0.50f * dwellRatio;
+                if (chargeDwell >= 400 && (now - s_lastBatonArcTrapTime > 2000)) {
+                    s_lastBatonArcTrapTime = now;
+                    s_batonArcTrapStart = 0;
+                    isBatonArcTrapArmed = true;
+                }
+            } else {
+                s_batonArcTrapStart = 0;
+            }
+
+            if (isBatonArcTrapArmed) {
+                VR_LOG_INFO("Tactical Melee: STUN BATON HIGH-VOLTAGE CAPACITANCE BLEED ARC TRAP ARMED");
+                SendKeyTap('E');
+                SendKeyTap('Q');
+                SendKeyTap(VK_RETURN);
+                vrState.rightHapticPulse = 0.95f; // Static surface detonation snap (140 Hz)
+                vrState.leftHapticPulse = 0.70f;
+            } else if (isCrossChestArcWall) {
                 SendKey('S', true);
                 SendKey('Q', true);
                 mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
@@ -1211,6 +1248,17 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('W', false);
                 vrState.rightHapticPulse = 0.98f; // Concussive abdominal organ shockwave (200 Hz)
                 vrState.leftHapticPulse = 0.65f;  // Frame clamp vibration (100 Hz)
+            } else if (isDuckUnderKidneyCounter && (now - s_lastKidneyCounterTime > 1500)) {
+                s_lastKidneyCounterTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL DUCK-UNDER KIDNEY COUNTER-JAB (Rx: %.2f, Rz: %.2f)", rVel.x, rVel.z);
+                SendKey('C', true);
+                SendKey('D', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('D', false);
+                SendKey('C', false);
+                vrState.rightHapticPulse = 0.98f; // Visceral renal concussive shockwave (220 Hz)
             } else if (blindRiposteStrike && (now - s_lastEyeRubRiposteTime > 1500)) {
                 s_lastEyeRubRiposteTime = now;
                 s_eyeRubWipeTime = 0;
@@ -3050,6 +3098,36 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 vrState.leftHapticPulse = 0.95f;  // Lever trip clack & combustion blast rumble (50 Hz)
                 vrState.rightHapticPulse = 0.95f;
+            }
+
+            // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Cotter Pin Extraction (ADR 0155)
+            static DWORD s_lastCotterExtractTime = 0;
+            bool handAtTrussCotterHead = (rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > 0.10f && rightLocal.y < 0.40f &&
+                                          vrState.rightController.grip > 0.60f);
+            bool cotterPinExtractPull = (rVel.z > 0.85f);
+            if (handAtTrussCotterHead && cotterPinExtractPull && (now - s_lastCotterExtractTime > 1500)) {
+                s_lastCotterExtractTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA TRUSS HINGE COTTER PIN EXTRACTED & SALVAGED (Rz: %.2f)", rVel.z);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap(VK_TAB);
+                vrState.rightHapticPulse = 0.95f; // Mechanical release detent clunk (180 Hz)
+                vrState.leftHapticPulse = 0.60f;
+            }
+
+            // Subterranean Hydroponics Bio-Waste Incinerator Burner Ignition Spark Wheel Strike (ADR 0156)
+            static DWORD s_lastSparkWheelTime = 0;
+            bool handAtSparkWheel = (rightLocal.z > -0.40f && rightLocal.z < -0.16f && rightLocal.y > -0.15f && rightLocal.y < 0.20f &&
+                                     vrState.rightController.grip > 0.55f);
+            bool sparkWheelStrike = (rVel.y < -0.90f);
+            if (handAtSparkWheel && sparkWheelStrike && (now - s_lastSparkWheelTime > 1500)) {
+                s_lastSparkWheelTime = now;
+                VR_LOG_INFO("Environmental Gesture: HYDROPONICS INCINERATOR SPARK WHEEL STRUCK & IGNITED (Ry: %.2f)", rVel.y);
+                SendKeyTap('E');
+                SendKeyTap(VK_TAB);
+                SendKeyTap(VK_RETURN);
+                vrState.rightHapticPulse = 0.95f; // Flint rasp & combustion flame blast (60 Hz)
+                vrState.leftHapticPulse = 0.70f;
             }
         }
     }
