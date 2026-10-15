@@ -73,10 +73,25 @@ procedural renderer is not mistaken for a native result.
   decompiler (see below).
 
 ### C. Tooling
-- REA 6.5.0 CLI is installed; **no** Ghidra/IDA/Hopper was configured at start.
-  Ghidra 12.1.4 (matching REA's expected 12.1.x) is being provisioned with the
-  existing Java 21 runtime so `rea` can decompile the loader/viewmodel code.
-  Previously only static PE/string/format analysis was available.
+- REA 6.5.0 CLI is installed and **Ghidra 12.1.4** is now provisioned
+  (`C:\Users\GigelCastel\Tools\ghidra_12.1.4_PUBLIC`, `GHIDRA_INSTALL_DIR`
+  set), so `rea` can decompile native code. Previously only static
+  PE/string/format analysis was available.
+
+### D. Deep RE (Ghidra/REA) — function map
+Full notes + reproduction commands: [`docs/rea/mos-xmd-format.md`](../rea/mos-xmd-format.md);
+pseudocode excerpts in `docs/rea/reference/`.
+- Generic container = **`CDataFile`** in `MCCDyn.dll` (`CDataFile::Create`
+  xref `0x10082a74`, `CDataFile::ReadTree` xref `0x10082f15`). Confirms the
+  0x30-byte header + 0x30-byte node records + contiguous data region that
+  `tools/mos_xmd.py` already parses.
+- Geometry = **`CTriangleMeshCore::Read`** in `MXR.dll` (≈`FUN_10080f50`).
+  It selects sibling chunks with `CDataFile::GetNext(..., name)`:
+  `VERTEXFRAMES`→`FUN_1007fba0`, `TVERTEXFRAMES`→`FUN_1007fce0`,
+  `BONEDEFORM`→`FUN_1007d260` (offset saved at mesh `+0x94`).
+- `BONEDEFORM` is per-vertex skin influences (record count, stride array,
+  secondary bone-index array). `VERTEXFRAMES` positions are byte-packed; exact
+  packing still being decoded.
 
 ## Options
 - **A. Extract + re-render the real mesh (recommended first target).** Decode

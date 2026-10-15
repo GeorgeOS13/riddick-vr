@@ -1,0 +1,106 @@
+# MCCDyn_CDataFile_Create
+# provider: ghidra 12.1.4
+# subject : MCCDyn.dll sha256=fa4c995cb066626e1fb3d85adfbc965efea4a92e724a72c6b7ae135a1de58aee
+# evidence_id: ev_391afeb1f73be3963711cd791ca8e4193f9a6dbe9f2d9ebc492cba33dc80970e
+# NOTE: Ghidra pseudocode, not original source. Read-only artefact of REA analysis.
+------------------------------------------------------------------------------
+
+/* public: void __thiscall CDataFile::Create(class TPtr<class CCFile>,int,int) */
+
+void __thiscall CDataFile::Create(CDataFile *this,int *param_2,undefined4 param_3,CDataFile param_4)
+
+{
+  CDataFile *this_00;
+  CArrayCore<CObj> *this_01;
+  CCFile *this_02;
+  int iVar1;
+  int *piVar2;
+  char *pcVar3;
+  uint uVar4;
+  char *pcVar5;
+  undefined4 uVar6;
+  undefined4 local_160 [2];
+  char local_158 [76];
+  int local_10c [64];
+  void *pvStack_c;
+  undefined1 *puStack_8;
+  int local_4;
+  
+                    /* 0x829c0  355  ?Create@CDataFile@@QAEXV?$TPtr@VCCFile@@@@HH@Z */
+  puStack_8 = &LAB_100dfba0;
+  pvStack_c = ExceptionList;
+  ExceptionList = &pvStack_c;
+  this[0x10] = param_4;
+  *(undefined4 *)(this + 8) = param_3;
+  *(undefined4 *)(this + 0xa8c) = 0;
+  *(undefined4 *)(this + 0xc) = 0;
+  *(undefined4 *)(this + 0x54) = 0xffffffff;
+  *(undefined4 *)(this + *(int *)(this + 0xa8c) * 0xa4 + 0xd8) = 0;
+  *(undefined4 *)(this + *(int *)(this + 0xa8c) * 0xa4 + 0xec) = 0;
+  *(uint *)(this + 0x10) = *(uint *)(this + 0x10) & 0xfffffdff | 0x100;
+  this_01 = (CArrayCore<CObj> *)(this + 0xab0);
+  local_4 = 0;
+  CArrayCore<CObj>::Clear(this_01);
+  if (*(int *)(this + 0xab4) == 0) {
+    FUN_10081f60((int)this_01);
+  }
+  *(undefined4 *)(*(int *)(this + 0xab4) + 0xc) = 0x100;
+  FUN_10081090(local_160);
+  builtin_strncpy(local_158,"MOS DATAFILE2.0",0x10);
+  local_4._0_1_ = 1;
+  if (*(int *)(this + 0xab4) == 0) {
+    FUN_10081f60((int)this_01);
+  }
+  CArrayCore<CObj>::InsertxElements(this_01,*(int *)(*(int *)(this + 0xab4) + 4),local_160,1,true);
+  if (*(int *)(this + 8) == 3) {
+    FUN_10009f50(this + 0x44,(int *)&param_2);
+    this_02 = (CCFile *)FUN_1000b800(0x20,4);
+    if (this_02 == (CCFile *)0x0) {
+      iVar1 = 0;
+    }
+    else {
+      local_4._0_1_ = 2;
+      iVar1 = CCFile::CCFile(this_02);
+      local_4._0_1_ = 1;
+    }
+    this_00 = this + 0x48;
+    FUN_10080060(this_00,iVar1);
+    if (*(int *)this_00 == 0) {
+      piVar2 = FUN_1000c660(local_10c);
+      local_4._0_1_ = 3;
+      pcVar3 = (char *)(**(code **)(*piVar2 + 0x14))();
+      FUN_10026150((int *)this,&DAT_100e608c,pcVar3);
+      local_4._0_1_ = 1;
+      FUN_10002590(local_10c);
+    }
+    CCFile::Open(*(CCFile **)this_00,(CStream *)(this + 0x18),
+                 (-(uint)(((byte)*(undefined4 *)(this + 0x10) & 1 | 6) != 0) & 0xffffffe0) + 0x20,
+                 false);
+  }
+  else {
+    if (*(int *)(this + 8) != 2) {
+      piVar2 = FUN_1000c660(local_10c);
+      uVar6 = 0;
+      pcVar5 = "Invalid version.";
+      local_4 = CONCAT31(local_4._1_3_,4);
+      pcVar3 = (char *)(**(code **)(*piVar2 + 0x14))();
+                    /* WARNING: Subroutine does not return */
+      FUN_100260e0((int *)this,"Create",pcVar3,pcVar5,uVar6);
+    }
+    FUN_10009f50(this + 0x48,(int *)&param_2);
+    WriteTreeHelper(this,0,(CCFile *)0x0);
+  }
+  local_4 = (uint)local_4._1_3_ << 8;
+  FUN_10081120(local_160);
+  piVar2 = param_2;
+  local_4 = 0xffffffff;
+  if (param_2 != (int *)0x0) {
+    uVar4 = FUN_10005570(param_2 + 1);
+    if ((uVar4 & 0x7fffffff) == 1) {
+      (**(code **)(*piVar2 + 0x10))();
+    }
+  }
+  ExceptionList = pvStack_c;
+  return;
+}
+

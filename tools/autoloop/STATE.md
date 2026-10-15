@@ -75,6 +75,17 @@ Durable, human-readable state written by each scheduled wake. Newest at top.
 > real hand mesh), #56 (pin target build), #57 (VR portability epic) are open.
 > Loop should now prefer #55 and the #57 gaps; see below.
 
+## Wake 2 — 2026-10-15 (interactive, deep RE)
+- Ghidra analysis of the model pipeline via REA; committed
+  `docs/rea/mos-xmd-format.md` + `docs/rea/reference/*.txt` (pseudocode).
+- Container = generic **`CDataFile`** in `MCCDyn.dll`
+  (`Create` xref `0x10082a74`, `ReadTree` xref `0x10082f15`); confirmed the
+  `tools/mos_xmd.py` layout (0x30 header + 0x30 node records).
+- Geometry reader = **`CTriangleMeshCore::Read`** in `MXR.dll`
+  (`VERTEXFRAMES`/`TVERTEXFRAMES`/`BONEDEFORM` via `CDataFile::GetNext`).
+- Next: finish `VERTEXFRAMES`/`BONEDEFORM` byte layouts, recover bone names,
+  export OBJ, add skinned draw path. See GH #55.
+
 ## Wake 1 — 2026-10-15 (interactive, setup + RE)
 - Provisioned **Ghidra 12.1.4** (`C:\Users\GigelCastel\Tools\ghidra_12.1.4_PUBLIC`,
   `GHIDRA_INSTALL_DIR` set). `rea doctor` now reports ghidra healthy → real

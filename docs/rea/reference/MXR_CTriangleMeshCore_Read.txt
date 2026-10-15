@@ -1,0 +1,536 @@
+# MXR_CTriangleMeshCore_Read
+# provider: ghidra 12.1.4
+# subject : MXR.dll sha256=06424f55f5a0f85eb09b5fbd69491c7f6a88de808c26c513e8dac180f3c2052d
+# evidence_id: ev_4dc37c881d9ba66d7ec5e702c623c8c1297abc9be3459ff9179c942b6947ea2e
+# NOTE: Ghidra pseudocode, not original source. Read-only artefact of REA analysis.
+------------------------------------------------------------------------------
+
+void __thiscall FUN_10080f50(void *this,CDataFile *param_1,int *param_2)
+
+{
+  float fVar1;
+  bool bVar2;
+  int *piVar3;
+  char *pcVar4;
+  int iVar5;
+  undefined4 *puVar6;
+  int *piVar7;
+  undefined4 uVar8;
+  int iVar9;
+  void *pvVar10;
+  uint uVar11;
+  int iVar12;
+  int iVar13;
+  CListVectorCore *pCVar14;
+  ushort *puVar15;
+  CCFile *pCVar16;
+  void *pvVar17;
+  __int64 _Var18;
+  char *pcVar19;
+  int **ppiVar20;
+  char *pcVar21;
+  undefined1 *puVar22;
+  undefined4 uVar23;
+  undefined1 local_850 [780];
+  undefined1 local_544 [780];
+  int local_238 [64];
+  int local_138 [64];
+  int local_38 [2];
+  int local_30 [2];
+  int *local_28;
+  uint local_24;
+  uint local_20;
+  void *local_1c;
+  CCFile *local_18;
+  int *local_14;
+  void *local_10;
+  undefined1 *puStack_c;
+  undefined4 local_8;
+  
+  local_8 = 0xffffffff;
+  puStack_c = &LAB_1013a510;
+  local_10 = ExceptionList;
+  ExceptionList = &local_10;
+  local_1c = this;
+  piVar3 = (int *)FUN_10008550();
+  (**(code **)(*piVar3 + 0x20))(&local_14,"SYSTEM");
+  local_8 = 0;
+  piVar3 = (int *)FUN_1012007a(local_14,0,&CObj::RTTI_Type_Descriptor,&CSystem::RTTI_Type_Descriptor
+                               ,0);
+  local_8 = 0xffffffff;
+  if (local_14 != (int *)0x0) {
+    uVar11 = local_14[1];
+    uVar11 = (((int)(uVar11 * 2) >> 1) - 1U ^ uVar11) & 0x7fffffff ^ uVar11;
+    local_14[1] = uVar11;
+    if ((uVar11 & 0x7fffffff) == 0) {
+      (**(code **)(*local_14 + 0x10))();
+      local_14 = (int *)0x0;
+    }
+  }
+  if ((piVar3 == (int *)0x0) ||
+     (piVar3 = (int *)(**(code **)(*piVar3 + 0x6c))(), piVar3 == (int *)0x0)) {
+    piVar3 = FUN_10004ec0(local_138);
+    uVar23 = 0;
+    pcVar21 = "No env";
+    local_8 = 1;
+    pcVar4 = (char *)(**(code **)(*piVar3 + 0x14))();
+    FUN_100060e0(local_544,this,"OpenStream",pcVar4,pcVar21,uVar23);
+    puVar22 = local_544;
+    goto LAB_1008189d;
+  }
+  uVar23 = 0;
+  pcVar4 = "XDF_CREATE";
+  iVar5 = (**(code **)(*piVar3 + 400))();
+  uVar11 = (uint)local_14 >> 8;
+  local_14 = (int *)((uint)local_14 & 0xffffff00);
+  if (iVar5 != 0) {
+    local_14 = (int *)CONCAT31((int3)uVar11,1);
+  }
+  ppiVar20 = &local_28;
+  puVar6 = (undefined4 *)CDataFile::GetFile(param_1);
+  pCVar16 = (CCFile *)*puVar6;
+  local_18 = pCVar16;
+  if (local_28 != (int *)0x0) {
+    uVar11 = local_28[1];
+    uVar11 = (((int)(uVar11 * 2) >> 1) - 1U ^ uVar11) & 0x7fffffff ^ uVar11;
+    local_28[1] = uVar11;
+    if ((uVar11 & 0x7fffffff) == 0) {
+      (**(code **)(*local_28 + 0x10))(ppiVar20);
+      local_28 = (int *)0x0;
+    }
+  }
+  local_24 = 0x100;
+  bVar2 = CDataFile::GetNext(param_1,"MISCELLANEOUS");
+  if (!bVar2) {
+    piVar3 = FUN_10004ec0(local_138);
+    local_8 = 2;
+    pcVar21 = (char *)(**(code **)(*piVar3 + 0x14))("Corrupt model. (0)",0);
+    FUN_100060e0(local_544,(int *)0x0,"CTriangleMeshCore::Read",pcVar21,pcVar4,uVar23);
+    puVar22 = local_544;
+    goto LAB_1008189d;
+  }
+  if (1 < *(int *)(param_1 + *(int *)(param_1 + 0xa8c) * 0xa4 + 0xdc)) {
+    FUN_10006620(pCVar16,&local_24);
+  }
+  if (local_24 < 0x101) {
+    FUN_10017650(pCVar16,&local_20);
+    *(uint *)((int)this + 0xac) =
+         *(uint *)((int)this + 0xac) ^ (local_20 << 0x10 ^ *(uint *)((int)this + 0xac)) & 0x30000;
+    FUN_10017650(pCVar16,&local_20);
+    *(uint *)((int)this + 0x8c) = local_20 & 0xffff;
+  }
+  else {
+    FUN_10006620(pCVar16,&local_20);
+    *(uint *)((int)this + 0xac) =
+         *(uint *)((int)this + 0xac) ^ (local_20 << 0x10 ^ *(uint *)((int)this + 0xac)) & 0x30000;
+    FUN_10006620(pCVar16,(void *)((int)this + 0x8c));
+  }
+  if (local_24 < 0x101) {
+    FUN_10006620(pCVar16,&local_20);
+  }
+  FUN_10006620(pCVar16,(void *)((int)this + 0x80));
+  FUN_1007fe80((void *)((int)this + 0x68),pCVar16);
+  if (0 < *(int *)(param_1 + *(int *)(param_1 + 0xa8c) * 0xa4 + 0xdc)) {
+    FUN_10006620(pCVar16,(void *)((int)this + 0x84));
+  }
+  if (local_24 < 0x101) {
+    local_14 = (int *)((uint)local_14 & 0xffffff00);
+  }
+  *(uint *)((int)this + 0x90) = local_24;
+  *(uint *)((int)this + 0xac) =
+       *(uint *)((int)this + 0xac) ^ ((uint)local_14 & 0xff ^ *(uint *)((int)this + 0xac)) & 1;
+  bVar2 = CDataFile::GetNext(param_1,"VERTEXFRAMES");
+  if (!bVar2) {
+    piVar3 = FUN_10004ec0(local_138);
+    local_8 = 3;
+    pcVar21 = (char *)(**(code **)(*piVar3 + 0x14))("Corrupt model. (1)",0);
+    FUN_100060e0(local_544,(int *)0x0,"CTriangleMeshCore::Read",pcVar21,pcVar4,uVar23);
+    puVar22 = local_544;
+    goto LAB_1008189d;
+  }
+  piVar3 = (int *)((int)this + 0xc);
+  FUN_1007fba0(piVar3,*(int *)(param_1 + *(int *)(param_1 + 0xa8c) * 0xa4 + 0xdc));
+  if (0x100 < local_24) {
+    FUN_10006620(local_18,&local_20);
+  }
+  local_20 = 0;
+  iVar5 = 0;
+  while( true ) {
+    while( true ) {
+      if ((int *)*piVar3 == (int *)0x0) {
+        iVar9 = 0;
+      }
+      else {
+        iVar9 = *(int *)*piVar3;
+      }
+      if (iVar9 <= (int)local_20) {
+        bVar2 = CDataFile::GetNext(param_1,"TVERTEXFRAMES");
+        if (!bVar2) {
+          piVar3 = FUN_10004ec0(local_238);
+          local_8 = 8;
+          pcVar21 = "Corrupt model. (2)";
+          goto LAB_10081875;
+        }
+        piVar3 = (int *)((int)local_1c + 0x10);
+        FUN_1007fce0(piVar3,*(int *)(param_1 + *(int *)(param_1 + 0xa8c) * 0xa4 + 0xdc));
+        iVar9 = 0;
+        iVar5 = 0;
+        goto LAB_100814a0;
+      }
+      piVar7 = (int *)*piVar3;
+      if (param_2 == (int *)0x0) break;
+      if (piVar7 == (int *)0x0) {
+        iVar9 = 0;
+      }
+      else {
+        iVar9 = *piVar7;
+      }
+      if ((iVar9 <= (int)local_20) || (iVar5 < 0)) {
+        piVar3 = FUN_10005990(local_38,"Index out of range. %d/%d");
+        local_8 = 4;
+        piVar7 = FUN_10004ec0(local_138);
+        local_8 = 5;
+        uVar8 = (**(code **)(*piVar3 + 0x14))(0);
+        pcVar21 = (char *)(**(code **)(*piVar7 + 0x14))(uVar8);
+        FUN_100060e0(local_544,(int *)0x0,"TThinArray::operator[]",pcVar21,pcVar4,uVar23);
+        puVar22 = local_544;
+        goto LAB_1008189d;
+      }
+      FUN_1007c310((void *)(iVar5 + 4 + (int)piVar7),local_18);
+      local_20 = local_20 + 1;
+      iVar5 = iVar5 + 0x58;
+    }
+    if (piVar7 == (int *)0x0) {
+      iVar9 = 0;
+    }
+    else {
+      iVar9 = *piVar7;
+    }
+    if ((iVar9 <= (int)local_20) || (iVar5 < 0)) break;
+    FUN_1007fed0((void *)(iVar5 + 4 + (int)piVar7),local_18,
+                 (float *)(*(int *)((int)this + 8) + 0x38),(char)local_14);
+    local_20 = local_20 + 1;
+    iVar5 = iVar5 + 0x58;
+  }
+  piVar3 = FUN_10005990(local_30,"Index out of range. %d/%d");
+  local_8 = 6;
+  piVar7 = FUN_10004ec0(local_238);
+  local_8 = 7;
+  goto LAB_10081414;
+code_r0x100814de:
+  FUN_100807d0((void *)(iVar5 + 4 + (int)piVar7),local_18,
+               *(int *)(param_1 + *(int *)(param_1 + 0xa8c) * 0xa4 + 0xe0),(char)local_14);
+  iVar9 = iVar9 + 1;
+  iVar5 = iVar5 + 0x24;
+LAB_100814a0:
+  if ((int *)*piVar3 == (int *)0x0) {
+    iVar12 = 0;
+  }
+  else {
+    iVar12 = *(int *)*piVar3;
+  }
+  if (iVar12 <= iVar9) {
+    if (local_24 < 0x101) {
+      CDataFile::PushPosition(param_1);
+      bVar2 = CDataFile::GetNext(param_1,"BONEVERTEXINFO");
+      pvVar10 = local_1c;
+      if (bVar2) {
+        iVar5 = *(int *)(param_1 + *(int *)(param_1 + 0xa8c) * 0xa4 + 0xdc);
+        pCVar14 = (CListVectorCore *)((int)local_1c + 0x14);
+        if (*(int *)((int)local_1c + 0x18) == 0) {
+          if (iVar5 != 0) {
+            (**(code **)(*(int *)pCVar14 + 0x10))();
+            goto LAB_1008159c;
+          }
+        }
+        else {
+LAB_1008159c:
+          CListVectorCore::Core_SetLen(pCVar14,iVar5);
+        }
+        if (*(int *)((int)pvVar10 + 0x18) == 0) {
+          uVar11 = 0;
+        }
+        else {
+          uVar11 = *(int *)(*(int *)((int)pvVar10 + 0x18) + 0x10) *
+                   *(int *)(*(int *)((int)pvVar10 + 0x18) + 4);
+        }
+        if (*(int *)((int)pvVar10 + 0x18) == 0) {
+          pvVar10 = (void *)0x0;
+        }
+        else {
+          pvVar10 = *(void **)(*(int *)((int)pvVar10 + 0x18) + 0x18);
+        }
+        CCFile::Read(local_18,pvVar10,uVar11);
+      }
+      CDataFile::PopPosition(param_1);
+      CDataFile::PushPosition(param_1);
+      bVar2 = CDataFile::GetNext(param_1,"BONEINFLUENCE");
+      pvVar10 = local_1c;
+      if (bVar2) {
+        iVar5 = *(int *)(param_1 + *(int *)(param_1 + 0xa8c) * 0xa4 + 0xdc);
+        pCVar14 = (CListVectorCore *)((int)local_1c + 0x1c);
+        if (*(int *)((int)local_1c + 0x20) == 0) {
+          if (iVar5 != 0) {
+            (**(code **)(*(int *)pCVar14 + 0x10))();
+            goto LAB_10081623;
+          }
+        }
+        else {
+LAB_10081623:
+          CListVectorCore::Core_SetLen(pCVar14,iVar5);
+        }
+        iVar5 = *(int *)((int)pvVar10 + 0x20);
+        if (iVar5 == 0) {
+          iVar9 = 0;
+          pvVar10 = (void *)0x0;
+        }
+        else {
+          iVar9 = *(int *)(iVar5 + 4);
+          pvVar10 = *(void **)(iVar5 + 0x18);
+        }
+        FUN_1007c150(local_18,*(uint *)(param_1 + *(int *)(param_1 + 0xa8c) * 0xa4 + 0xe0),pvVar10,
+                     iVar9);
+        iVar5 = 0;
+        while( true ) {
+          if (*(int *)((int)local_1c + 0x18) == 0) {
+            iVar9 = 0;
+          }
+          else {
+            iVar9 = *(int *)(*(int *)((int)local_1c + 0x18) + 4);
+          }
+          if (iVar9 <= iVar5) break;
+          if (((*(int *)((int)local_1c + 0x18) == 0) || (iVar5 < 0)) ||
+             (*(int *)(*(int *)((int)local_1c + 0x18) + 4) <= iVar5)) {
+            CListVectorCore::RangeCheckError((CListVectorCore *)((int)local_1c + 0x14),iVar5);
+          }
+          iVar9 = *(int *)(*(int *)((int)local_1c + 0x18) + 0x18);
+          uVar11 = (uint)*(ushort *)(iVar9 + 2 + iVar5 * 4);
+          iVar9 = iVar9 + iVar5 * 4;
+          if ((*(int *)((int)local_1c + 0x20) == 0) ||
+             (*(int *)(*(int *)((int)local_1c + 0x20) + 4) <= (int)uVar11)) {
+            CListVectorCore::RangeCheckError((CListVectorCore *)((int)local_1c + 0x1c),uVar11);
+          }
+          fVar1 = 0.0;
+          iVar12 = *(int *)(*(int *)((int)local_1c + 0x20) + 0x18) + uVar11 * 8;
+          uVar11 = (uint)*(byte *)(iVar9 + 1);
+          iVar13 = 0;
+          if (uVar11 != 1 && -1 < (int)(uVar11 - 1)) {
+            do {
+              if (1.0 < fVar1 + *(float *)(iVar12 + 4)) {
+                *(float *)(iVar12 + 4) = 1.0 - fVar1;
+              }
+              fVar1 = fVar1 + *(float *)(iVar12 + 4);
+              iVar13 = iVar13 + 1;
+              iVar12 = iVar12 + 8;
+            } while (iVar13 < (int)(*(byte *)(iVar9 + 1) - 1));
+          }
+          iVar5 = iVar5 + 1;
+          *(float *)(iVar12 + 4) = 1.0 - fVar1;
+        }
+      }
+      CDataFile::PopPosition(param_1);
+      CDataFile::PushPosition(param_1);
+      bVar2 = CDataFile::GetNext(param_1,"BONEMATRIXMAP");
+      pvVar10 = local_1c;
+      pCVar16 = local_18;
+      if (bVar2) {
+        piVar3 = (int *)((int)local_1c + 0x24);
+        FUN_1007b630(piVar3,*(int *)(param_1 + *(int *)(param_1 + 0xa8c) * 0xa4 + 0xdc));
+        pCVar16 = local_18;
+        if ((uint *)*piVar3 == (uint *)0x0) {
+          uVar11 = 0;
+        }
+        else {
+          uVar11 = *(uint *)*piVar3;
+        }
+        if (*piVar3 == 0) {
+          CCFile::Read(local_18,(void *)0x0,uVar11);
+        }
+        else {
+          CCFile::Read(local_18,(void *)(*piVar3 + 4),uVar11);
+        }
+      }
+      CDataFile::PopPosition(param_1);
+      if ((*(int *)((int)pvVar10 + 0x18) != 0) && (*(int *)(*(int *)((int)pvVar10 + 0x18) + 4) != 0)
+         ) {
+        *(uint *)((int)pvVar10 + 0xac) = *(uint *)((int)pvVar10 + 0xac) | 0x4000;
+        if ((*(int **)((int)pvVar10 + 0x24) != (int *)0x0) && (**(int **)((int)pvVar10 + 0x24) != 0)
+           ) {
+          *(uint *)((int)pvVar10 + 0xac) = *(uint *)((int)pvVar10 + 0xac) | 0x8000;
+        }
+      }
+    }
+    else {
+      CDataFile::PushPosition(param_1);
+      bVar2 = CDataFile::GetNext(param_1,"BONEDEFORM");
+      pCVar16 = local_18;
+      pvVar10 = local_1c;
+      if (bVar2) {
+        *(uint *)((int)local_1c + 0xac) = *(uint *)((int)local_1c + 0xac) | 0x4000;
+        _Var18 = CCFile::Pos(local_18);
+        *(int *)((int)pvVar10 + 0x94) = (int)_Var18;
+        if ((char)local_14 == '\0') {
+          FUN_1007d260(pvVar10,pCVar16);
+        }
+      }
+      CDataFile::PopPosition(param_1);
+      pvVar10 = local_1c;
+      pCVar16 = local_18;
+    }
+    bVar2 = CDataFile::GetNext(param_1,"TRIANGLES");
+    if (bVar2) {
+      if (local_24 < 0x101) {
+        iVar5 = *(int *)(param_1 + *(int *)(param_1 + 0xa8c) * 0xa4 + 0xdc);
+        if (*(int *)((int)pvVar10 + 0x3c) == 0) {
+          if (iVar5 != 0) {
+            (**(code **)(*(int *)((int)pvVar10 + 0x38) + 0x10))();
+            goto LAB_100818dc;
+          }
+        }
+        else {
+LAB_100818dc:
+          CListVectorCore::Core_SetLen((CListVectorCore *)((int)pvVar10 + 0x38),iVar5);
+        }
+        if (*(int *)((int)pvVar10 + 0x3c) == 0) {
+          iVar5 = 0;
+        }
+        else {
+          iVar5 = *(int *)(*(int *)((int)pvVar10 + 0x3c) + 4);
+        }
+        if (*(int *)((int)pvVar10 + 0x3c) == 0) {
+          puVar15 = (ushort *)0x0;
+        }
+        else {
+          puVar15 = *(ushort **)(*(int *)((int)pvVar10 + 0x3c) + 0x18);
+        }
+        CCFile::ReadLE(local_18,puVar15,iVar5 * 3);
+        pCVar16 = local_18;
+      }
+      else {
+        _Var18 = CCFile::Pos(pCVar16);
+        *(int *)((int)pvVar10 + 0x98) = (int)_Var18;
+        if ((char)local_14 == '\0') {
+          FUN_1007d690(pvVar10,pCVar16);
+        }
+      }
+      CDataFile::PushPosition(param_1);
+      pcVar4 = "PRIMITIVES";
+      bVar2 = CDataFile::GetNext(param_1,"PRIMITIVES");
+      if (!bVar2) goto LAB_10081a2d;
+      if (0x100 < local_24) {
+        _Var18 = CCFile::Pos(pCVar16);
+        *(int *)((int)pvVar10 + 0x9c) = (int)_Var18;
+        if ((char)local_14 == '\0') {
+          FUN_1007d720(pvVar10,pCVar16);
+        }
+        goto LAB_10081a2d;
+      }
+      pcVar21 = *(char **)(param_1 + *(int *)(param_1 + 0xa8c) * 0xa4 + 0xdc);
+      if (*(int *)((int)pvVar10 + 0x44) == 0) {
+        if (pcVar21 != (char *)0x0) {
+          (**(code **)(*(int *)((int)pvVar10 + 0x40) + 0x10))();
+          goto LAB_10081989;
+        }
+      }
+      else {
+LAB_10081989:
+        CListVectorCore::Core_SetLen((CListVectorCore *)((int)pvVar10 + 0x40),(int)pcVar21);
+        pcVar4 = pcVar21;
+      }
+      ppiVar20 = &param_2;
+      puVar6 = (undefined4 *)CDataFile::GetFile(param_1);
+      local_8 = 0xc;
+      if (*(int *)((int)pvVar10 + 0x44) == 0) {
+        uVar11 = 0;
+      }
+      else {
+        uVar11 = *(int *)(*(int *)((int)pvVar10 + 0x44) + 0x10) *
+                 *(int *)(*(int *)((int)pvVar10 + 0x44) + 4);
+      }
+      if (*(int *)((int)pvVar10 + 0x44) == 0) {
+        pvVar17 = (void *)0x0;
+      }
+      else {
+        pvVar17 = *(void **)(*(int *)((int)pvVar10 + 0x44) + 0x18);
+      }
+      CCFile::Read((CCFile *)*puVar6,pvVar17,uVar11);
+      local_8 = 0xffffffff;
+      if (param_2 != (int *)0x0) {
+        uVar11 = param_2[1];
+        uVar11 = (((int)(uVar11 * 2) >> 1) - 1U ^ uVar11) & 0x7fffffff ^ uVar11;
+        param_2[1] = uVar11;
+        if ((uVar11 & 0x7fffffff) == 0) {
+          (**(code **)(*param_2 + 0x10))(pcVar4,ppiVar20);
+          param_2 = (int *)0x0;
+        }
+      }
+LAB_10081a2d:
+      CDataFile::PopPosition(param_1);
+      if (0x100 < local_24) {
+        CDataFile::PushPosition(param_1);
+        bVar2 = CDataFile::GetNext(param_1,"EDGES");
+        pCVar16 = local_18;
+        if (bVar2) {
+          _Var18 = CCFile::Pos(local_18);
+          *(int *)((int)pvVar10 + 0xa0) = (int)_Var18;
+          if ((char)local_14 == '\0') {
+            FUN_1007d4b0(pvVar10,pCVar16);
+          }
+        }
+        CDataFile::PopPosition(param_1);
+        CDataFile::PushPosition(param_1);
+        bVar2 = CDataFile::GetNext(param_1,"EDGETRIS");
+        if (bVar2) {
+          _Var18 = CCFile::Pos(pCVar16);
+          *(int *)((int)pvVar10 + 0xa4) = (int)_Var18;
+          if ((char)local_14 == '\0') {
+            FUN_1007d550(pvVar10,pCVar16);
+          }
+        }
+        CDataFile::PopPosition(param_1);
+        CDataFile::PushPosition(param_1);
+        bVar2 = CDataFile::GetNext(param_1,"TRIEDGES");
+        if (bVar2) {
+          _Var18 = CCFile::Pos(pCVar16);
+          *(int *)((int)pvVar10 + 0xa8) = (int)_Var18;
+          if ((char)local_14 == '\0') {
+            FUN_1007d5f0(pvVar10,pCVar16);
+          }
+        }
+        CDataFile::PopPosition(param_1);
+      }
+      ExceptionList = local_10;
+      return;
+    }
+    piVar3 = FUN_10004ec0(local_238);
+    local_8 = 0xb;
+    pcVar21 = "Corrupt model. (24)";
+LAB_10081875:
+    pcVar21 = (char *)(**(code **)(*piVar3 + 0x14))(pcVar21,0);
+    pcVar19 = "CTriangleMeshCore::Read";
+    goto LAB_10081884;
+  }
+  piVar7 = (int *)*piVar3;
+  if (piVar7 == (int *)0x0) {
+    iVar12 = 0;
+  }
+  else {
+    iVar12 = *piVar7;
+  }
+  if ((iVar9 < iVar12) && (-1 < iVar5)) goto code_r0x100814de;
+  piVar3 = FUN_10005990(local_30,"Index out of range. %d/%d");
+  local_8 = 9;
+  piVar7 = FUN_10004ec0(local_238);
+  local_8 = 10;
+LAB_10081414:
+  uVar8 = (**(code **)(*piVar3 + 0x14))(0);
+  pcVar21 = (char *)(**(code **)(*piVar7 + 0x14))(uVar8);
+  pcVar19 = "TThinArray::operator[]";
+LAB_10081884:
+  FUN_100060e0(local_850,(int *)0x0,pcVar19,pcVar21,pcVar4,uVar23);
+  puVar22 = local_850;
+LAB_1008189d:
+                    /* WARNING: Subroutine does not return */
+  __CxxThrowException_8(puVar22,&DAT_10159218);
+}
+
