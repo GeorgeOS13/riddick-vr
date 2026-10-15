@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "scenarios": [
+    {
+      "id": "mock-smoke",
+      "mode": "automated",
+      "title": "Headless render and interaction smoke test",
+      "markers": [],
+      "steps": ["Run the existing scripted mock-controller loop."],
+      "evidence": "At least one fresh rendered frame and a passing semi-play result."
+    },
+    {
+      "id": "reload",
+      "mode": "scripted",
+      "profile": "reload",
+      "title": "Receiver reload and ammo quad",
+      "markers": ["Tactical Gesture: MANUAL WEAPON RELOAD triggered"],
+      "steps": ["In the cell block/yard, equip a sidearm.", "Bring the off-hand to the receiver and perform a reload.", "Look at the receiver display and confirm live digits, not background, are visible."],
+      "evidence": "Fresh hook log plus an eye-frame capture; record whether the ammo digits fit the configured crop."
+    },
+    {
+      "id": "heal",
+      "mode": "scripted",
+      "profile": "heal",
+      "title": "NanoMED interaction",
+      "markers": ["NANOMED CARTRIDGE INSERTED INTO STATION RECEIVER"],
+      "steps": ["Draw a cartridge from the waist pouch.", "Present an open palm at the NanoMED station and insert the cartridge."],
+      "evidence": "Fresh hook log and a frame capture of the interaction."
+    },
+    {
+      "id": "climb-mantle",
+      "mode": "scripted",
+      "profile": "climb",
+      "title": "Ladder grab and mantle grace window",
+      "markers": ["LADDER RUNG GRABBED", "TWO-HANDED MANTLE / LEDGE PULL executed"],
+      "steps": ["Grip a rung above shoulder height and pull down to climb.", "At a ledge, pull with one hand, then the other within the mantle grace window."],
+      "evidence": "Fresh hook log; note whether the mantle-ready hint and completion pulse appear."
+    },
+    {
+      "id": "grab-throw",
+      "mode": "scripted",
+      "profile": "throw",
+      "title": "Grab, drag, and throw",
+      "markers": ["Physical Gesture: OBJECT THROW / PROPULSION executed"],
+      "steps": ["Grip a movable object or body.", "Move it while held, then release during a forward arm swing."],
+      "evidence": "Fresh hook log and a frame capture. Marker names may vary by object path."
+    },
+    {
+      "id": "melee",
+      "mode": "scripted",
+      "profile": "melee",
+      "title": "Physical melee strike",
+      "markers": ["Tactical Melee:"],
+      "steps": ["Equip fists or a melee weapon.", "Perform a deliberate forward strike, then verify guard disengages on the strike."],
+      "evidence": "Fresh hook log and a frame capture of the encounter."
+    },
+    {
+      "id": "grenade",
+      "mode": "scripted",
+      "profile": "grenade",
+      "title": "Grenade draw, prime, and throw",
+      "markers": ["GRENADE PIN PULLED / PRIMED", "GRENADE LAUNCHED / THROWN"],
+      "steps": ["Draw a grenade from the chest bandolier.", "Bring the off-hand to the grenade, grip to prime, then throw."],
+      "evidence": "Fresh hook log and a frame capture."
+    },
+    {
+      "id": "drone",
+      "mode": "scripted",
+      "profile": "drone",
+      "title": "Drone aim and disconnect",
+      "markers": ["EMERGENCY NEURAL EJECTION / DRONE DISCONNECT triggered"],
+      "steps": ["Enter a drone-control section.", "Move the aim controller independently of the HMD, then use the dual-stick disconnect gesture."],
+      "evidence": "Fresh hook log and a frame capture showing the drone view/reticle."
+    }
+  ]
+}

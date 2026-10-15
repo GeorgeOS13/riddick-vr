@@ -1,0 +1,87 @@
+"""Guard source-level invariants for the VR issue fixes and new interaction layers."""
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def require(condition, message):
+    if not condition:
+        raise AssertionError(message)
+
+
+def main():
+    camera = (ROOT / "src/hook/camera_hook.cpp").read_text(encoding="utf-8")
+    renderer = (ROOT / "src/hook/stereo_renderer.cpp").read_text(encoding="utf-8")
+    hands = (ROOT / "src/hook/vr_hand_renderer.cpp").read_text(encoding="utf-8")
+    hand_header = (ROOT / "src/hook/vr_hand_renderer.h").read_text(encoding="utf-8")
+    ik_header = (ROOT / "src/hook/arm_ik.h").read_text(encoding="utf-8")
+    host = (ROOT / "src/host/openxr_manager.cpp").read_text(encoding="utf-8")
+    host_main = (ROOT / "src/host/main.cpp").read_text(encoding="utf-8")
+    action_map = (ROOT / "src/hook/vr_action_map.h").read_text(encoding="utf-8")
+    stance = (ROOT / "src/hook/combat_stance.h").read_text(encoding="utf-8")
+    dialogue = (ROOT / "src/hook/dialogue_navigation.h").read_text(encoding="utf-8")
+    config = (ROOT / "src/hook/vr_config.cpp").read_text(encoding="utf-8")
+
+    require("vrState.cinemaMode = false" not in camera,
+            "camera update must not override the renderer's cinema decision")
+    require("m_sharedState.cinemaMode = isCinema;" in renderer and
+            "!OpenGLProxy::Has3DThisFrame() || OpenGLProxy::HasMenuCursor()" in renderer,
+            "renderer must select cinema for non-3D frames/menu cursor")
+    require("if (isCinema)" in renderer and "ScanActiveRegion(srcX, srcY, srcW, srcH);" in renderer,
+            "cinema fit and gameplay active-region crop branches must remain")
+
+    require("OpenGLProxy::Has3DGameplayProjection())" in camera and
+            "st.accumulatedLookX += mouseDeltaX;" in camera and
+            "st.accumulatedLookY += mouseDeltaY;" in camera and
+            "s_headlook.accumulatedLookX = 0.0f;" in camera,
+            "head-look deltas must accumulate in gameplay and discard pre-gameplay menu motion")
+
+    require("glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)" in hands and
+            "s_gl.glColor4f(r, g, b, f)" in hands and "GL_CURRENT_BIT" in hands,
+            "hand fade must use restored alpha blending rather than dark opaque geometry")
+
+    require(camera.count("st.lastPullActivityTime = now;") >= 2 and
+            camera.count("st.idleHintFired = false;") >= 2 and
+            "constexpr DWORD MANTLE_GRACE_MS = 180;" in camera and
+            "SetLadderCue(leftLadderGlow, rightLadderGlow);" in camera and
+            "void VRHandRenderer::SetLadderCue" in hands,
+            "ladder grab must reset its idle timer and publish the mantle visual cue")
+
+    require(all(key in host_main for key in ("AmmoQuadCropX", "AmmoQuadCropY", "AmmoQuadCropW", "AmmoQuadCropH")) and
+            all(key in host for key in ("m_ammoQuadCropX", "m_ammoQuadCropY", "m_ammoQuadCropW", "m_ammoQuadCropH")) and
+            'if (!configPath.empty())' in renderer and
+            'cmdLine += " --config \\"' in renderer,
+            "host must load and apply all four configurable ammo crop coordinates")
+
+    require(all(token in stance for token in ("ENTER_THRESHOLD = 0.85f", "EXIT_THRESHOLD = 0.60f",
+                                               "ENTER_HOLD_MS = 100", "left.isConnected && right.isConnected")) and
+            "combatStance.active && !isClimbingActive" in camera and
+            "guardPoseDetected = combatStance.active" in camera,
+            "combat stance must use two-hand hysteresis and gate strikes/guard")
+    require("using VRArmIK::ClampWristOrientation" in hands and "MIN_ELBOW_ANGLE" in ik_header and
+            "arm_ik_tests.cpp" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8") and
+            "DrawArmSegment(shoulder, elbow" in hands and "m_lastIkFrame" in hand_header and
+            "ClampWristOrientation" in ik_header and "0.87266463f" in ik_header and
+            "DrawArticulatedFinger(side, 0, indexCurl" in hands,
+            "tracked hands must render constrained, frame-stable two-bone arms with analog fingers")
+    require(all(f"VRAction::{name}" in action_map for name in
+                ("Interact", "DialogueUp", "DialogueDown", "DialogueLeft", "DialogueRight")) and
+            "dialogueDeadzone" in config and "navMagnitude < deadzone * 0.55f" in camera and
+            "ChooseDialogueDirection" in camera and "ChooseDialogueDirection(" in dialogue and
+            "dialogue_navigation_tests.cpp" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8"),
+            "dialogue/navigation must route through the action map with an analog deadzone")
+    require("gripPose.linearVelocity" in host and "90.0f / frameSpan" in host and
+            "ApplyScenarioFrame(state, totalFrames);" in host,
+            "scripted mock trajectories must drive velocity-sensitive gestures")
+
+    print("[issue-fixes] source invariants passed (#40, #43-47, #52-54)")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except AssertionError as exc:
+        print(f"[issue-fixes] FAIL: {exc}", file=sys.stderr)
+        raise SystemExit(1)

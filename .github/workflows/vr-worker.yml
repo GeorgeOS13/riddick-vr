@@ -25,10 +25,28 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Build (x64 host + Win32 proxy)
         run: powershell -ExecutionPolicy Bypass -File ./tools/build-all.ps1 -Config Release
+      - name: VR math and combat-state tests (x64 + Win32)
+        shell: powershell
+        run: |
+          $ctest = (Get-Command ctest -ErrorAction SilentlyContinue).Source
+          if (-not $ctest) {
+            $ctest = 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\ctest.exe'
+          }
+          if (-not (Test-Path $ctest)) {
+            $ctest = 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\ctest.exe'
+          }
+          & $ctest --test-dir build/x64 -C Release --output-on-failure
+          if ($LASTEXITCODE -ne 0) { throw 'x64 VR tests failed' }
+          & $ctest --test-dir build/x86 -C Release --output-on-failure
+          if ($LASTEXITCODE -ne 0) { throw 'Win32 VR tests failed' }
       - name: REA address-table self-test
         run: python tools/validate_addresses.py
       - name: Hook-init regression test (GH #42)
         run: python tools/verify_hook_init.py
+      - name: Scenario manifest validation (GH #48)
+        run: python tools/scenario_tests.py --check
+      - name: VR issue regression invariants (#40, #43-47)
+        run: python tools/verify_reported_fixes.py
       - name: Verify 368-symbol OpenGL forwarder table intact
         shell: powershell
         run: |

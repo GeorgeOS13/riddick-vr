@@ -58,6 +58,7 @@ void LoadVRConfig() {
         cfg.smoothTurnSpeed = ClampF(ReadFloat(iniPath, "SmoothTurnSpeed", cfg.smoothTurnSpeed), 1.0f, 60.0f);
         cfg.moveDeadzone = ClampF(ReadFloat(iniPath, "MoveDeadzone", cfg.moveDeadzone), 0.05f, 0.60f);
         cfg.turnDeadzone = ClampF(ReadFloat(iniPath, "TurnDeadzone", cfg.turnDeadzone), 0.05f, 0.60f);
+        cfg.dialogueDeadzone = ClampF(ReadFloat(iniPath, "DialogueDeadzone", cfg.dialogueDeadzone), 0.15f, 0.80f);
         cfg.lookSensitivityYaw = ClampF(ReadFloat(iniPath, "LookSensitivityYaw", cfg.lookSensitivityYaw), 50.0f, 2000.0f);
         cfg.lookSensitivityPitch = ClampF(ReadFloat(iniPath, "LookSensitivityPitch", cfg.lookSensitivityPitch), 50.0f, 2000.0f);
         cfg.comfortEnabled = ReadInt(iniPath, "ComfortEnabled", cfg.comfortEnabled) ? 1 : 0;

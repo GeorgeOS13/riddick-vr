@@ -2,6 +2,10 @@
 #include "logging.h"
 #include "opengl_proxy.h"
 #include "vr_config.h"
+#include "vr_hand_renderer.h"
+#include "vr_action_map.h"
+#include "combat_stance.h"
+#include "dialogue_navigation.h"
 #include "gesture_tap.h"
 #include <algorithm>
 #include <cmath>
@@ -45,6 +49,8 @@ static bool s_physicalBlockEngaged = false;
 static bool s_isAimingOrBlocking = false;
 static RiddickVRTrackedPose s_stabilizedAimPose{};
 static bool s_hasStabilizedPose = false;
+
+static CombatStanceState s_combatStance;
 
 
 bool CameraHook::Initialize() {
@@ -197,6 +203,16 @@ static void SendKeyTap(WORD vk) {
     SendKey(vk, true);
     Sleep(15);
     SendKey(vk, false);
+}
+
+static void SendAction(VRAction action, bool isDown) {
+    WORD key = LegacyKeyForAction(action);
+    if (key) SendKey(key, isDown);
+}
+
+static void SendActionTap(VRAction action) {
+    WORD key = LegacyKeyForAction(action);
+    if (key) SendKeyTap(key);
 }
 // NOTE (merge A+B+C): SendKey/SendKeyTap stay guarded here (GH #33); gesture_tap.{h,cpp}
 // provides debounced SendGestureTap which routes through its own SendKey copy -
@@ -3450,6 +3466,8 @@ static LadderIntent UpdateLadder(LadderState& st, DWORD now,
         if (leftLocal.y > 0.32f && (leftLocal.z >= -0.55f && leftLocal.z <= -0.16f) &&
             leftGrip > 0.5f && leftTouchEngaged && !physicalBlockEngaged) {
             st.leftHoldingRung = true;
+            st.lastPullActivityTime = now;
+            st.idleHintFired = false;
             out.leftGrabbed = true;
             out.leftGrabY = leftLocal.y;
             out.leftGrabZ = leftLocal.z;
@@ -3465,6 +3483,8 @@ static LadderIntent UpdateLadder(LadderState& st, DWORD now,
         if (rightLocal.y > 0.32f && (rightLocal.z >= -0.55f && rightLocal.z <= -0.16f) &&
             rightGrip > 0.5f && rightTouchEngaged && !physicalBlockEngaged) {
             st.rightHoldingRung = true;
+            st.lastPullActivityTime = now;
+            st.idleHintFired = false;
             out.rightGrabbed = true;
             out.rightGrabY = rightLocal.y;
             out.rightGrabZ = rightLocal.z;
@@ -3830,6 +3850,23 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // input mapping section. Default (southpaw=0): dom=right, off=left.
     const RiddickVRControllerInput& domCtrl = g_vrConfig.southpaw ? vrState.leftController : vrState.rightController;
     const RiddickVRControllerInput& offCtrl = g_vrConfig.southpaw ? vrState.rightController : vrState.leftController;
+    CombatStanceIntent combatStance = UpdateCombatStance(s_combatStance,
+        vrState.leftController, vrState.rightController, static_cast<uint32_t>(now));
+    if (combatStance.entered) {
+        VR_LOG_INFO("Combat Stance: COMBAT MODE entered (both triggers held)");
+        HapticRequest(0, 0.35f, kHapticUi);
+        HapticRequest(1, 0.35f, kHapticUi);
+    }
+    if (combatStance.exited) {
+        VR_LOG_INFO("Combat Stance: EXPLORATION MODE restored");
+        if (s_melee.currentBlockEngaged) {
+            SendMouseClick(false, false);
+            s_melee.currentBlockEngaged = false;
+        }
+        s_physicalBlockEngaged = false;
+        s_melee.guardPoseHoldTimer = 0;
+        s_melee.guardPoseReleaseTimer = 0;
+    }
     static uint32_t s_prevButtons = 0;
     static bool s_wasIn3D = false;
 
@@ -3879,8 +3916,14 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         // GH #45: use the latching Has3DGameplayProjection() instead of the
         // per-frame Has3DThisFrame() — the latter caused judder by silently
         // dropping look deltas during brief ortho-HUD passes within gameplay.
-        if ((lookIntent.moveX != 0 || lookIntent.moveY != 0) && OpenGLProxy::Has3DGameplayProjection()) {
-            SendMouseMove(lookIntent.moveX, lookIntent.moveY); // GH #33: SendInput helper
+        if (OpenGLProxy::Has3DGameplayProjection()) {
+            if (lookIntent.moveX != 0 || lookIntent.moveY != 0)
+                SendMouseMove(lookIntent.moveX, lookIntent.moveY); // GH #33: SendInput helper
+        } else {
+            // Keep the HMD baseline current in menus, but never bank menu
+            // motion for a large mouse jump when the first 3D frame arrives.
+            s_headlook.accumulatedLookX = 0.0f;
+            s_headlook.accumulatedLookY = 0.0f;
         }
         if (lookIntent.adsAcquired) {
             HapticRequest(1, (0.18f), kHapticUi); // Tactile detent on sight picture acquisition
@@ -3983,15 +4026,24 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         vrState.leftController.trigger, vrState.rightController.trigger,
         lVel.y, rVel.y,
         s_physicalBlockEngaged);
+    // Keep visual rung/mantle feedback synchronized with the gesture detector.
+    // During the grace window, highlight the other hand as the next pull target.
+    float leftLadderGlow = s_ladder.leftHoldingRung ? 0.45f : 0.0f;
+    float rightLadderGlow = s_ladder.rightHoldingRung ? 0.45f : 0.0f;
+    if (ladderIntent.mantleWindow) {
+        if (s_ladder.firstPullLeft) rightLadderGlow = 1.0f;
+        else leftLadderGlow = 1.0f;
+    }
+    VRHandRenderer::Instance().SetLadderCue(leftLadderGlow, rightLadderGlow);
     if (ladderIntent.leftGrabbed) {
         VR_LOG_INFO("Physical Gesture: LADDER RUNG GRABBED (Left hand, Y: %.2fm, Z: %.2fm)", ladderIntent.leftGrabY, ladderIntent.leftGrabZ);
         HapticRequest(0, 0.35f, kHapticUi); // GH #32
-        SendKeyTap('E');
+        SendActionTap(VRAction::Interact);
     }
     if (ladderIntent.rightGrabbed) {
         VR_LOG_INFO("Physical Gesture: LADDER RUNG GRABBED (Right hand, Y: %.2fm, Z: %.2fm)", ladderIntent.rightGrabY, ladderIntent.rightGrabZ);
         HapticRequest(1, 0.35f, kHapticUi); // GH #32
-        SendKeyTap('E');
+        SendActionTap(VRAction::Interact);
     }
 
     // Two-Handed Mantle / Ledge Pull (GH #47): pull down with one hand, then
@@ -4116,10 +4168,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (s_ladder.climbUp) wantW = true;
     if (s_ladder.climbDown) wantS = true;
 
-    if (wantW != s_wPressed) { SendKey('W', wantW); s_wPressed = wantW; }
-    if (wantS != s_sPressed) { SendKey('S', wantS); s_sPressed = wantS; }
-    if (wantA != s_aPressed) { SendKey('A', wantA); s_aPressed = wantA; }
-    if (wantD != s_dPressed) { SendKey('D', wantD); s_dPressed = wantD; }
+    if (wantW != s_wPressed) { SendAction(VRAction::MoveForward, wantW); s_wPressed = wantW; }
+    if (wantS != s_sPressed) { SendAction(VRAction::MoveBackward, wantS); s_sPressed = wantS; }
+    if (wantA != s_aPressed) { SendAction(VRAction::MoveLeft, wantA); s_aPressed = wantA; }
+    if (wantD != s_dPressed) { SendAction(VRAction::MoveRight, wantD); s_dPressed = wantD; }
 
     // Left Thumbstick Click Sprint & Outer Deflection Run (ADR 0391)
     static bool s_sprintActive = false;
@@ -4181,31 +4233,25 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // OS cursor visible) so right-stick Y never leaks arrows during gameplay;
     // left-stick Y restored as an OR source for menu navigation.
     {
-        static bool s_stickYUpArmed = true, s_stickYDownArmed = true;
+        static int s_dialogueDirection = 0;
         bool menuMode = !has3D || cursorShowing;
-        float stickRY = vrState.rightController.thumbstickY;
-        float stickLY = vrState.leftController.thumbstickY;
-        float navY = (fabsf(stickLY) > fabsf(stickRY)) ? stickLY : stickRY;
-        constexpr float MENU_STICK_THRESHOLD = 0.50f;
+        float leftX = vrState.leftController.thumbstickX;
+        float leftY = vrState.leftController.thumbstickY;
+        float rightX = vrState.rightController.thumbstickX;
+        float rightY = vrState.rightController.thumbstickY;
+        const float deadzone = g_vrConfig.dialogueDeadzone;
+        DialogueDirection direction = ChooseDialogueDirection(leftX, leftY, rightX, rightY, deadzone);
+        float navMagnitude = (std::max)(sqrtf(leftX * leftX + leftY * leftY),
+                                        sqrtf(rightX * rightX + rightY * rightY));
 
-        if (!menuMode) {
-            s_stickYUpArmed = true;
-            s_stickYDownArmed = true;
-        } else if (navY > MENU_STICK_THRESHOLD) {
-            if (s_stickYUpArmed) {
-                s_stickYUpArmed = false;
-                SendKeyTap(VK_UP);
-                HapticRequest(1, (0.20f), kHapticAmbient);
-            }
-        } else if (navY < -MENU_STICK_THRESHOLD) {
-            if (s_stickYDownArmed) {
-                s_stickYDownArmed = false;
-                SendKeyTap(VK_DOWN);
-                HapticRequest(1, (0.20f), kHapticAmbient);
-            }
-        } else if (fabsf(navY) < 0.25f) {
-            s_stickYUpArmed = true;
-            s_stickYDownArmed = true;
+        if (!menuMode || navMagnitude < deadzone * 0.55f) {
+            s_dialogueDirection = 0;
+        } else if (direction != DialogueDirection::Neutral && static_cast<int>(direction) != s_dialogueDirection) {
+            s_dialogueDirection = static_cast<int>(direction);
+            const VRAction actions[] = { VRAction::DialogueUp, VRAction::DialogueDown,
+                                         VRAction::DialogueLeft, VRAction::DialogueRight };
+            SendActionTap(actions[s_dialogueDirection - 1]);
+            HapticRequest(1, 0.20f, kHapticAmbient);
         }
     }
 
@@ -4230,7 +4276,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     DWORD finisherAtEntry = s_melee.lastFinisherTime;
 
     // 5. Physical Melee Combat Gestures (Jabs, Hooks, Uppercuts, Ulak Cross-Slashes, Shiv Executions, Counter-Parries)
-    if (!isClimbingActive && (now - s_melee.lastPunchTime > 260)) {
+    if (combatStance.active && !isClimbingActive && (now - s_melee.lastPunchTime > 260)) {
         // GH #17 step 9: counter/disarm + strike-gate detection delegated to
         // UpdateMeleeCounters (explicit MeleeState, no behavior change).
         MeleeCounterIntent meleeCounters = UpdateMeleeCounters(s_melee, now,
@@ -8120,7 +8166,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     bool handsSteady = (rSpeed < 1.4f && lSpeed < 1.4f);
     bool notPunching = (now - s_melee.lastPunchTime > 120) && (now - s_melee.lastFinisherTime > 120); // GH #31
 
-    bool guardPoseDetected = !isClimbingActive && chinLevel && inFrontOfFace && handsClose && handsSteady && notPunching;
+    bool guardPoseDetected = combatStance.active && !isClimbingActive && chinLevel &&
+                             inFrontOfFace && handsClose && handsSteady && notPunching;
 
     // Temporal Hysteresis & Debouncing:
     // Require guard pose to hold for ~40ms to engage
@@ -8962,8 +9009,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
     // BUTTON A -> Primary Interact / Use / Talk / Climb / Open ('E') + Dialogue Confirm (VK_RETURN)
     if (buttonsIntent.aChanged) {
-        SendKey('E', buttonsIntent.aDown);
-        SendKey(VK_RETURN, buttonsIntent.aDown);
+        SendAction(VRAction::Interact, buttonsIntent.aDown);
+        SendAction(VRAction::Confirm, buttonsIntent.aDown);
         if (buttonsIntent.aDown) HapticRequest(1, (0.35f), kHapticUi);
     }
 

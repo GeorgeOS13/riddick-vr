@@ -1,0 +1,18 @@
+{
+  "name": "reload",
+  "description": "Walk in, receiver reload, waist-pouch reload, power-cell eject. HMD pinned forward.",
+  "markers": ["MANUAL WEAPON RELOAD", "Tactical Gesture"],
+  "keys": [
+    {"frame": 0, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.5, "ltrig": 0.1, "lbtn": 384, "rx": 0.20, "ry": 1.20, "rz": -0.30, "rgrip": 0.7, "rtrig": 0.1, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.85, "stickRX": 0.0, "hyaw": 0.0, "hpitch": 0.0},
+    {"frame": 60, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.5, "ltrig": 0.1, "lbtn": 384, "rx": 0.20, "ry": 1.20, "rz": -0.30, "rgrip": 0.7, "rtrig": 0.1, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.85, "stickRX": 0.0, "hyaw": 0.0, "hpitch": 0.0},
+    {"frame": 80, "lx": 0.05, "ly": 1.10, "lz": -0.30, "lgrip": 0.8, "ltrig": 0.1, "lbtn": 384, "rx": 0.20, "ry": 1.20, "rz": -0.30, "rgrip": 0.7, "rtrig": 0.1, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0, "hyaw": 0.0, "hpitch": 0.0},
+    {"frame": 95, "lx": 0.12, "ly": 1.30, "lz": -0.32, "lgrip": 0.8, "ltrig": 0.1, "lbtn": 384, "rx": 0.20, "ry": 1.20, "rz": -0.30, "rgrip": 0.7, "rtrig": 0.1, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0, "hyaw": 0.0, "hpitch": 0.0},
+    {"frame": 110, "lx": 0.12, "ly": 1.30, "lz": -0.32, "lgrip": 0.8, "ltrig": 0.1, "lbtn": 384, "rx": 0.20, "ry": 1.20, "rz": -0.30, "rgrip": 0.7, "rtrig": 0.1, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0, "hyaw": 0.0, "hpitch": 0.0},
+    {"frame": 130, "lx": -0.25, "ly": 1.05, "lz": -0.25, "lgrip": 0.85, "ltrig": 0.1, "lbtn": 384, "rx": 0.20, "ry": 1.20, "rz": -0.30, "rgrip": 0.7, "rtrig": 0.1, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0, "hyaw": 0.0, "hpitch": 0.0},
+    {"frame": 150, "lx": -0.25, "ly": 1.05, "lz": -0.25, "lgrip": 0.85, "ltrig": 0.1, "lbtn": 384, "rx": 0.20, "ry": 1.20, "rz": -0.30, "rgrip": 0.7, "rtrig": 0.1, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0, "hyaw": 0.0, "hpitch": 0.0},
+    {"frame": 165, "lx": 0.12, "ly": 1.35, "lz": -0.32, "lgrip": 0.8, "ltrig": 0.1, "lbtn": 384, "rx": 0.20, "ry": 1.20, "rz": -0.30, "rgrip": 0.7, "rtrig": 0.1, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0, "hyaw": 0.0, "hpitch": 0.0},
+    {"frame": 175, "lx": 0.12, "ly": 0.95, "lz": -0.32, "lgrip": 0.8, "ltrig": 0.1, "lbtn": 384, "rx": 0.20, "ry": 1.20, "rz": -0.30, "rgrip": 0.7, "rtrig": 0.1, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0, "hyaw": 0.0, "hpitch": 0.0},
+    {"frame": 200, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.5, "ltrig": 0.1, "lbtn": 384, "rx": 0.20, "ry": 1.20, "rz": -0.30, "rgrip": 0.7, "rtrig": 0.1, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0, "hyaw": 0.0, "hpitch": 0.0},
+    {"frame": 260, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.5, "ltrig": 0.1, "lbtn": 384, "rx": 0.20, "ry": 1.20, "rz": -0.30, "rgrip": 0.7, "rtrig": 0.1, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0, "hyaw": 0.0, "hpitch": 0.0}
+  ]
+}

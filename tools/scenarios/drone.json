@@ -1,0 +1,13 @@
+{
+  "name": "drone",
+  "description": "Move aim hands independently, then press both thumbsticks to disconnect the drone uplink.",
+  "markers": ["EMERGENCY NEURAL EJECTION / DRONE DISCONNECT triggered"],
+  "keys": [
+    {"frame": 0, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.50, "ltrig": 0.1, "lbtn": 384, "rx": 0.20, "ry": 1.20, "rz": -0.30, "rgrip": 0.50, "rtrig": 0.1, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0},
+    {"frame": 40, "lx": -0.15, "ly": 1.30, "lz": -0.35, "lgrip": 0.50, "ltrig": 0.1, "lbtn": 384, "rx": 0.25, "ry": 1.10, "rz": -0.25, "rgrip": 0.50, "rtrig": 0.1, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0},
+    {"frame": 80, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.50, "ltrig": 0.1, "lbtn": 384, "rx": 0.20, "ry": 1.20, "rz": -0.30, "rgrip": 0.50, "rtrig": 0.1, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0},
+    {"frame": 90, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.50, "ltrig": 0.1, "lbtn": 400, "rx": 0.20, "ry": 1.20, "rz": -0.30, "rgrip": 0.50, "rtrig": 0.1, "rbtn": 416, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0},
+    {"frame": 110, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.50, "ltrig": 0.1, "lbtn": 400, "rx": 0.20, "ry": 1.20, "rz": -0.30, "rgrip": 0.50, "rtrig": 0.1, "rbtn": 416, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0},
+    {"frame": 130, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.50, "ltrig": 0.1, "lbtn": 384, "rx": 0.20, "ry": 1.20, "rz": -0.30, "rgrip": 0.50, "rtrig": 0.1, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0}
+  ]
+}

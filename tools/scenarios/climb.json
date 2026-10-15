@@ -1,0 +1,18 @@
+{
+  "name": "climb",
+  "description": "Overhead rung grabs, alternating pull-downs, dual-pull mantle. HMD pinned forward.",
+  "markers": ["LADDER RUNG GRABBED", "MANTLE", "Climb Hint"],
+  "keys": [
+    {"frame": 0, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.1, "ltrig": 0.3, "lbtn": 384, "rx": 0.20, "ry": 1.20, "rz": -0.30, "rgrip": 0.1, "rtrig": 0.3, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.85, "stickRX": 0.0, "hyaw": 0.0, "hpitch": 0.0},
+    {"frame": 60, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.1, "ltrig": 0.3, "lbtn": 384, "rx": 0.20, "ry": 1.20, "rz": -0.30, "rgrip": 0.1, "rtrig": 0.3, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.85, "stickRX": 0.0, "hyaw": 0.0, "hpitch": 0.0},
+    {"frame": 80, "lx": -0.15, "ly": 2.10, "lz": -0.35, "lgrip": 0.85, "ltrig": 0.3, "lbtn": 384, "rx": 0.15, "ry": 2.10, "rz": -0.35, "rgrip": 0.85, "rtrig": 0.3, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0, "hyaw": 0.0, "hpitch": 0.0},
+    {"frame": 100, "lx": -0.15, "ly": 2.10, "lz": -0.35, "lgrip": 0.85, "ltrig": 0.3, "lbtn": 384, "rx": 0.15, "ry": 2.10, "rz": -0.35, "rgrip": 0.85, "rtrig": 0.3, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0, "hyaw": 0.0, "hpitch": 0.0},
+    {"frame": 115, "lx": -0.15, "ly": 1.70, "lz": -0.35, "lgrip": 0.85, "ltrig": 0.3, "lbtn": 384, "rx": 0.15, "ry": 2.10, "rz": -0.35, "rgrip": 0.85, "rtrig": 0.3, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0, "hyaw": 0.0, "hpitch": 0.0},
+    {"frame": 130, "lx": -0.15, "ly": 1.70, "lz": -0.35, "lgrip": 0.85, "ltrig": 0.3, "lbtn": 384, "rx": 0.15, "ry": 1.70, "rz": -0.35, "rgrip": 0.85, "rtrig": 0.3, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0, "hyaw": 0.0, "hpitch": 0.0},
+    {"frame": 145, "lx": -0.15, "ly": 2.10, "lz": -0.35, "lgrip": 0.85, "ltrig": 0.3, "lbtn": 384, "rx": 0.15, "ry": 2.10, "rz": -0.35, "rgrip": 0.85, "rtrig": 0.3, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0, "hyaw": 0.0, "hpitch": 0.0},
+    {"frame": 160, "lx": -0.15, "ly": 2.10, "lz": -0.35, "lgrip": 0.85, "ltrig": 0.3, "lbtn": 384, "rx": 0.15, "ry": 2.10, "rz": -0.35, "rgrip": 0.85, "rtrig": 0.3, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0, "hyaw": 0.0, "hpitch": 0.0},
+    {"frame": 175, "lx": -0.15, "ly": 1.70, "lz": -0.35, "lgrip": 0.85, "ltrig": 0.3, "lbtn": 384, "rx": 0.15, "ry": 1.70, "rz": -0.35, "rgrip": 0.85, "rtrig": 0.3, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0, "hyaw": 0.0, "hpitch": 0.0},
+    {"frame": 200, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.5, "ltrig": 0.1, "lbtn": 384, "rx": 0.20, "ry": 1.20, "rz": -0.30, "rgrip": 0.5, "rtrig": 0.1, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0, "hyaw": 0.0, "hpitch": 0.0},
+    {"frame": 300, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.5, "ltrig": 0.1, "lbtn": 384, "rx": 0.20, "ry": 1.20, "rz": -0.30, "rgrip": 0.5, "rtrig": 0.1, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0, "hyaw": 0.0, "hpitch": 0.0}
+  ]
+}

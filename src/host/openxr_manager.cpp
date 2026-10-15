@@ -1,6 +1,7 @@
 #include "openxr_manager.h"
 #include <iostream>
 #include <sstream>
+#include <fstream>
 #include <iomanip>
 #include <chrono>
 #include <thread>
@@ -1288,10 +1289,10 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
                             weaponAmmoQuadLayer.subImage.swapchain = m_swapchains[0].handle;
 
                             // Crop bottom-right weapon ammo / clip indicator from swapchain
-                            int32_t ammoX = static_cast<int32_t>(m_swapchains[0].width * 0.75f);
-                            int32_t ammoY = static_cast<int32_t>(m_swapchains[0].height * 0.75f);
-                            int32_t ammoW = static_cast<int32_t>(m_swapchains[0].width * 0.23f);
-                            int32_t ammoH = static_cast<int32_t>(m_swapchains[0].height * 0.23f);
+                            int32_t ammoX = static_cast<int32_t>(m_swapchains[0].width * m_ammoQuadCropX);
+                            int32_t ammoY = static_cast<int32_t>(m_swapchains[0].height * m_ammoQuadCropY);
+                            int32_t ammoW = static_cast<int32_t>(m_swapchains[0].width * m_ammoQuadCropW);
+                            int32_t ammoH = static_cast<int32_t>(m_swapchains[0].height * m_ammoQuadCropH);
                             weaponAmmoQuadLayer.subImage.imageRect.offset = { ammoX, ammoY };
                             weaponAmmoQuadLayer.subImage.imageRect.extent = { ammoW, ammoH };
 
@@ -1397,6 +1398,134 @@ bool OpenXRManager::SaveTextureToBMP(ID3D11Device* device, ID3D11DeviceContext* 
     return (fp != nullptr);
 }
 
+// GH #48: file-driven scenario trajectories. Strict flat-JSON subset, no
+// external deps: {"name":..,"markers":[..],"keys":[{frame,lx,ly,lz,lgrip,
+// ltrig,lbtn,rx,ry,rz,rgrip,rtrig,rbtn,stickLX,stickLY,stickRX,hyaw,hpitch}]}.
+// Poses are WORLD coords (mock HMD at 1.70m, identity yaw unless hyaw set).
+bool OpenXRManager::LoadScenario(const std::string& path) {
+    m_scenarioKeys.clear();
+    m_scenarioLoaded = false;
+    std::ifstream f(path);
+    if (!f.good()) {
+        std::cout << "[Scenario] cannot open " << path << std::endl;
+        return false;
+    }
+    std::stringstream ss;
+    ss << f.rdbuf();
+    std::string text = ss.str();
+    size_t ka = text.find("\"keys\"");
+    if (ka == std::string::npos) {
+        std::cout << "[Scenario] no \"keys\" array in " << path << std::endl;
+        return false;
+    }
+    auto num = [&](const std::string& obj, const char* key, float& out) {
+        std::string pat = std::string("\"") + key + "\"";
+        size_t p = obj.find(pat);
+        if (p == std::string::npos) return false;
+        p = obj.find(':', p);
+        if (p == std::string::npos) return false;
+        try { out = std::stof(obj.substr(p + 1)); } catch (...) { return false; }
+        return true;
+    };
+    size_t pos = text.find('[', ka);
+    int count = 0;
+    while (pos != std::string::npos) {
+        size_t o = text.find('{', pos);
+        size_t c = (o == std::string::npos) ? std::string::npos : text.find('}', o);
+        if (o == std::string::npos || c == std::string::npos) break;
+        std::string obj = text.substr(o, c - o + 1);
+        ScenarioKey k;
+        float v = 0;
+        bool ok = num(obj, "frame", v); k.frame = (uint32_t)v;
+        ok = num(obj, "lx", k.lx) && ok; ok = num(obj, "ly", k.ly) && ok;
+        ok = num(obj, "lz", k.lz) && ok; ok = num(obj, "lgrip", k.lgrip) && ok;
+        ok = num(obj, "ltrig", k.ltrig) && ok; ok = num(obj, "lbtn", v) && ok;
+        k.lbtn = (uint32_t)v;
+        ok = num(obj, "rx", k.rx) && ok; ok = num(obj, "ry", k.ry) && ok;
+        ok = num(obj, "rz", k.rz) && ok; ok = num(obj, "rgrip", k.rgrip) && ok;
+        ok = num(obj, "rtrig", k.rtrig) && ok; ok = num(obj, "rbtn", v) && ok;
+        k.rbtn = (uint32_t)v;
+        if (!num(obj, "stickLX", k.stickLX)) k.stickLX = 0;
+        if (!num(obj, "stickLY", k.stickLY)) k.stickLY = 0;
+        if (!num(obj, "stickRX", k.stickRX)) k.stickRX = 0;
+        if (!num(obj, "hyaw", k.hyaw)) k.hyaw = 999.0f;
+        if (!num(obj, "hpitch", k.hpitch)) k.hpitch = 999.0f;
+        if (!ok) {
+            std::cout << "[Scenario] bad keyframe #" << count << " in " << path << std::endl;
+            return false;
+        }
+        m_scenarioKeys.push_back(k);
+        count++;
+        pos = c + 1;
+        if (text[pos] == ']') break;
+    }
+    if (m_scenarioKeys.empty()) {
+        std::cout << "[Scenario] no keyframes in " << path << std::endl;
+        return false;
+    }
+    m_scenarioLoaded = true;
+    std::cout << "[Scenario] loaded " << path << " (" << count << " keys)" << std::endl;
+    return true;
+}
+
+void OpenXRManager::ApplyScenarioFrame(RiddickVRSharedState& state, uint32_t frame) {
+    if (!m_scenarioLoaded || m_scenarioKeys.empty()) return;
+    const ScenarioKey* a = &m_scenarioKeys.front();
+    const ScenarioKey* b = &m_scenarioKeys.back();
+    if (frame <= a->frame) { b = a; }
+    else if (frame >= b->frame) { a = b; }
+    else {
+        for (size_t i = 0; i + 1 < m_scenarioKeys.size(); ++i) {
+            if (m_scenarioKeys[i].frame <= frame && frame <= m_scenarioKeys[i + 1].frame) {
+                a = &m_scenarioKeys[i];
+                b = &m_scenarioKeys[i + 1];
+                break;
+            }
+        }
+    }
+    float t = (b->frame > a->frame) ? (float)(frame - a->frame) / (float)(b->frame - a->frame) : 0.0f;
+    auto lerp = [&](float x, float y) { return x + (y - x) * t; };
+    const float frameSpan = (b->frame > a->frame) ? static_cast<float>(b->frame - a->frame) : 0.0f;
+    auto velocity = [&](float x, float y) {
+        // Keyframe time is expressed in 90 Hz mock-host frames. Supply actual
+        // linear velocity so pull/strike/throw detectors see the scripted move.
+        return (frameSpan > 0.0f && frame >= a->frame && frame <= b->frame)
+            ? (y - x) * (90.0f / frameSpan) : 0.0f;
+    };
+    auto& L = state.leftController;
+    auto& R = state.rightController;
+    L.gripPose.position = { lerp(a->lx, b->lx), lerp(a->ly, b->ly), lerp(a->lz, b->lz) };
+    R.gripPose.position = { lerp(a->rx, b->rx), lerp(a->ry, b->ry), lerp(a->rz, b->rz) };
+    L.gripPose.linearVelocity = { velocity(a->lx, b->lx), velocity(a->ly, b->ly), velocity(a->lz, b->lz) };
+    R.gripPose.linearVelocity = { velocity(a->rx, b->rx), velocity(a->ry, b->ry), velocity(a->rz, b->rz) };
+    L.grip = lerp(a->lgrip, b->lgrip);
+    L.trigger = lerp(a->ltrig, b->ltrig);
+    R.grip = lerp(a->rgrip, b->rgrip);
+    R.trigger = lerp(a->rtrig, b->rtrig);
+    // Buttons/sticks snap (no interpolation for discrete inputs).
+    L.buttons = (t < 0.5f) ? a->lbtn : b->lbtn;
+    R.buttons = (t < 0.5f) ? a->rbtn : b->rbtn;
+    L.thumbstickX = (t < 0.5f) ? a->stickLX : b->stickLX;
+    L.thumbstickY = (t < 0.5f) ? a->stickLY : b->stickLY;
+    R.thumbstickX = (t < 0.5f) ? a->stickRX : b->stickRX;
+    L.aimPose = L.gripPose;
+    R.aimPose = R.gripPose;
+    // Fixed head unless keyframes steer it (999 = keep ambient oscillation).
+    float hyaw = lerp(a->hyaw, b->hyaw);
+    float hpitch = lerp(a->hpitch, b->hpitch);
+    if (hyaw < 900.0f || hpitch < 900.0f) {
+        if (hyaw > 900.0f) hyaw = 0.0f;
+        if (hpitch > 900.0f) hpitch = 0.0f;
+        float yaw = hyaw * 0.0174533f, pitch = hpitch * 0.0174533f;
+        float cy = cosf(yaw * 0.5f), sy = sinf(yaw * 0.5f);
+        float cp = cosf(pitch * 0.5f), sp = sinf(pitch * 0.5f);
+        state.hmdPose.orientation.x = cy * sp;
+        state.hmdPose.orientation.y = sy * cp;
+        state.hmdPose.orientation.z = -sy * sp;
+        state.hmdPose.orientation.w = cy * cp;
+    }
+}
+
 void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
     if (m_mockMode) {
         std::cout << "[Host] ========================================================\n";
@@ -1407,6 +1536,11 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
             CreateDirectoryA(m_dumpDir.c_str(), NULL);
         }
         std::cout << "[Host] ========================================================" << std::endl;
+
+        // GH #48: load file-driven scenario once (no rebuild needed for new ones).
+        if (!m_scenarioPath.empty() && !m_scenarioLoaded) {
+            LoadScenario(m_scenarioPath);
+        }
 
         m_recommendedWidth = 2496;
         m_recommendedHeight = 2688;
@@ -1521,8 +1655,12 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                 state.rightController.thumbstickX = 0.4f; // Turn slightly right
             }
 
-            // 4. Semi-play gesture scripting for hands interaction tests (reload / waist / NanoMED).
-            // Phases loop every 360 frames so self-test exercises visible-hands paths without a headset.
+            // 4. Semi-play gesture scripting (GH #48): file-driven scenario wins
+            // when one is loaded (tools/scenarios/*.json, --scenario flag);
+            // otherwise the legacy built-in 360-frame loop exercises hands.
+            if (m_scenarioLoaded) {
+                ApplyScenarioFrame(state, totalFrames);
+            } else {
             uint32_t phase = totalFrames % 360;
             if (phase >= 120 && phase < 180) {
                 // Reload: off-hand to weapon receiver (<0.18m) with grip + upward seating.
@@ -1549,6 +1687,7 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                 state.rightController.gripPose.position = { 0.15f, 1.45f, -0.55f };
                 state.rightController.grip = 0.90f;
             }
+            } // end legacy gesture loop
 
             ipcHost.WriteState(state);
 

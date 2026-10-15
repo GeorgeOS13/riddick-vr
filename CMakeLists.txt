@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.25)
 project(RiddickVR VERSION 0.1.0 LANGUAGES C CXX)
 
+include(CTest)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -39,6 +41,9 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4 AND RIDDICKVR_BUILD_PROXY)
         src/hook/stereo_renderer.h
         src/hook/vr_hand_renderer.cpp
         src/hook/vr_hand_renderer.h
+        src/hook/arm_ik.h
+        src/hook/combat_stance.h
+        src/hook/dialogue_navigation.h
         src/hook/camera_hook.cpp
         src/hook/camera_hook.h
         src/hook/vr_config.cpp
@@ -75,4 +80,26 @@ elseif(CMAKE_SIZEOF_VOID_P EQUAL 8 AND RIDDICKVR_BUILD_HOST)
         d3d11
         dxgi
     )
+endif()
+
+if(BUILD_TESTING)
+    add_executable(riddick_vr_arm_ik_tests tests/arm_ik_tests.cpp)
+    target_include_directories(riddick_vr_arm_ik_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
+    )
+    add_test(NAME arm_ik_constraints COMMAND riddick_vr_arm_ik_tests)
+
+    add_executable(riddick_vr_combat_stance_tests tests/combat_stance_tests.cpp)
+    target_include_directories(riddick_vr_combat_stance_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
+    )
+    add_test(NAME combat_stance_hysteresis COMMAND riddick_vr_combat_stance_tests)
+
+    add_executable(riddick_vr_dialogue_navigation_tests tests/dialogue_navigation_tests.cpp)
+    target_include_directories(riddick_vr_dialogue_navigation_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
+    )
+    add_test(NAME dialogue_navigation_deadzone COMMAND riddick_vr_dialogue_navigation_tests)
 endif()

@@ -45,6 +45,8 @@ static bool SpawnHostProcess() {
     // GH #26: never hardcode a developer machine path. Resolution order:
     // 1. RIDDICKVR_HOST env override, 2. hook DLL directory, 3. game EXE dir.
     std::string chosenHost = "";
+    std::string hookDir = "";
+    std::string gameDir = "";
     char envHost[MAX_PATH] = { 0 };
     if (GetEnvironmentVariableA("RIDDICKVR_HOST", envHost, MAX_PATH) > 0 &&
         GetFileAttributesA(envHost) != INVALID_FILE_ATTRIBUTES) {
@@ -60,30 +62,32 @@ static bool SpawnHostProcess() {
         return dir;
     };
 
-    if (chosenHost.empty()) {
-        // Hook DLL directory (this code runs inside opengl32.dll).
-        HMODULE hSelf = nullptr;
-        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                               reinterpret_cast<LPCSTR>(&SpawnHostProcess), &hSelf) && hSelf) {
-            char dllPath[MAX_PATH] = { 0 };
-            if (GetModuleFileNameA(hSelf, dllPath, MAX_PATH) > 0) {
-                std::string candidate = DirOf(dllPath) + "\\riddickvr-host.exe";
-                if (GetFileAttributesA(candidate.c_str()) != INVALID_FILE_ATTRIBUTES) {
+    // Resolve the hook directory even with an RIDDICKVR_HOST override so the
+    // host receives the same INI that LoadVRConfig uses in this DLL.
+    HMODULE hSelf = nullptr;
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCSTR>(&SpawnHostProcess), &hSelf) && hSelf) {
+        char dllPath[MAX_PATH] = { 0 };
+        if (GetModuleFileNameA(hSelf, dllPath, MAX_PATH) > 0) {
+            hookDir = DirOf(dllPath);
+            if (chosenHost.empty()) {
+                std::string candidate = hookDir + "\\riddickvr-host.exe";
+                if (GetFileAttributesA(candidate.c_str()) != INVALID_FILE_ATTRIBUTES)
                     chosenHost = candidate;
-                }
             }
         }
     }
 
-    std::string gameDir = "";
-    if (chosenHost.empty()) {
-        char modulePath[MAX_PATH] = { 0 };
-        GetModuleFileNameA(NULL, modulePath, MAX_PATH);
+    char modulePath[MAX_PATH] = { 0 };
+    if (GetModuleFileNameA(NULL, modulePath, MAX_PATH) > 0)
         gameDir = DirOf(modulePath);
-        std::string candidate = gameDir + "\\riddickvr-host.exe";
-        if (GetFileAttributesA(candidate.c_str()) != INVALID_FILE_ATTRIBUTES) {
-            chosenHost = candidate;
+    if (chosenHost.empty()) {
+        if (!gameDir.empty()) {
+            std::string candidate = gameDir + "\\riddickvr-host.exe";
+            if (GetFileAttributesA(candidate.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                chosenHost = candidate;
+            }
         }
     }
 
@@ -95,12 +99,24 @@ static bool SpawnHostProcess() {
     VR_LOG_INFO("Auto-launching OpenXR Host Companion: %s", chosenHost.c_str());
 
     std::string hostWorkingDir = chosenHost.substr(0, chosenHost.find_last_of("\\/"));
+    std::string configPath;
+    const std::string configDirs[] = { hookDir, gameDir };
+    for (const std::string& dir : configDirs) {
+        if (dir.empty()) continue;
+        std::string candidate = dir + "\\riddick_vr.ini";
+        if (GetFileAttributesA(candidate.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            configPath = candidate;
+            break;
+        }
+    }
 
     STARTUPINFOA si{};
     si.cb = sizeof(si);
     PROCESS_INFORMATION pi{};
 
     std::string cmdLine = "\"" + chosenHost + "\" --auto-exit-with-game";
+    if (!configPath.empty())
+        cmdLine += " --config \"" + configPath + "\"";
     std::vector<char> cmdLineBuf(cmdLine.begin(), cmdLine.end());
     cmdLineBuf.push_back('\0');
 

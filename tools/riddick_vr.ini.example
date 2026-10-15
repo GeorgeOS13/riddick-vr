@@ -5,6 +5,7 @@
 SnapAngleDeg=45        ; snap-turn step (15-90)
 SmoothTurnSpeed=20.0   ; smooth-turn curve gain (1-60)
 TurnDeadzone=0.20      ; right-stick smooth deadzone (0.05-0.60)
+DialogueDeadzone=0.50  ; menu/dialogue direction deadzone (0.15-0.80)
 ; --- Head look (GH #45) ---
 ; Gain matching HMD degrees to engine degrees. CALIBRATION: stand in-game,
 ; turn your head exactly 90 deg right. If the view turned MORE, lower both
@@ -26,3 +27,10 @@ WorldScale=1.0         ; tracking-space scale (0.5-2.0)
 Southpaw=0             ; left-dominant mapping
 ; --- Gestures (#15) ---
 GestureDebounceMs=180  ; per-action debounce (120-250)
+; --- Diegetic weapon ammo quad (#40) ---
+; Source rectangle as fractions of the rendered eye image. X/Y are top-left;
+; width/height are clamped so the crop stays inside the image.
+AmmoQuadCropX=0.75
+AmmoQuadCropY=0.75
+AmmoQuadCropW=0.23
+AmmoQuadCropH=0.23

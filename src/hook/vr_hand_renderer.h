@@ -19,9 +19,11 @@ public:
     void RenderHands(const RiddickVRSharedState& state, bool isLeftEye, uint32_t eyeWidth, uint32_t eyeHeight);
 
     // GH #46: per-hand fade factor 0..1 (1 = fully visible, 0 = faded out).
-    // Darkening path: output colors are multiplied by the fade factor toward
-    // dark (true alpha would need blending state; caller wires logic later).
+    // Per-hand opacity factor 0..1 (1 = fully visible, 0 = transparent).
     void SetHandFade(float leftFade, float rightFade);
+    // 0..1 fingertip cue: dim while holding a rung, bright for the hand expected
+    // to complete a mantle during the grace window.
+    void SetLadderCue(float leftCue, float rightCue);
 
 private:
     VRHandRenderer() = default;
@@ -42,10 +44,22 @@ private:
     // Geometry utility primitives (colors multiplied by active hand fade)
     void DrawBeveledBox(float x0, float y0, float z0, float x1, float y1, float z1, float r, float g, float b);
     void DrawTaperedCylinder(float z0, float r0, float z1, float r1, int slices, float r, float g, float b);
+    void DrawArmSegment(const RiddickVRVector3& start, const RiddickVRVector3& end,
+                        float startRadius, float endRadius, float r, float g, float b);
 
     float m_leftFade = 1.0f;
     float m_rightFade = 1.0f;
     float m_currentFade = 1.0f;
+    float m_leftLadderCue = 0.0f;
+    float m_rightLadderCue = 0.0f;
+    bool m_useAlphaFade = false;
+    uint32_t m_lastIkFrame = 0xFFFFFFFFu;
+    RiddickVRVector3 m_leftElbow{};
+    RiddickVRVector3 m_rightElbow{};
+    RiddickVRVector3 m_leftArmWrist{};
+    RiddickVRVector3 m_rightArmWrist{};
+    bool m_hasLeftElbow = false;
+    bool m_hasRightElbow = false;
 };
 
 } // namespace RiddickVR

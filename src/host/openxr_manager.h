@@ -46,6 +46,26 @@ public:
         m_maxFrames = maxFrames;
         m_dumpInterval = dumpInterval;
     }
+    // GH #48: file-driven scenario trajectories (tools/scenarios/*.json).
+    // New scenarios need no rebuild: host interpolates keyframes per frame.
+    struct ScenarioKey {
+        uint32_t frame = 0;
+        float lx = 0, ly = 0, lz = 0, lgrip = 0, ltrig = 0;
+        uint32_t lbtn = 0;
+        float rx = 0, ry = 0, rz = 0, rgrip = 0, rtrig = 0;
+        uint32_t rbtn = 0;
+        float stickLX = 0, stickLY = 0, stickRX = 0;
+        float hyaw = 0, hpitch = 0; // fixed head pose (deg); 999 = keep oscillation
+    };
+    void SetScenarioFile(const std::string& path) { m_scenarioPath = path; }
+    bool LoadScenario(const std::string& path);
+    void ApplyScenarioFrame(RiddickVRSharedState& state, uint32_t frame);
+    void SetAmmoQuadCrop(float x, float y, float width, float height) {
+        m_ammoQuadCropW = (width < 0.01f) ? 0.01f : (width > 1.0f ? 1.0f : width);
+        m_ammoQuadCropH = (height < 0.01f) ? 0.01f : (height > 1.0f ? 1.0f : height);
+        m_ammoQuadCropX = (x < 0.0f) ? 0.0f : (x > 1.0f - m_ammoQuadCropW ? 1.0f - m_ammoQuadCropW : x);
+        m_ammoQuadCropY = (y < 0.0f) ? 0.0f : (y > 1.0f - m_ammoQuadCropH ? 1.0f - m_ammoQuadCropH : y);
+    }
     bool IsMockMode() const { return m_mockMode; }
     static bool SaveTextureToBMP(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11Texture2D* texture, const std::string& filename);
 
@@ -131,6 +151,14 @@ private:
     std::string m_dumpDir;
     uint32_t m_maxFrames = 0;
     uint32_t m_dumpInterval = 10;
+    // GH #48 scenario playback.
+    std::string m_scenarioPath;
+    std::vector<ScenarioKey> m_scenarioKeys;
+    bool m_scenarioLoaded = false;
+    float m_ammoQuadCropX = 0.75f;
+    float m_ammoQuadCropY = 0.75f;
+    float m_ammoQuadCropW = 0.23f;
+    float m_ammoQuadCropH = 0.23f;
 
     // Function pointers loaded dynamically from openxr_loader.dll
     PFN_xrGetInstanceProcAddr xrGetInstanceProcAddr = nullptr;

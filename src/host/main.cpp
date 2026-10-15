@@ -2,8 +2,39 @@
 #include "ipc_bridge.h"
 #include <iostream>
 #include <windows.h>
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
 
 static RiddickVR::OpenXRManager* g_pManager = nullptr;
+
+static float ReadConfigFloat(const char* path, const char* key, float fallback) {
+    char value[64] = {};
+    if (GetPrivateProfileStringA("VR", key, "", value, sizeof(value), path) == 0 || value[0] == '\0')
+        return fallback;
+    char* end = nullptr;
+    float parsed = std::strtof(value, &end);
+    return (end == value || !std::isfinite(parsed)) ? fallback : parsed;
+}
+
+static std::string FindConfigPath(const std::string& requested) {
+    if (!requested.empty())
+        return GetFileAttributesA(requested.c_str()) != INVALID_FILE_ATTRIBUTES ? requested : std::string{};
+
+    char path[MAX_PATH] = {};
+    if (GetFileAttributesA("riddick_vr.ini") != INVALID_FILE_ATTRIBUTES)
+        return "riddick_vr.ini";
+
+    if (GetModuleFileNameA(nullptr, path, MAX_PATH) > 0) {
+        char* slash = std::strrchr(path, '\\');
+        if (slash) {
+            slash[1] = '\0';
+            strcat_s(path, MAX_PATH, "riddick_vr.ini");
+            if (GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) return path;
+        }
+    }
+    return {};
+}
 
 BOOL WINAPI ConsoleHandlerRoutine(DWORD dwCtrlType) {
     if (dwCtrlType == CTRL_C_EVENT || dwCtrlType == CTRL_CLOSE_EVENT) {
@@ -22,6 +53,10 @@ int main(int argc, char* argv[]) {
     bool autoExitWithGame = false;
     bool mockMode = false;
     std::string dumpDir = "";
+    std::string configPath = "";
+    std::string scenarioPath = "";
+    std::string scenarioName = "";
+    std::string scenarioDir = "";
     uint32_t maxFrames = 0;
     uint32_t dumpInterval = 10;
 
@@ -41,6 +76,14 @@ int main(int argc, char* argv[]) {
             maxFrames = static_cast<uint32_t>(std::stoul(argv[++i]));
         } else if (arg == "--dump-interval" && i + 1 < argc) {
             dumpInterval = static_cast<uint32_t>(std::stoul(argv[++i]));
+        } else if (arg == "--config" && i + 1 < argc) {
+            configPath = argv[++i];
+        } else if (arg == "--scenario-file" && i + 1 < argc) {
+            scenarioPath = argv[++i];
+        } else if (arg == "--scenario" && i + 1 < argc) {
+            scenarioName = argv[++i];
+        } else if (arg == "--scenario-dir" && i + 1 < argc) {
+            scenarioDir = argv[++i];
         } else if (arg == "--help" || arg == "-h") {
             std::cout << "Usage: riddickvr-host [OPTIONS]\n"
                       << "Options:\n"
@@ -50,6 +93,10 @@ int main(int argc, char* argv[]) {
                       << "  --dump-dir <PATH>       Directory to save test frame screenshots (BMP format)\n"
                       << "  --dump-interval <N>     Save screenshot every N frames (default: 10)\n"
                       << "  --max-frames <N>        Exit automatically after N rendered frames\n"
+                      << "  --config <PATH>         Read VR settings from this riddick_vr.ini\n"
+                      << "  --scenario-file <PATH>  Play a JSON mock-controller scenario\n"
+                      << "  --scenario <NAME>       Play tools/scenarios/<NAME>.json trajectory in mock mode\n"
+                      << "  --scenario-dir <PATH>   Scenario directory override\n"
                       << "  --verbose               Enable verbose debug logging\n"
                       << "  --help, -h              Show this help message\n";
             return 0;
@@ -78,8 +125,41 @@ int main(int argc, char* argv[]) {
     RiddickVR::OpenXRManager xrManager;
     g_pManager = &xrManager;
 
+    const std::string resolvedConfig = FindConfigPath(configPath);
+    if (!resolvedConfig.empty()) {
+        constexpr float defaultX = 0.75f, defaultY = 0.75f, defaultW = 0.23f, defaultH = 0.23f;
+        xrManager.SetAmmoQuadCrop(
+            ReadConfigFloat(resolvedConfig.c_str(), "AmmoQuadCropX", defaultX),
+            ReadConfigFloat(resolvedConfig.c_str(), "AmmoQuadCropY", defaultY),
+            ReadConfigFloat(resolvedConfig.c_str(), "AmmoQuadCropW", defaultW),
+            ReadConfigFloat(resolvedConfig.c_str(), "AmmoQuadCropH", defaultH));
+        std::cout << "[Host] Ammo quad crop config: " << resolvedConfig << std::endl;
+    } else if (!configPath.empty()) {
+        std::cerr << "[Host] WARNING: config file not found: " << configPath << " (using defaults)\n";
+    }
+
     if (mockMode) {
         xrManager.SetMockMode(true, dumpDir, maxFrames, dumpInterval);
+    }
+    if (!scenarioPath.empty()) {
+        xrManager.SetScenarioFile(scenarioPath);
+    }
+
+    // GH #48: resolve scenario file (name -> <scenario-dir>/<name>.json).
+    if (!scenarioName.empty()) {
+        std::string dir = scenarioDir;
+        if (dir.empty()) {
+            char mod[MAX_PATH] = {};
+            if (GetModuleFileNameA(nullptr, mod, MAX_PATH) > 0) {
+                std::string m(mod);
+                size_t p = m.find_last_of("\\/");
+                dir = (p == std::string::npos) ? "." : m.substr(0, p);
+                dir += "\\..\\..\\tools\\scenarios";
+            } else {
+                dir = "tools/scenarios";
+            }
+        }
+        xrManager.SetScenarioFile(dir + "\\" + scenarioName + ".json");
     }
 
     if (validateOnly) {

@@ -1,4 +1,5 @@
 #include "vr_hand_renderer.h"
+#include "arm_ik.h"
 #include "vr_config.h" // Track C #13: world scale
 #include "opengl_proxy.h"
 #include "logging.h"
@@ -6,6 +7,8 @@
 #include <algorithm>
 
 namespace RiddickVR {
+
+using VRArmIK::ClampWristOrientation;
 
 typedef void (APIENTRY *glPushAttrib_t)(GLbitfield mask);
 typedef void (APIENTRY *glPopAttrib_t)(void);
@@ -32,6 +35,8 @@ typedef void (APIENTRY *glEnd_t)(void);
 typedef void (APIENTRY *glVertex3f_t)(GLfloat x, GLfloat y, GLfloat z);
 typedef void (APIENTRY *glNormal3f_t)(GLfloat nx, GLfloat ny, GLfloat nz);
 typedef void (APIENTRY *glColor3f_t)(GLfloat red, GLfloat green, GLfloat blue);
+typedef void (APIENTRY *glColor4f_t)(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha);
+typedef void (APIENTRY *glBlendFunc_t)(GLenum sfactor, GLenum dfactor);
 typedef void (APIENTRY *glRotatef_t)(GLfloat angle, GLfloat x, GLfloat y, GLfloat z);
 typedef void (APIENTRY *glTranslatef_t)(GLfloat x, GLfloat y, GLfloat z);
 typedef void (APIENTRY *glGetIntegerv_t)(GLenum pname, GLint *params);
@@ -65,6 +70,8 @@ struct GLDispatch {
     glVertex3f_t glVertex3f = nullptr;
     glNormal3f_t glNormal3f = nullptr;
     glColor3f_t glColor3f = nullptr;
+    glColor4f_t glColor4f = nullptr;
+    glBlendFunc_t glBlendFunc = nullptr;
     glRotatef_t glRotatef = nullptr;
     glTranslatef_t glTranslatef = nullptr;
     glGetIntegerv_t glGetIntegerv = nullptr;
@@ -107,6 +114,8 @@ struct GLDispatch {
         LOAD_GL(glVertex3f);
         LOAD_GL(glNormal3f);
         LOAD_GL(glColor3f);
+        LOAD_GL(glColor4f);
+        LOAD_GL(glBlendFunc);
         LOAD_GL(glRotatef);
         LOAD_GL(glTranslatef);
         LOAD_GL(glGetIntegerv);
@@ -169,6 +178,58 @@ void VRHandRenderer::SetHandFade(float leftFade, float rightFade) {
     m_rightFade = (std::clamp)(rightFade, 0.0f, 1.0f);
 }
 
+static RiddickVRVector3 Add3(const RiddickVRVector3& a, const RiddickVRVector3& b) {
+    return { a.x + b.x, a.y + b.y, a.z + b.z };
+}
+
+static RiddickVRVector3 Sub3(const RiddickVRVector3& a, const RiddickVRVector3& b) {
+    return { a.x - b.x, a.y - b.y, a.z - b.z };
+}
+
+static RiddickVRVector3 Scale3(const RiddickVRVector3& v, float s) {
+    return { v.x * s, v.y * s, v.z * s };
+}
+
+static RiddickVRVector3 RotateByQuaternion(const RiddickVRVector3& v, const RiddickVRQuaternion& input) {
+    float x = input.x, y = input.y, z = input.z, w = input.w;
+    float norm = sqrtf(x * x + y * y + z * z + w * w);
+    if (norm < 0.0001f) return v;
+    x /= norm; y /= norm; z /= norm; w /= norm;
+    RiddickVRVector3 t = { 2.0f * (y * v.z - z * v.y),
+                           2.0f * (z * v.x - x * v.z),
+                           2.0f * (x * v.y - y * v.x) };
+    return { v.x + w * t.x + (y * t.z - z * t.y),
+             v.y + w * t.y + (z * t.x - x * t.z),
+             v.z + w * t.z + (x * t.y - y * t.x) };
+}
+
+void VRHandRenderer::DrawArmSegment(const RiddickVRVector3& start, const RiddickVRVector3& end,
+        float startRadius, float endRadius, float r, float g, float b) {
+    RiddickVRVector3 dir = Sub3(end, start);
+    float length = HandDist(start, end);
+    if (length < 0.01f || !s_gl.glTranslatef || !s_gl.glRotatef) return;
+    dir = Scale3(dir, 1.0f / length);
+    float angle = acosf((std::clamp)(dir.z, -1.0f, 1.0f)) * 57.2957795f;
+    float axisX = -dir.y;
+    float axisY = dir.x;
+    float axisLength = sqrtf(axisX * axisX + axisY * axisY);
+    if (axisLength < 0.0001f) {
+        axisX = 1.0f; axisY = 0.0f;
+    } else {
+        axisX /= axisLength; axisY /= axisLength;
+    }
+    s_gl.glPushMatrix();
+    s_gl.glTranslatef(start.x, start.y, start.z);
+    if (angle > 0.01f) s_gl.glRotatef(angle, axisX, axisY, 0.0f);
+    DrawTaperedCylinder(0.0f, startRadius, length, endRadius, 12, r, g, b);
+    s_gl.glPopMatrix();
+}
+
+void VRHandRenderer::SetLadderCue(float leftCue, float rightCue) {
+    m_leftLadderCue = (std::clamp)(leftCue, 0.0f, 1.0f);
+    m_rightLadderCue = (std::clamp)(rightCue, 0.0f, 1.0f);
+}
+
 void VRHandRenderer::RenderHands(const RiddickVRSharedState& state, bool isLeftEye, uint32_t eyeWidth, uint32_t eyeHeight) {
     const auto& leftCtrl = state.leftController;
     const auto& rightCtrl = state.rightController;
@@ -182,7 +243,7 @@ void VRHandRenderer::RenderHands(const RiddickVRSharedState& state, bool isLeftE
 
     // 1. Push complete OpenGL pipeline attributes to preserve game render state
     s_gl.glPushAttrib(GL_ENABLE_BIT | GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT |
-                      GL_LIGHTING_BIT | GL_POLYGON_BIT | GL_VIEWPORT_BIT);
+                      GL_LIGHTING_BIT | GL_POLYGON_BIT | GL_VIEWPORT_BIT | GL_CURRENT_BIT);
 
     // GH #22: save every extra piece of state we mutate below (program,
     // buffer bindings, active matrix mode) so the game render state is
@@ -273,7 +334,13 @@ void VRHandRenderer::RenderHands(const RiddickVRSharedState& state, bool isLeftE
     s_gl.glEnable(GL_CULL_FACE);
     s_gl.glFrontFace(GL_CW);
     s_gl.glCullFace(GL_BACK);
-    s_gl.glDisable(GL_BLEND);
+    m_useAlphaFade = (s_gl.glColor4f && s_gl.glBlendFunc);
+    if (m_useAlphaFade) {
+        s_gl.glEnable(GL_BLEND);
+        s_gl.glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    } else {
+        s_gl.glDisable(GL_BLEND);
+    }
     s_gl.glDisable(GL_TEXTURE_2D);
 
     // Check if Boxer Guard is active (both fists clenched and raised)
@@ -314,6 +381,60 @@ void VRHandRenderer::RenderHands(const RiddickVRSharedState& state, bool isLeftE
     // HMD-local interaction volumes mirror camera_hook gesture zones so visuals match actions.
     RiddickVRVector3 leftLocal = HandWorldToHmdLocal(leftCtrl.gripPose.position, state.hmdPose);
     RiddickVRVector3 rightLocal = HandWorldToHmdLocal(rightCtrl.gripPose.position, state.hmdPose);
+
+    // Solve elbow targets once per host frame and reuse them for both eye
+    // passes. Shoulder anchors follow the HMD; controller grip poses are the
+    // wrist targets. The pole vector is HMD-local and points outward/downward,
+    // which stabilizes the elbow plane during cross-body and overhead reaches.
+    if (state.frameIndex != m_lastIkFrame) {
+        m_lastIkFrame = state.frameIndex;
+        if (state.hmdPose.isValid) {
+            auto updateElbow = [&](const RiddickVRControllerInput& controller, bool isLeft,
+                                   RiddickVRVector3& cached, bool& haveCached) {
+                if (!controller.gripPose.isValid) {
+                    haveCached = false;
+                    return;
+                }
+                float side = isLeft ? -1.0f : 1.0f;
+                RiddickVRVector3 shoulderOffset = RotateByQuaternion({ side * 0.19f, -0.22f, 0.055f }, state.hmdPose.orientation);
+                RiddickVRVector3 pole = RotateByQuaternion({ side * 0.80f, -0.35f, 0.12f }, state.hmdPose.orientation);
+                RiddickVRVector3 shoulder = Add3(state.hmdPose.position, shoulderOffset);
+                auto solved = VRArmIK::SolveArm(shoulder, controller.gripPose.position, pole, 0.36f, 0.34f);
+                if (haveCached) {
+                    constexpr float IK_SMOOTH_ALPHA = 0.62f;
+                    cached = Add3(Scale3(cached, 1.0f - IK_SMOOTH_ALPHA), Scale3(solved.elbow, IK_SMOOTH_ALPHA));
+                } else {
+                    cached = solved.elbow;
+                    haveCached = true;
+                }
+                if (isLeft) m_leftArmWrist = solved.wrist;
+                else m_rightArmWrist = solved.wrist;
+            };
+            updateElbow(leftCtrl, true, m_leftElbow, m_hasLeftElbow);
+            updateElbow(rightCtrl, false, m_rightElbow, m_hasRightElbow);
+        } else {
+            m_hasLeftElbow = false;
+            m_hasRightElbow = false;
+        }
+    }
+
+    const float armScale = GetWorldScale();
+    auto drawArm = [&](const RiddickVRControllerInput& controller, bool isLeft,
+                       const RiddickVRVector3& elbow, const RiddickVRVector3& wristTarget, bool haveElbow) {
+        if (!state.hmdPose.isValid || !controller.gripPose.isValid || !haveElbow) return;
+        float side = isLeft ? -1.0f : 1.0f;
+        RiddickVRVector3 shoulder = Add3(state.hmdPose.position,
+            RotateByQuaternion({ side * 0.19f, -0.22f, 0.055f }, state.hmdPose.orientation));
+        m_currentFade = isLeft ? m_leftFade : m_rightFade;
+        // Prisoner uniform cloth, tapering at elbow and wrist. Hand geometry
+        // continues from the same tracked wrist target.
+        DrawArmSegment(shoulder, elbow, 0.050f * armScale, 0.040f * armScale, 0.45f, 0.43f, 0.37f);
+        DrawArmSegment(elbow, wristTarget, 0.040f * armScale, 0.028f * armScale, 0.46f, 0.44f, 0.38f);
+        m_currentFade = 1.0f;
+    };
+    drawArm(leftCtrl, true, m_leftElbow, m_leftArmWrist, m_hasLeftElbow);
+    drawArm(rightCtrl, false, m_rightElbow, m_rightArmWrist, m_hasRightElbow);
+
     float reloadDist = HandDist(leftLocal, rightLocal);
     bool nearReceiver = (reloadDist < 0.20f);
     auto InScanner = [](const RiddickVRVector3& p) {
@@ -351,11 +472,17 @@ void VRHandRenderer::RenderHands(const RiddickVRSharedState& state, bool isLeftE
         if (depth > 1.0f) depth = 1.0f;
         return 0.35f + 0.65f * depth;
     };
-    float leftGrab = GrabGlowFor(leftLocal, leftCtrl);
-    float rightGrab = GrabGlowFor(rightLocal, rightCtrl);
+    float leftGrab = (std::max)(GrabGlowFor(leftLocal, leftCtrl), m_leftLadderCue);
+    float rightGrab = (std::max)(GrabGlowFor(rightLocal, rightCtrl), m_rightLadderCue);
     if (leftCtrl.gripPose.isValid) {
+        RiddickVRTrackedPose handPose = leftCtrl.gripPose;
+        if (state.hmdPose.isValid && m_hasLeftElbow) {
+            RiddickVRVector3 pole = RotateByQuaternion({ -0.80f, -0.35f, 0.12f }, state.hmdPose.orientation);
+            handPose.orientation = ClampWristOrientation(handPose.orientation,
+                handPose.position, m_leftElbow, pole);
+        }
         s_gl.glPushMatrix();
-        ApplyControllerPose(leftCtrl.gripPose);
+        ApplyControllerPose(handPose);
         DrawTacticalHand(HandSide::Left, leftCtrl.grip, leftCtrl.trigger, isBoxerGuard, leftCtrl.buttons,
                          leftGlow, leftHolding, leftHeal, leftGrab);
         s_gl.glPopMatrix();
@@ -363,8 +490,14 @@ void VRHandRenderer::RenderHands(const RiddickVRSharedState& state, bool isLeftE
 
     // 7. Render Right 3D Tactical Glove
     if (rightCtrl.gripPose.isValid) {
+        RiddickVRTrackedPose handPose = rightCtrl.gripPose;
+        if (state.hmdPose.isValid && m_hasRightElbow) {
+            RiddickVRVector3 pole = RotateByQuaternion({ 0.80f, -0.35f, 0.12f }, state.hmdPose.orientation);
+            handPose.orientation = ClampWristOrientation(handPose.orientation,
+                handPose.position, m_rightElbow, pole);
+        }
         s_gl.glPushMatrix();
-        ApplyControllerPose(rightCtrl.gripPose);
+        ApplyControllerPose(handPose);
         DrawTacticalHand(HandSide::Right, rightCtrl.grip, rightCtrl.trigger, isBoxerGuard, rightCtrl.buttons,
                          rightGlow, rightHolding, rightHeal, rightGrab);
         s_gl.glPopMatrix();
@@ -396,6 +529,7 @@ void VRHandRenderer::RenderHands(const RiddickVRSharedState& state, bool isLeftE
     s_gl.glMatrixMode(prevMatrixMode);
 
     s_gl.glPopAttrib();
+    m_useAlphaFade = false;
 }
 
 void VRHandRenderer::DrawTacticalHand(HandSide side, float grip, float trigger, bool isBoxerGuard, uint32_t buttons,
@@ -496,9 +630,9 @@ void VRHandRenderer::DrawTacticalHand(HandSide side, float grip, float trigger, 
 }
 
 void VRHandRenderer::DrawForearmGauntlet(HandSide side) {
-    // GH #46: Butcher Bay prison-uniform sleeve cuff (slim, ~25% narrower).
-    // Weathered grey-beige fabric sleeve, no armor - just cloth + wrist skin.
-    DrawTaperedCylinder(0.040f, 0.0285f, 0.200f, 0.035f, 10, 0.46f, 0.44f, 0.38f);
+    // Prisoner sleeve cuff joins the tracked forearm IK segment; keep this
+    // wrist-local portion short so the arm mesh is not doubled.
+    DrawTaperedCylinder(0.055f, 0.0285f, 0.125f, 0.035f, 10, 0.46f, 0.44f, 0.38f);
 
     // Cuff fold: rolled sleeve hem near wrist (fabric ring, slightly darker).
     DrawTaperedCylinder(0.048f, 0.0295f, 0.060f, 0.0300f, 10, 0.40f, 0.38f, 0.32f);
@@ -626,9 +760,11 @@ void VRHandRenderer::DrawArticulatedThumb(HandSide side, float curl) {
 }
 
 void VRHandRenderer::DrawBeveledBox(float x0, float y0, float z0, float x1, float y1, float z1, float r, float g, float b) {
-    // GH #46: darkening-path fade - multiply toward dark (no blending state touched).
+    // Per-hand fade uses alpha when blend dispatch is available, with darkening
+    // as a conservative fallback for drivers without those core entry points.
     float f = (std::clamp)(m_currentFade, 0.0f, 1.0f);
-    s_gl.glColor3f(r * f, g * f, b * f);
+    if (m_useAlphaFade) s_gl.glColor4f(r, g, b, f);
+    else s_gl.glColor3f(r * f, g * f, b * f);
     s_gl.glBegin(GL_QUADS);
 
     // Front (+Z)
@@ -678,7 +814,8 @@ void VRHandRenderer::DrawBeveledBox(float x0, float y0, float z0, float x1, floa
 
 void VRHandRenderer::DrawTaperedCylinder(float z0, float r0, float z1, float r1, int slices, float r, float g, float b) {
     float f = (std::clamp)(m_currentFade, 0.0f, 1.0f);
-    s_gl.glColor3f(r * f, g * f, b * f);
+    if (m_useAlphaFade) s_gl.glColor4f(r, g, b, f);
+    else s_gl.glColor3f(r * f, g * f, b * f);
     s_gl.glBegin(GL_QUAD_STRIP);
     for (int i = 0; i <= slices; ++i) {
         float angle = i * (6.2831853f / slices);

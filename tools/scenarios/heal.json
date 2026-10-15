@@ -1,0 +1,17 @@
+{
+  "name": "heal",
+  "description": "Waist cartridge draw, overhead receiver insert, open-palm scanner hold. HMD pinned forward.",
+  "markers": ["NANOMED CARTRIDGE", "BIOMETRIC PALM", "Diegetic Interaction"],
+  "keys": [
+    {"frame": 0, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.1, "ltrig": 0.05, "lbtn": 384, "rx": 0.20, "ry": 1.20, "rz": -0.30, "rgrip": 0.1, "rtrig": 0.05, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.85, "stickRX": 0.0, "hyaw": 0.0, "hpitch": 0.0},
+    {"frame": 60, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.1, "ltrig": 0.05, "lbtn": 384, "rx": 0.20, "ry": 1.20, "rz": -0.30, "rgrip": 0.1, "rtrig": 0.05, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.85, "stickRX": 0.0, "hyaw": 0.0, "hpitch": 0.0},
+    {"frame": 80, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.1, "ltrig": 0.05, "lbtn": 384, "rx": 0.15, "ry": 1.05, "rz": -0.25, "rgrip": 0.85, "rtrig": 0.1, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0, "hyaw": 0.0, "hpitch": 0.0},
+    {"frame": 95, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.1, "ltrig": 0.05, "lbtn": 384, "rx": 0.15, "ry": 1.05, "rz": -0.25, "rgrip": 0.85, "rtrig": 0.1, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0, "hyaw": 0.0, "hpitch": 0.0},
+    {"frame": 110, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.1, "ltrig": 0.05, "lbtn": 384, "rx": 0.05, "ry": 1.95, "rz": -0.40, "rgrip": 0.85, "rtrig": 0.1, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0, "hyaw": 0.0, "hpitch": 0.0},
+    {"frame": 125, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.1, "ltrig": 0.05, "lbtn": 384, "rx": 0.05, "ry": 1.70, "rz": -0.40, "rgrip": 0.85, "rtrig": 0.1, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0, "hyaw": 0.0, "hpitch": 0.0},
+    {"frame": 140, "lx": -0.10, "ly": 1.60, "lz": -0.45, "lgrip": 0.05, "ltrig": 0.05, "lbtn": 0, "rx": 0.10, "ry": 1.60, "rz": -0.45, "rgrip": 0.05, "rtrig": 0.05, "rbtn": 0, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0, "hyaw": 0.0, "hpitch": 0.0},
+    {"frame": 190, "lx": -0.10, "ly": 1.60, "lz": -0.45, "lgrip": 0.05, "ltrig": 0.05, "lbtn": 0, "rx": 0.10, "ry": 1.60, "rz": -0.45, "rgrip": 0.05, "rtrig": 0.05, "rbtn": 0, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0, "hyaw": 0.0, "hpitch": 0.0},
+    {"frame": 210, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.5, "ltrig": 0.1, "lbtn": 384, "rx": 0.20, "ry": 1.20, "rz": -0.30, "rgrip": 0.5, "rtrig": 0.1, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0, "hyaw": 0.0, "hpitch": 0.0},
+    {"frame": 260, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.5, "ltrig": 0.1, "lbtn": 384, "rx": 0.20, "ry": 1.20, "rz": -0.30, "rgrip": 0.5, "rtrig": 0.1, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0, "hyaw": 0.0, "hpitch": 0.0}
+  ]
+}

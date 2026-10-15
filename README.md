@@ -108,7 +108,11 @@ riddick-vr/
 ├── .github/
 │   └── ISSUE_TEMPLATE/       # Templates for bug reports and feature requests
 ├── docs/
-│   └── adr/                  # Architectural Decision Records (ADR 0001 - 0050)
+│   ├── adr/                  # Architectural Decision Records
+│   └── vr-scenarios.md       # Automated smoke test and manual VR scenario guide
+├── tests/
+│   ├── scenarios/            # Scenario manifest and expected hook markers
+│   └── *_tests.cpp           # IK, combat-state, and dialogue-navigation tests
 ├── include/
 │   └── riddick_vr_protocol.h # IPC shared state, poses, matrix, controller formats
 ├── src/
@@ -117,6 +121,7 @@ riddick-vr/
 │   └── host/                 # 64-bit OpenXR companion host process (riddickvr-host.exe)
 ├── tools/
 │   ├── build-all.ps1         # Unified multi-architecture build script
+│   ├── scenario_tests.py     # Run smoke scenario / validate manual evidence
 │   ├── generate_forwarders.ps1 # Automated 368-symbol OpenGL forwarder generator
 │   └── self_test_pipeline.py # Autonomous headless VR test runner
 └── CMakeLists.txt            # Unified CMake build definition
@@ -144,10 +149,16 @@ The script automatically produces:
 
 ### Configuration (`riddick_vr.ini`)
 Copy `tools/riddick_vr.ini.example` to `riddick_vr.ini` next to the game EXE to tune:
-turning (snap angle, smooth speed, deadzones), head-look gain
+turning (snap angle, smooth speed, locomotion/dialogue deadzones), head-look gain
 (`LookSensitivityYaw/Pitch` - calibrate: a 90-degree head turn must turn the
 view 90 degrees; scale proportionally), comfort vignette, seated mode, world
 scale, southpaw, and gesture debounce. Missing file = built-in defaults.
+The host uses the same ammo-quad crop values. If the host is not launched with
+the game folder as its working directory, pass the game's INI explicitly:
+`dist\\riddickvr-host.exe --config "<GameFolder>\\riddick_vr.ini"`.
+`AmmoQuadCropX/Y/W/H` are normalized coordinates in the eye image; the crop is
+kept inside the image even if the configured rectangle would otherwise exceed
+its bounds.
 
 ---
 
@@ -168,8 +179,9 @@ scale, southpaw, and gesture debounce. Missing file = built-in defaults.
 ### Complete VR Gestures & Controls Mapping
 * **Locomotion:** Left Thumbstick (`W`, `A`, `S`, `D`) with decoupled head look.
 * **Turning:** Right Thumbstick X (Snap turning at $0.75$ deflection, smooth turning otherwise).
-* **Dialogue / Menu Navigation:** Right Thumbstick Y (Up/Down arrow keys).
-* **Physical Boxer Guard:** Raise both fists to chin level ($Y \in [-0.28, +0.18]\text{ m}, Z \in [-0.42, -0.12]\text{ m}$) with clenched grips ($> 0.40$) to engage solid block mode (`RMB`).
+* **Dialogue / Menu Navigation:** The stronger left/right thumbstick direction maps to four-way menu navigation; `DialogueDeadzone` suppresses drift.
+* **Combat Stance:** Hold both controller triggers above 0.85 for 100 ms to activate physical combat; releasing either below 0.60 returns to exploration. Physical melee strikes and boxer guard are combat-gated.
+* **Physical Boxer Guard:** In combat stance, raise both fists to chin level ($Y \in [-0.28, +0.18]\text{ m}, Z \in [-0.42, -0.12]\text{ m}$) with clenched grips ($> 0.40$) to engage solid block mode (`RMB`).
 * **Melee Combos:** Fast physical jabs, hooks, uppercuts, and dual Ulak cross-slashes break guard instantly with zero latency.
 * **Counter-Disarms & Parries:** Driving fists forward from Boxer Guard into an incoming strike triggers native Starbreeze disarms and bone-cracking shockwave haptics ($0.95$).
 * **Physical Ladder Climbing:** Reach above shoulder and grip rungs to climb hand-over-hand; pull downward to climb. Hang still 1.5s and you will feel the hint pulse telling you to PULL DOWN. Pull down with one hand, then the other within the grace window (or both together) to mantle up ledges - the ready double-pulse means the second hand will complete the mantle.

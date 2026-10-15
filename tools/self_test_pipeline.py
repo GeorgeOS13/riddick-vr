@@ -108,7 +108,7 @@ def analyze_frame(bmp_path: Path):
     }
 
 
-def run_pipeline(max_frames=120, dump_interval=15, timeout=25, artifacts_dir=DEFAULT_ARTIFACTS_DIR):
+def run_pipeline(max_frames=120, dump_interval=15, timeout=25, artifacts_dir=DEFAULT_ARTIFACTS_DIR, scenario_file=None):
     print("=" * 60)
     print("  RIDDICK VR: AUTONOMOUS SELF-PLAY TESTING PIPELINE")
     print("=" * 60)
@@ -125,7 +125,7 @@ def run_pipeline(max_frames=120, dump_interval=15, timeout=25, artifacts_dir=DEF
         print(f"[Pipeline] REFUSED: another run holds {lock_path} (overlap guard).")
         return None
     try:
-        return _run_pipeline_inner(max_frames, dump_interval, timeout, artifacts_dir)
+        return _run_pipeline_inner(max_frames, dump_interval, timeout, artifacts_dir, scenario_file)
     finally:
         try:
             os.close(lock_fd)
@@ -134,7 +134,7 @@ def run_pipeline(max_frames=120, dump_interval=15, timeout=25, artifacts_dir=DEF
             pass
 
 
-def _run_pipeline_inner(max_frames=120, dump_interval=15, timeout=25, artifacts_dir=DEFAULT_ARTIFACTS_DIR):
+def _run_pipeline_inner(max_frames=120, dump_interval=15, timeout=25, artifacts_dir=DEFAULT_ARTIFACTS_DIR, scenario_file=None):
     clean_artifacts(artifacts_dir)
     print(f"[Pipeline] Output artifacts directory: {artifacts_dir}")
 
@@ -157,6 +157,8 @@ def _run_pipeline_inner(max_frames=120, dump_interval=15, timeout=25, artifacts_
         "--dump-interval", str(dump_interval),
         "--max-frames", str(max_frames),
     ]
+    if scenario_file:
+        host_cmd.extend(["--scenario-file", str(Path(scenario_file).resolve())])
     print(f"[Pipeline] Launching mock VR host: {' '.join(host_cmd)}")
     host_proc = subprocess.Popen(
         host_cmd,

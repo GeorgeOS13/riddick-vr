@@ -1,0 +1,13 @@
+{
+  "name": "grenade",
+  "description": "Draw a grenade from the chest, prime it with the off-hand, and throw forward.",
+  "markers": ["TACTICAL GRENADE slot toggled", "GRENADE PIN PULLED / PRIMED", "GRENADE LAUNCHED / THROWN"],
+  "keys": [
+    {"frame": 0, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.10, "ltrig": 0.1, "lbtn": 384, "rx": 0.20, "ry": 1.20, "rz": -0.30, "rgrip": 0.10, "rtrig": 0.5, "rbtn": 384},
+    {"frame": 20, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.10, "ltrig": 0.1, "lbtn": 384, "rx": 0.04, "ry": 1.40, "rz": -0.10, "rgrip": 0.80, "rtrig": 0.5, "rbtn": 384},
+    {"frame": 40, "lx": 0.04, "ly": 1.40, "lz": -0.10, "lgrip": 0.80, "ltrig": 0.1, "lbtn": 384, "rx": 0.04, "ry": 1.40, "rz": -0.10, "rgrip": 0.80, "rtrig": 0.5, "rbtn": 384},
+    {"frame": 55, "lx": 0.04, "ly": 1.40, "lz": -0.10, "lgrip": 0.80, "ltrig": 0.1, "lbtn": 384, "rx": 0.04, "ry": 1.40, "rz": -0.10, "rgrip": 0.80, "rtrig": 0.5, "rbtn": 384},
+    {"frame": 59, "lx": 0.04, "ly": 1.40, "lz": -0.10, "lgrip": 0.80, "ltrig": 0.1, "lbtn": 384, "rx": 0.04, "ry": 1.40, "rz": -0.22, "rgrip": 0.80, "rtrig": 0.5, "rbtn": 384},
+    {"frame": 80, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.10, "ltrig": 0.1, "lbtn": 384, "rx": 0.20, "ry": 1.20, "rz": -0.30, "rgrip": 0.10, "rtrig": 0.1, "rbtn": 384}
+  ]
+}
