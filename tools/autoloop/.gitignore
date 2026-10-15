@@ -1,0 +1,3 @@
+# ignore autoloop run logs (keep prompt/state/script tracked if desired)
+logs/
+*.log
