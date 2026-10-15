@@ -1017,8 +1017,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
             mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
             vrState.rightHapticPulse = 0.95f; // High-frequency bone-cracking parry shockwave (280 Hz)
-            vrState.leftHapticPulse = 0.95f;
-        } else if (dualCrossSlash || rSpeed > 1.8f || lSpeed > 1.8f) {
+        } else if (dualCrossSlash || rSpeed > 1.10f || lSpeed > 1.10f) {
             // Immediately disengage block if currently blocking so attacks are not canceled or stuck
             if (s_currentBlockEngaged) {
                 mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
@@ -6145,7 +6144,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     goto combat_gesture_done;
                 }
             }
-        combat_gesture_done: ;
+        combat_gesture_done:
+            s_lastPunchTime = now;
         }
     }
 
