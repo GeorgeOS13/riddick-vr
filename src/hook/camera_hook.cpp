@@ -1237,7 +1237,47 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_crossArcStartTime = 0;
             }
 
-            if (isCrossArcBurstReady && (now - s_lastCrossArcBurstTime > 1800)) {
+            // Security Guard Stun Baton Forward Two-Handed Javelin Thrust (ADR 0178)
+            static DWORD s_lastBatonJavelinTime = 0;
+            bool batonJavelinGrip = (handsDistSledge > 0.18f && handsDistSledge < 0.40f &&
+                                     vrState.rightController.grip > 0.60f && vrState.leftController.grip > 0.50f &&
+                                     vrState.rightController.trigger > 0.65f);
+            bool batonJavelinThrust = (rVel.z < -1.35f && lVel.z < -1.05f);
+            bool isBatonJavelinThrust = batonJavelinGrip && batonJavelinThrust;
+
+            // Inmate Pit Brawl Outside Trip & Mount Ground-and-Pound (ADR 0177)
+            static DWORD s_lastOutsideTripTime = 0;
+            bool outsideTripHook = (leftLocal.y < -0.30f && vrState.leftController.grip > 0.50f && lVel.x < -0.80f);
+            bool outsideTripDrive = (rVel.z < -1.10f && rVel.y < -0.75f);
+            bool isOutsideTripMount = outsideTripHook && outsideTripDrive;
+
+            if (isBatonJavelinThrust && (now - s_lastBatonJavelinTime > 1800)) {
+                s_lastBatonJavelinTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Tactical Melee: STUN BATON FORWARD TWO-HANDED JAVELIN THRUST EXECUTED (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
+                SendKey('W', true);
+                SendKey(VK_SPACE, true);
+                SendKey('Q', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('Q', false);
+                SendKey(VK_SPACE, false);
+                SendKey('W', false);
+                vrState.rightHapticPulse = 0.98f; // Electro-kinetic impact pulse (320 Hz)
+                vrState.leftHapticPulse = 0.65f;
+            } else if (isOutsideTripMount && (now - s_lastOutsideTripTime > 1800)) {
+                s_lastOutsideTripTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL OUTSIDE TRIP & MOUNT POUND EXECUTED (Lx: %.2f, Rz: %.2f)", lVel.x, rVel.z);
+                SendKey('W', true);
+                SendKey('C', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('C', false);
+                SendKey('W', false);
+                vrState.leftHapticPulse = 0.80f;  // Ankle hook resistance impact (170 Hz)
+                vrState.rightHapticPulse = 0.98f; // Cranial deck pound shockwave (260 Hz)
+            } else if (isCrossArcBurstReady && (now - s_lastCrossArcBurstTime > 1800)) {
                 s_lastCrossArcBurstTime = now;
                 s_crossArcStartTime = 0;
                 s_lastPunchTime = now;
@@ -3470,6 +3510,37 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     vrState.rightHapticPulse = 0.85f; // Optical sync resonant confirmation chime (320 Hz)
                     vrState.leftHapticPulse = 0.50f;
                 }
+            }
+
+            // Dark Athena EVA Solar Collector Truss Articulation Lock Ring Spanner Wrench (ADR 0175)
+            static DWORD s_lastLockRingTime = 0;
+            bool bothAtLockRingSpanner = (twoHandDist < 0.25f &&
+                                          rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > 0.10f && rightLocal.y < 0.40f &&
+                                          vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f);
+            bool lockRingDownwardPull = (lVel.y < -0.90f && rVel.y < -0.90f);
+            if (bothAtLockRingSpanner && lockRingDownwardPull && (now - s_lastLockRingTime > 1500)) {
+                s_lastLockRingTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA SOLAR TRUSS LOCK RING UNSEATED & UNCLAMPED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap(VK_RETURN);
+                vrState.leftHapticPulse = 0.95f;  // Mechanical ring release detent thud (290 Hz)
+                vrState.rightHapticPulse = 0.95f;
+            }
+
+            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Steam Scrubber Siphon Drain (ADR 0176)
+            static DWORD s_lastScrubberDrainTime = 0;
+            bool handAtScrubberLever = (rightLocal.z > -0.42f && rightLocal.z < -0.16f && rightLocal.y > -0.50f && rightLocal.y < -0.15f &&
+                                        vrState.rightController.grip > 0.55f);
+            bool scrubberDrainPull = (rVel.y > 0.75f);
+            if (handAtScrubberLever && scrubberDrainPull && (now - s_lastScrubberDrainTime > 1500)) {
+                s_lastScrubberDrainTime = now;
+                VR_LOG_INFO("Environmental Gesture: HYDROPONICS SCRUBBER SIPHON DRAIN PURGED (Ry: %.2f)", rVel.y);
+                SendKeyTap('E');
+                SendKeyTap('Q');
+                SendKeyTap(VK_SPACE);
+                vrState.rightHapticPulse = 0.90f; // Turbulent hydraulic drain surge rumble (90 Hz)
+                vrState.leftHapticPulse = 0.50f;
             }
         }
     }
