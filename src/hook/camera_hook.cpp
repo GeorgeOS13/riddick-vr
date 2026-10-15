@@ -1088,7 +1088,36 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             bool verticalGroundPlunge = (rVel.y < -1.15f);
             bool isBatonGroundPin = lowGroundPosture && batonGroundEnergized && verticalGroundPlunge;
 
-            if (isInductionOverheated) {
+            // Inmate Pit Brawl Muay Thai Lead Knee Thrust to Abdomen (ADR 0153)
+            static DWORD s_lastLeadKneeTime = 0;
+            bool leadKneePosture = s_currentBlockEngaged;
+            bool leadKneeStrikes = (rVel.y > 1.20f && lVel.y < -0.85f);
+            bool isLeadKneeThrust = leadKneePosture && leadKneeStrikes;
+
+            // Security Guard Stun Baton Two-Handed Cross-Chest Defensive Arc Wall (ADR 0154)
+            static DWORD s_lastArcWallPulse = 0;
+            bool batonArcWallGeometry = (handsDistSledge > 0.20f && handsDistSledge < 0.38f && fabsf(rightLocal.x - leftLocal.x) > 0.22f &&
+                                         rightLocal.y > -0.20f && rightLocal.y < 0.10f && leftLocal.y > -0.20f && leftLocal.y < 0.10f &&
+                                         rightLocal.z > -0.30f && rightLocal.z < -0.10f && leftLocal.z > -0.30f && leftLocal.z < -0.10f);
+            bool batonArcWallGrips = (vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
+                                      vrState.leftController.trigger > 0.60f && vrState.rightController.trigger > 0.60f);
+            bool isCrossChestArcWall = batonArcWallGeometry && batonArcWallGrips;
+            if (isCrossChestArcWall) {
+                if (now - s_lastArcWallPulse > 180) {
+                    s_lastArcWallPulse = now;
+                    vrState.leftHapticPulse = 0.65f;  // Electrostatic repulsion barrier hum (240 Hz)
+                    vrState.rightHapticPulse = 0.65f;
+                }
+            }
+
+            if (isCrossChestArcWall) {
+                SendKey('S', true);
+                SendKey('Q', true);
+                mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
+                SendKey('Q', false);
+                SendKey('S', false);
+            } else if (isInductionOverheated) {
                 VR_LOG_INFO("Tactical Melee: STUN BATON INDUCTION COIL OVERHEAT ARC DETONATED");
                 SendKey('S', true);
                 SendKey('Q', true);
@@ -1170,6 +1199,18 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', false);
                 vrState.rightHapticPulse = 0.98f; // Joint-crushing skeletal fracture shockwave (240 Hz)
                 vrState.leftHapticPulse = 0.60f;  // Body-weight plant & brace feedback (100 Hz)
+            } else if (isLeadKneeThrust && (now - s_lastLeadKneeTime > 1500)) {
+                s_lastLeadKneeTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL LEAD KNEE THRUST (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
+                SendKey('W', true);
+                SendKey('C', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('C', false);
+                SendKey('W', false);
+                vrState.rightHapticPulse = 0.98f; // Concussive abdominal organ shockwave (200 Hz)
+                vrState.leftHapticPulse = 0.65f;  // Frame clamp vibration (100 Hz)
             } else if (blindRiposteStrike && (now - s_lastEyeRubRiposteTime > 1500)) {
                 s_lastEyeRubRiposteTime = now;
                 s_eyeRubWipeTime = 0;
@@ -2977,6 +3018,38 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     SendKeyTap(VK_SPACE);
                     vrState.rightHapticPulse = 0.75f; // Quartz resonance clean chime (290 Hz)
                 }
+            }
+
+            // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Cotter Pin Insertion (ADR 0151)
+            static DWORD s_lastCotterPinTime = 0;
+            bool handAtTrussCotterBore = (rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > 0.10f && rightLocal.y < 0.40f &&
+                                          vrState.rightController.grip > 0.60f);
+            bool cotterPinSeatingThrust = (rVel.z < -0.85f);
+            if (handAtTrussCotterBore && cotterPinSeatingThrust && (now - s_lastCotterPinTime > 1500)) {
+                s_lastCotterPinTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA TRUSS HINGE COTTER PIN SEATED & LOCKED (Rz: %.2f)", rVel.z);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap(VK_RETURN);
+                vrState.rightHapticPulse = 0.95f; // Hardened alloy detent lock snap (280 Hz)
+                vrState.leftHapticPulse = 0.60f;
+            }
+
+            // Subterranean Hydroponics Bio-Waste Incinerator Blast Door Dual Lever Pull (ADR 0152)
+            static DWORD s_lastIncineratorLeverTime = 0;
+            bool bothAtIncineratorLevers = (twoHandDist > 0.22f && twoHandDist < 0.45f &&
+                                            leftLocal.z > -0.42f && leftLocal.z < -0.16f && rightLocal.z > -0.42f && rightLocal.z < -0.16f &&
+                                            leftLocal.y > 0.05f && leftLocal.y < 0.35f && rightLocal.y > 0.05f && rightLocal.y < 0.35f &&
+                                            vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f);
+            bool dualIncineratorLeverPull = (lVel.y < -0.80f && rVel.y < -0.80f);
+            if (bothAtIncineratorLevers && dualIncineratorLeverPull && (now - s_lastIncineratorLeverTime > 1500)) {
+                s_lastIncineratorLeverTime = now;
+                VR_LOG_INFO("Environmental Gesture: HYDROPONICS INCINERATOR DUAL BLAST LEVERS TRIPPED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
+                SendKeyTap('E');
+                SendKeyTap(VK_RETURN);
+                SendKeyTap('Q');
+                vrState.leftHapticPulse = 0.95f;  // Lever trip clack & combustion blast rumble (50 Hz)
+                vrState.rightHapticPulse = 0.95f;
             }
         }
     }
