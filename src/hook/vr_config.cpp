@@ -73,6 +73,13 @@ void LoadVRConfig() {
         if (debounce < 120) debounce = 120;
         if (debounce > 250) debounce = 250;
         cfg.gestureDebounceMs = debounce;
+        // GH #40: diegetic ammo quad crop rect (INI-tunable per resolution/weapon)
+        cfg.ammoQuadCropX = ClampF(ReadFloat(iniPath, "AmmoQuadCropX", cfg.ammoQuadCropX), 0.0f, 1.0f);
+        cfg.ammoQuadCropY = ClampF(ReadFloat(iniPath, "AmmoQuadCropY", cfg.ammoQuadCropY), 0.0f, 1.0f);
+        cfg.ammoQuadCropW = ClampF(ReadFloat(iniPath, "AmmoQuadCropW", cfg.ammoQuadCropW), 0.01f, 1.0f);
+        cfg.ammoQuadCropH = ClampF(ReadFloat(iniPath, "AmmoQuadCropH", cfg.ammoQuadCropH), 0.01f, 1.0f);
+        cfg.wristHudCropW = ClampF(ReadFloat(iniPath, "WristHudCropW", cfg.wristHudCropW), 0.01f, 1.0f);
+        cfg.wristHudCropH = ClampF(ReadFloat(iniPath, "WristHudCropH", cfg.wristHudCropH), 0.01f, 1.0f);
         VR_LOG_INFO("VR config loaded from %s (snap=%.0f move_dz=%.2f comfort=%d seated=%d scale=%.2f paw=%d)",
             iniPath, cfg.snapAngleDeg, cfg.moveDeadzone, cfg.comfortEnabled,
             cfg.seated, cfg.worldScale, cfg.southpaw);

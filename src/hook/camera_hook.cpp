@@ -266,7 +266,7 @@ void CameraHook::StabilizeViewMatrix(float* outView, const float* inView, const 
             // Horizon angular rate limiting / smoothing during sudden animation transitions:
             // Prevents jarring camera snaps and disorienting rotational jerks when mounting ladders,
             // crawling into vents, or executing contextual stealth takedown animations.
-            constexpr float MAX_YAW_STEP = 0.085f; // ~4.9 deg per frame (~300 deg/sec at 60 FPS)
+            constexpr float MAX_YAW_STEP = 0.20f; // ~11.5 deg per frame (~690 deg/sec at 60 FPS)
             if (deltaYaw > MAX_YAW_STEP) {
                 deltaYaw = MAX_YAW_STEP;
             } else if (deltaYaw < -MAX_YAW_STEP) {
@@ -524,6 +524,7 @@ static NanoMedIntent UpdateNanoMED(NanoMedState& st, DWORD now,
 // Pure detection: updates st, returns edge intents; Update owns logs/keys/haptics.
 struct PostureIntent {
     bool recenterCalibrated = false;
+    bool baselineSnappedUp = false; // GH #49: fast-up recovery (was latched low)
     bool initialCalibrated = false;
     bool crouchChanged = false;
     bool crouchEngaged = false;
@@ -553,10 +554,25 @@ static PostureIntent UpdatePosture(PostureState& st, bool hmdValid,
     }
 
     if (hmdValid) {
-        // Initial calibration
+        // Initial calibration (GH #49): latch only a plausible STATIONARY
+        // standing height. Latching a reach-up spike or a crouch as the
+        // baseline is what stuck players crouched permanently.
         if (st.standingEyeHeight <= 0.001f && currentY > 0.1f) {
-            st.standingEyeHeight = currentY + (seated ? seatedEyeOffset : 0.0f); // Track C #11
-            out.initialCalibrated = true;
+            bool stationary = fabsf(hmdVelY) < 0.25f;
+            bool plausible = (currentY >= 1.20f && currentY <= 2.05f) || seated;
+            if (stationary && plausible) {
+                st.standingEyeHeight = currentY + (seated ? seatedEyeOffset : 0.0f); // Track C #11
+                out.initialCalibrated = true;
+            }
+        }
+
+        // GH #49: fast-up recovery. If the user is plainly TALLER than the
+        // baseline while stationary, the baseline was latched low - snap up
+        // instead of slow-creeping (peak tracking below only moves 0.2%/frame).
+        if (st.standingEyeHeight > 0.2f && !st.isPhysicallyCrouched &&
+            (currentY - st.standingEyeHeight) > 0.05f && fabsf(hmdVelY) < 0.25f) {
+            st.standingEyeHeight = currentY;
+            out.baselineSnappedUp = true;
         }
 
         // ADR 0377: Peak tracking with Jump Immunity & Vertical Velocity Gating
@@ -1110,12 +1126,17 @@ struct HeadLookIntent {
     bool adsAcquired = false; // edge: tactile detent haptic on sight picture acquisition
 };
 
+// ADR 0376 weapon slot state (file scope: head-look section 0 reads it,
+// holster section 6c writes it). 1: Primary, 2: Sidearm, 3: Melee/Blades,
+// 4: Ordnance, 5: Heavy.
+static int s_activeWeaponSlot = 1;
+
 static HeadLookIntent UpdateHeadLook(HeadLookState& st, DWORD now,
                                      const RiddickVRTrackedPose& hmdPose,
                                      const RiddickVRTrackedPose& ctrlPose,
                                      bool recenterEdge, bool isReloading, bool aimHeld,
                                      bool physicalBlockEngaged, bool twoHandedActive,
-                                     bool southpaw) {
+                                     bool southpaw, bool meleeEquipped) {
     HeadLookIntent out;
     if (!hmdPose.isValid) {
         st.hasPrevHmdOrientation = false;
@@ -1280,14 +1301,26 @@ static HeadLookIntent UpdateHeadLook(HeadLookState& st, DWORD now,
                     st.prevCtrlYaw = ctrlYaw;
                     st.prevCtrlPitch = ctrlPitch;
 
-                    // Center deadzone (~2.0 degrees) to prevent micro-drift when holding weapon steady
-                    constexpr float AIM_DEADZONE = 0.035f;
-                    if (fabsf(ctrlYaw) > AIM_DEADZONE) {
-                        pullYaw = (ctrlYaw > 0.0f) ? (ctrlYaw - AIM_DEADZONE) : (ctrlYaw + AIM_DEADZONE);
-                    }
-                    if (fabsf(ctrlPitch) > AIM_DEADZONE) {
-                        pullPitch = (ctrlPitch > 0.0f) ? (ctrlPitch - AIM_DEADZONE) : (ctrlPitch + AIM_DEADZONE);
-                    }
+                    // GH #50/#51: DELTA-based aim steering. The old code pulled
+                    // from the ABSOLUTE HMD-relative aim angle, so any arm held
+                    // away from view-center (swings, guard pose) injected a
+                    // constant spin every frame. Deltas only move the view
+                    // while the aim itself is moving; a steady arm (even far
+                    // off-center) injects nothing. Clamped per frame.
+                    // Melee equipped (fists/blades, incl. trigger-block guard):
+                    // no aim pull at all - swings must never steer the camera.
+                    constexpr float AIM_DELTA_DEADZONE = 0.0015f; // ~0.09 deg
+                    constexpr float AIM_DELTA_CLAMP = 0.05f;      // max rad/frame
+                    float dYaw = meleeEquipped ? 0.0f : deltaCtrlYaw;
+                    float dPitch = meleeEquipped ? 0.0f : deltaCtrlPitch;
+                    if (fabsf(dYaw) < AIM_DELTA_DEADZONE) dYaw = 0.0f;
+                    if (fabsf(dPitch) < AIM_DELTA_DEADZONE) dPitch = 0.0f;
+                    if (dYaw > AIM_DELTA_CLAMP) dYaw = AIM_DELTA_CLAMP;
+                    if (dYaw < -AIM_DELTA_CLAMP) dYaw = -AIM_DELTA_CLAMP;
+                    if (dPitch > AIM_DELTA_CLAMP) dPitch = AIM_DELTA_CLAMP;
+                    if (dPitch < -AIM_DELTA_CLAMP) dPitch = -AIM_DELTA_CLAMP;
+                    pullYaw = dYaw;
+                    pullPitch = dPitch;
 
                     // Aim weights: only pull aim when actively aiming (ADS or two-handed stabilization or aiming trigger)
                     isActivelyAiming = (st.isPhysicalADS || twoHandedActive || aimHeld) && !physicalBlockEngaged && !isReloading;
@@ -3842,10 +3875,11 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             vrState.hmdPose, ctrlAimPose,
             recenterEdge, lookReloading, lookAimHeld,
             s_physicalBlockEngaged, s_twoHandedStabilizationActive,
-            g_vrConfig.southpaw);
-        // GH #45: never inject look deltas while menus/cinematics own the
-        // screen (engine ignores them there; queue flooding only adds lag).
-        if ((lookIntent.moveX != 0 || lookIntent.moveY != 0) && OpenGLProxy::Has3DThisFrame()) {
+            g_vrConfig.southpaw, (s_activeWeaponSlot == 3)); // GH #51: melee/guard never steers
+        // GH #45: use the latching Has3DGameplayProjection() instead of the
+        // per-frame Has3DThisFrame() — the latter caused judder by silently
+        // dropping look deltas during brief ortho-HUD passes within gameplay.
+        if ((lookIntent.moveX != 0 || lookIntent.moveY != 0) && OpenGLProxy::Has3DGameplayProjection()) {
             SendMouseMove(lookIntent.moveX, lookIntent.moveY); // GH #33: SendInput helper
         }
         if (lookIntent.adsAcquired) {
@@ -3863,6 +3897,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         recenterEdge, g_vrConfig.seated, g_vrConfig.seatedEyeOffset, s_headlook.lastHmdYaw);
     if (postureIntent.recenterCalibrated) {
         VR_LOG_INFO("Standing eye height calibrated on recenter: %.2fm", s_posture.standingEyeHeight);
+    }
+    if (postureIntent.baselineSnappedUp) {
+        VR_LOG_INFO("Standing eye height snapped UP to %.2fm (was latched low)", s_posture.standingEyeHeight);
     }
     if (postureIntent.initialCalibrated) {
         VR_LOG_INFO("Initial standing eye height calibrated: %.2fm", s_posture.standingEyeHeight);
@@ -8465,7 +8502,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // - Left Hand Hip Draw (Y < -0.32m, X < -0.14m, grip > 0.50): Equips / Draws Melee Blades / Ulaks ('3')
     // - Hand at Ankle Boot (Y < -0.65m, grip > 0.50) while Crouched: Stashes / Retrieves Contraband (ADR 0038)
     static DWORD s_lastHolsterTime = 0;
-    static int s_activeWeaponSlot = 1; // ADR 0376: 1: Primary, 2: Sidearm, 3: Melee/Blades, 4: Ordnance, 5: Heavy
+    // ADR 0376: 1: Primary, 2: Sidearm, 3: Melee/Blades, 4: Ordnance, 5: Heavy
+    // (file scope: section 0 head-look melee gate reads it before section 6c).
     // Track C #14: southpaw mirrors dom/off-hand holster zones (X-mirrored copies
     // so physical-side predicates keep working; haptics stay on physical hands).
     RiddickVRVector3 domHolster = g_vrConfig.southpaw ? leftLocal : rightLocal;

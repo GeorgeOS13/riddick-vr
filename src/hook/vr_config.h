@@ -24,6 +24,14 @@ struct VRConfig {
     float worldScale = 1.0f;         // #13 world scale multiplier
     int southpaw = 0;                // #14 left-dominant hand mapping
     int gestureDebounceMs = 180;     // #15 per-action debounce (clamped 120-250)
+    // GH #40: diegetic ammo quad crop rect (fraction of swapchain 0..1)
+    float ammoQuadCropX = 0.75f;
+    float ammoQuadCropY = 0.75f;
+    float ammoQuadCropW = 0.23f;
+    float ammoQuadCropH = 0.23f;
+    // GH #40: wrist HUD crop rect (fraction of swapchain 0..1)
+    float wristHudCropW = 0.26f;
+    float wristHudCropH = 0.16f;
 };
 
 extern VRConfig g_vrConfig;
