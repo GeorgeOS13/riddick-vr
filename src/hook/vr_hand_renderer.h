@@ -24,8 +24,9 @@ private:
 
     // Renders an individual tactical glove (left or right)
     // interactionGlow 0..1 = reload/receiver proximity highlight, holdingCartridge draws NanoMED cell, palmHeal draws scanner glow
+    // grabGlow 0..1 = object/person interact-volume proximity (vents, terminals, throat-grip corridor)
     void DrawTacticalHand(HandSide side, float grip, float trigger, bool isBoxerGuard, uint32_t buttons,
-                           float interactionGlow, bool holdingCartridge, bool palmHeal);
+                           float interactionGlow, bool holdingCartridge, bool palmHeal, float grabGlow = 0.0f);
 
     // Procedural tactical glove geometry components
     void DrawForearmGauntlet(HandSide side);

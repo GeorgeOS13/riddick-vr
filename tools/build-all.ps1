@@ -48,7 +48,9 @@ if ($Clean -and (Test-Path $x64BuildDir)) {
 }
 
 & $cmakePath -S $RootDir -B $x64BuildDir -A x64 -DRIDDICKVR_BUILD_HOST=ON -DRIDDICKVR_BUILD_PROXY=OFF
+if ($LASTEXITCODE -ne 0) { throw "x64 CMake configure failed (exit $LASTEXITCODE)" }
 & $cmakePath --build $x64BuildDir --config $Config
+if ($LASTEXITCODE -ne 0) { throw "x64 build failed (exit $LASTEXITCODE) - dist NOT updated" }
 
 $hostBinary = Join-Path $x64BuildDir "$Config\riddickvr-host.exe"
 if (Test-Path $hostBinary) {
@@ -69,7 +71,9 @@ if ($Clean -and (Test-Path $x86BuildDir)) {
 }
 
 & $cmakePath -S $RootDir -B $x86BuildDir -A Win32 -DRIDDICKVR_BUILD_HOST=OFF -DRIDDICKVR_BUILD_PROXY=ON
+if ($LASTEXITCODE -ne 0) { throw "Win32 CMake configure failed (exit $LASTEXITCODE)" }
 & $cmakePath --build $x86BuildDir --config $Config
+if ($LASTEXITCODE -ne 0) { throw "Win32 build failed (exit $LASTEXITCODE) - dist NOT updated" }
 
 $hookBinary = Join-Path $x86BuildDir "$Config\opengl32.dll"
 if (Test-Path $hookBinary) {

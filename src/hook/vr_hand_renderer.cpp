@@ -327,11 +327,25 @@ void VRHandRenderer::RenderHands(const RiddickVRSharedState& state, bool isLeftE
     float pulse = 0.5f + 0.5f * sinf(static_cast<float>(GetTickCount()) * 0.008f);
     float leftGlow = nearReceiver ? (0.4f + 0.6f * pulse) : 0.0f;
     float rightGlow = nearReceiver ? (0.4f + 0.6f * pulse) : 0.0f;
+    // Grab proximity (vents, biometric terminals, guard throat-grip corridor):
+    // hand forward of chest with grip closed (grab) or index extended (poke).
+    auto GrabGlowFor = [](const RiddickVRVector3& local, const RiddickVRControllerInput& c) {
+        bool inCorridor = (local.z >= -0.45f && local.z <= -0.15f) && (fabsf(local.x) < 0.30f);
+        bool gripping = (c.grip > 0.50f);
+        bool poking = (c.trigger < 0.20f && c.grip < 0.35f);
+        if (!inCorridor || (!gripping && !poking)) return 0.0f;
+        float depth = 1.0f - (local.z + 0.45f) / 0.30f; // 0 at entry -> 1 deep inside
+        if (depth < 0.0f) depth = 0.0f;
+        if (depth > 1.0f) depth = 1.0f;
+        return 0.35f + 0.65f * depth;
+    };
+    float leftGrab = GrabGlowFor(leftLocal, leftCtrl);
+    float rightGrab = GrabGlowFor(rightLocal, rightCtrl);
     if (leftCtrl.gripPose.isValid) {
         s_gl.glPushMatrix();
         ApplyControllerPose(leftCtrl.gripPose);
         DrawTacticalHand(HandSide::Left, leftCtrl.grip, leftCtrl.trigger, isBoxerGuard, leftCtrl.buttons,
-                         leftGlow, leftHolding, leftHeal);
+                         leftGlow, leftHolding, leftHeal, leftGrab);
         s_gl.glPopMatrix();
     }
 
@@ -340,7 +354,7 @@ void VRHandRenderer::RenderHands(const RiddickVRSharedState& state, bool isLeftE
         s_gl.glPushMatrix();
         ApplyControllerPose(rightCtrl.gripPose);
         DrawTacticalHand(HandSide::Right, rightCtrl.grip, rightCtrl.trigger, isBoxerGuard, rightCtrl.buttons,
-                         rightGlow, rightHolding, rightHeal);
+                         rightGlow, rightHolding, rightHeal, rightGrab);
         s_gl.glPopMatrix();
     }
 
@@ -373,7 +387,7 @@ void VRHandRenderer::RenderHands(const RiddickVRSharedState& state, bool isLeftE
 }
 
 void VRHandRenderer::DrawTacticalHand(HandSide side, float grip, float trigger, bool isBoxerGuard, uint32_t buttons,
-                                      float interactionGlow, bool holdingCartridge, bool palmHeal) {
+                                      float interactionGlow, bool holdingCartridge, bool palmHeal, float grabGlow) {
     s_gl.glPushMatrix();
 
     // Squeeze factor: grip trigger curls middle, ring, pinky
@@ -452,6 +466,12 @@ void VRHandRenderer::DrawTacticalHand(HandSide side, float grip, float trigger, 
         // Soft green scanner glow under palm.
         DrawBeveledBox(-0.028f, -0.022f, -0.036f, 0.028f, -0.014f, 0.028f,
                        0.15f, 0.75f, 0.35f);
+    }
+    if (grabGlow > 0.01f) {
+        // Cool cyan grab highlight on fingertips region (object/person volumes).
+        float g = grabGlow;
+        DrawBeveledBox(-0.030f, -0.006f, -0.062f, 0.030f, 0.026f, -0.040f,
+                       0.20f + 0.25f * g, 0.65f + 0.25f * g, 0.75f + 0.20f * g);
     }
 
     s_gl.glPopMatrix();
