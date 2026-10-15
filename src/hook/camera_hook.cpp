@@ -1530,6 +1530,26 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                           vrState.rightController.trigger > 0.65f);
             bool groundingThrustLunge = (groundingThrustStance && rVel.z < -1.35f && lVel.z < -1.10f);
 
+            // Inmate Pit Brawl Double Underhook Lateral Suplex Arch & Mat Spike (ADR 0233)
+            static DWORD s_lastLateralSuplexTime = 0;
+            static char s_lateralSuplexDirKey = 'A';
+            bool lateralSuplexStance = (handsDistSledge < 0.28f &&
+                                        leftLocal.y > -0.20f && rightLocal.y > -0.20f &&
+                                        vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
+            bool lateralSuplexThrow = (lateralSuplexStance && rVel.y > 0.70f && lVel.y > 0.70f &&
+                                       (fabsf(rVel.x) > 0.85f || fabsf(lVel.x) > 0.85f));
+            if (lateralSuplexThrow && (now - s_lastLateralSuplexTime > 2000)) {
+                s_lateralSuplexDirKey = (rVel.x > 0.0f) ? 'D' : 'A';
+            }
+
+            // Security Guard Stun Baton Forward High-Arc Kinetic Cleave & Shockwave Stun (ADR 0234)
+            static DWORD s_lastKineticCleaveTime = 0;
+            bool kineticCleaveStance = (handsDistSledge < 0.28f &&
+                                        rightLocal.y > 0.18f && leftLocal.y > 0.10f &&
+                                        vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
+                                        vrState.rightController.trigger > 0.65f);
+            bool kineticCleaveSwing = (kineticCleaveStance && rVel.y < -1.40f && lVel.y < -1.10f);
+
             // Inmate Pit Brawl Outside Leg Hook Sweep & Ground Knee Drop (ADR 0209)
             static DWORD s_lastOutsideLegSweepTime = 0;
             static DWORD s_outsideLegSweepHookTime = 0;
@@ -1576,7 +1596,37 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_crossBlockHoldStart = 0;
             }
 
-            if (groundingThrustLunge && (now - s_lastGroundingThrustTime > 2000)) {
+            if (kineticCleaveSwing && (now - s_lastKineticCleaveTime > 2000)) {
+                s_lastKineticCleaveTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Tactical Melee: STUN BATON KINETIC CLEAVE & SHOCKWAVE STUN STRUCK (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
+                SendKey('S', true);
+                SendKey('W', true);
+                SendKey('Q', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('Q', false);
+                SendKey('W', false);
+                SendKey('S', false);
+                vrState.rightHapticPulse = 0.98f; // High-arc kinetic impact and plasma discharge (360 Hz)
+                vrState.leftHapticPulse = 0.88f;  // Secondary grip dielectric dissipation (240 Hz)
+            } else if (lateralSuplexThrow && (now - s_lastLateralSuplexTime > 2000)) {
+                s_lastLateralSuplexTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL LATERAL SUPLEX EXECUTED (Dir: %c, Ry: %.2f, Rx: %.2f)", s_lateralSuplexDirKey, rVel.y, rVel.x);
+                SendKey('W', true);
+                SendKey(s_lateralSuplexDirKey, true);
+                SendKey('C', true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, false);
+                SendKey('C', false);
+                SendKey(s_lateralSuplexDirKey, false);
+                SendKey('W', false);
+                vrState.rightHapticPulse = 0.98f; // Spine compression and mat impact shockwave (360 Hz)
+                vrState.leftHapticPulse = 0.92f;  // Double underhook torso lift torque (190 Hz)
+            } else if (groundingThrustLunge && (now - s_lastGroundingThrustTime > 2000)) {
                 s_lastGroundingThrustTime = now;
                 s_lastPunchTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON GROUNDING THRUST & ARC RING EXECUTED (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
@@ -4755,6 +4805,50 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     SendKeyTap(VK_SPACE);
                     SendKeyTap(VK_TAB);
                     vrState.rightHapticPulse = 0.95f; // Hoist dog ratchet thud (220 Hz)
+                }
+            }
+
+            // Dark Athena EVA Solar Collector Truss Articulation Drive Motor Pinion Gear Backlash Adjustment (ADR 0231)
+            static DWORD s_lastPinionBacklashTime = 0;
+            bool handAtPinionGearbox = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
+                                        vrState.leftController.grip > 0.55f);
+            bool handOnBacklashAdjuster = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
+                                           vrState.rightController.trigger > 0.50f);
+            bool backlashAdjusterTorque = (fabsf(rVel.x) > 0.45f || fabsf(rVel.y) > 0.45f);
+            if (handAtPinionGearbox && handOnBacklashAdjuster && backlashAdjusterTorque && (now - s_lastPinionBacklashTime > 1800)) {
+                s_lastPinionBacklashTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA TRUSS DRIVE MOTOR PINION BACKLASH ADJUSTED (Rx: %.2f, Ry: %.2f)", rVel.x, rVel.y);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap(VK_TAB);
+                SendKeyTap(VK_RETURN);
+                vrState.rightHapticPulse = 0.92f; // Eccentric adjuster detent click (280 Hz)
+                vrState.leftHapticPulse = 0.60f;  // Gearbox casing resonance (140 Hz)
+            }
+
+            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Primary Air Plenum Slag Agitator Scraping Bar (ADR 0232)
+            static DWORD s_lastSlagScraperTime = 0;
+            static int s_slagScraperStrokes = 0;
+            bool handsOnSlagScraper = (twoHandDist > 0.16f && twoHandDist < 0.38f &&
+                                       vrState.leftController.grip > 0.55f && vrState.rightController.grip > 0.55f);
+            bool scraperAtPlenumTuyeres = (rightLocal.z > -0.45f && rightLocal.z < -0.15f &&
+                                           rightLocal.y > -0.30f && rightLocal.y < 0.20f);
+            bool scraperStroke = (fabsf(rVel.z) > 0.65f && fabsf(lVel.z) > 0.55f);
+            if (handsOnSlagScraper && scraperAtPlenumTuyeres && scraperStroke && (now - s_lastSlagScraperTime > 300)) {
+                s_lastSlagScraperTime = now;
+                s_slagScraperStrokes++;
+                VR_LOG_INFO("Environmental Gesture: INCINERATOR SLAG SCRAPER STROKE #%d (Rz: %.2f, Lz: %.2f)", s_slagScraperStrokes, rVel.z, lVel.z);
+                vrState.rightHapticPulse = 0.65f; // Scraper grating drag friction (200 Hz)
+                vrState.leftHapticPulse = 0.55f;  // Shaft resonance (150 Hz)
+                if (s_slagScraperStrokes >= 3) {
+                    s_slagScraperStrokes = 0;
+                    VR_LOG_INFO("Environmental Gesture: PRIMARY AIR TUYERES CLEARED OF REFRACTORY SLAG");
+                    SendKeyTap('E');
+                    SendKeyTap('Q');
+                    SendKeyTap(VK_TAB);
+                    SendKeyTap(VK_SPACE);
+                    vrState.rightHapticPulse = 0.95f; // Refractory clinker dislodged impact (300 Hz)
+                    vrState.leftHapticPulse = 0.85f;  // Shaft vibration impact (160 Hz)
                 }
             }
         }
