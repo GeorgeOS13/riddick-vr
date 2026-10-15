@@ -135,3 +135,7 @@ private:
 };
 
 } // namespace RiddickVR
+
+// GH #27: deferred hook init entry (defined in dllmain.cpp). Called on first
+// wglCreateContext so no LoadLibrary/IO runs under the loader lock.
+void RiddickVR_EnsureHookInitialized();

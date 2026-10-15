@@ -8,6 +8,10 @@
 #define RIDDICK_VR_IPC_MUTEX_NAME "Local\\RiddickVR_Mutex"
 
 #define RIDDICK_VR_PROTOCOL_VERSION 1
+// GH #28: version negotiation range. v1 layout is frozen; newer hosts must
+// still accept readers/writers advertising MIN..CURRENT. Bump CURRENT only
+// with a layout change, and keep MIN at the oldest layout the host can parse.
+#define RIDDICK_VR_PROTOCOL_MIN_SUPPORTED 1
 
 constexpr uint32_t RIDDICK_VR_BTN_A           = 1 << 0;
 constexpr uint32_t RIDDICK_VR_BTN_B           = 1 << 1;
@@ -91,4 +95,11 @@ struct RiddickVRSharedState {
 };
 
 #pragma pack(pop)
+
+// GH #28: protocol v1 layout is frozen. These asserts fail the build if a
+// field is added/removed/reordered without a deliberate version bump.
+static_assert(sizeof(RiddickVRTrackedPose) == 56, "RiddickVRTrackedPose layout changed; bump RIDDICK_VR_PROTOCOL_VERSION");
+static_assert(sizeof(RiddickVRControllerInput) == 136, "RiddickVRControllerInput layout changed; bump RIDDICK_VR_PROTOCOL_VERSION");
+static_assert(sizeof(RiddickVRSharedState) == 640, "RiddickVRSharedState layout changed; bump RIDDICK_VR_PROTOCOL_VERSION");
+static_assert(RIDDICK_VR_PROTOCOL_MIN_SUPPORTED <= RIDDICK_VR_PROTOCOL_VERSION, "protocol negotiation range inverted");
 

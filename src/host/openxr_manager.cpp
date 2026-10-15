@@ -8,6 +8,10 @@
 
 namespace RiddickVR {
 
+// GH #36: single interpupillary-distance constant (65mm IPD => 32.5mm half).
+// All synthetic eye baselines and fallback views derive from this.
+constexpr float kHalfIpdMeters = 0.0325f;
+
 static RiddickVRMatrix4x4 CreateProjectionFromFov(const XrFovf& fov, float nearZ = 0.05f, float farZ = 1000.0f) {
     RiddickVRMatrix4x4 result{};
     for (int i = 0; i < 16; ++i) result.m[i] = 0.0f;
@@ -927,27 +931,10 @@ void OpenXRManager::UpdateTracking(RiddickVRSharedState& state, XrTime predicted
             state.shouldRecenter = true;
         }
 
-        // Apply Haptics if requested
-        if (state.leftHapticPulse > 0.05f && xrApplyHapticFeedback) {
-            XrHapticVibration vib{XR_TYPE_HAPTIC_VIBRATION};
-            vib.amplitude = state.leftHapticPulse;
-            vib.duration = XR_MIN_HAPTIC_DURATION * 2;
-            vib.frequency = XR_FREQUENCY_UNSPECIFIED;
-            XrHapticActionInfo hapticInfo{XR_TYPE_HAPTIC_ACTION_INFO};
-            hapticInfo.action = m_hapticAction;
-            hapticInfo.subactionPath = m_leftHandPath;
-            xrApplyHapticFeedback(m_session, &hapticInfo, (XrHapticBaseHeader*)&vib);
-        }
-        if (state.rightHapticPulse > 0.05f && xrApplyHapticFeedback) {
-            XrHapticVibration vib{XR_TYPE_HAPTIC_VIBRATION};
-            vib.amplitude = state.rightHapticPulse;
-            vib.duration = XR_MIN_HAPTIC_DURATION * 2;
-            vib.frequency = XR_FREQUENCY_UNSPECIFIED;
-            XrHapticActionInfo hapticInfo{XR_TYPE_HAPTIC_ACTION_INFO};
-            hapticInfo.action = m_hapticAction;
-            hapticInfo.subactionPath = m_rightHandPath;
-            xrApplyHapticFeedback(m_session, &hapticInfo, (XrHapticBaseHeader*)&vib);
-        }
+        // GH #21/#38: no haptic dispatch here (deleted dead path). This state
+        // is freshly zeroed by the caller, so pulse-gated ApplyHapticFeedback
+        // could never fire. Hook->host pulses travel via IpcBridgeClient::
+        // WriteState and are applied + consumed (ClearHaptics) in RenderFrame.
 
         // Locate Controller Poses and compute linear velocities
         static RiddickVRVector3 s_prevLeftPos{0, 0, 0};
@@ -1011,7 +998,14 @@ void OpenXRManager::UpdateTracking(RiddickVRSharedState& state, XrTime predicted
             state.leftEyeView = CreateViewFromPose(views[0].pose);
             state.rightEyeView = CreateViewFromPose(views[1].pose);
 
-            state.hmdPose.position = { views[0].pose.position.x, views[0].pose.position.y, views[0].pose.position.z };
+            // GH #36: HMD pose is the centroid midpoint of both eyes, not the
+            // left eye (avoids a constant half-IPD lateral bias in gesture
+            // zones and hand mapping). Orientation is shared by both eyes on
+            // all supported runtimes, so views[0] orientation is used as-is.
+            state.hmdPose.position = {
+                (views[0].pose.position.x + views[1].pose.position.x) * 0.5f,
+                (views[0].pose.position.y + views[1].pose.position.y) * 0.5f,
+                (views[0].pose.position.z + views[1].pose.position.z) * 0.5f };
             state.hmdPose.orientation = { views[0].pose.orientation.x, views[0].pose.orientation.y, views[0].pose.orientation.z, views[0].pose.orientation.w };
             state.hmdPose.isValid = true;
             return;
@@ -1023,7 +1017,7 @@ void OpenXRManager::UpdateTracking(RiddickVRSharedState& state, XrTime predicted
     state.hmdPose.position = {0.0f, 0.0f, 0.0f};
     state.hmdPose.isValid = true;
 
-    constexpr float HALF_IPD = 0.0325f;
+    constexpr float HALF_IPD = kHalfIpdMeters;
     for (int i = 0; i < 16; ++i) {
         state.leftEyeView.m[i] = (i % 5 == 0) ? 1.0f : 0.0f;
         state.rightEyeView.m[i] = (i % 5 == 0) ? 1.0f : 0.0f;
@@ -1413,6 +1407,10 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
         uint32_t framesCounted = 0;
         uint32_t totalFrames = 0;
         bool hadClient = false;
+        // GH #21/#38 coverage: observe hook->host haptic pulses in mock mode
+        // to prove the publish path works end-to-end without a headset.
+        bool sawHookHaptics = false;
+        uint32_t hapticFrames = 0;
         auto lastClientSeen = std::chrono::steady_clock::now();
 
         while (m_running) {
@@ -1434,14 +1432,14 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
             state.clientConnected = clientConnected;
             state.renderWidth = m_recommendedWidth;
             state.renderHeight = m_recommendedHeight;
-            state.heartbeatTimestamp = GetTickCount();
+            state.heartbeatTimestamp = static_cast<uint32_t>(GetTickCount64());
             state.frameIndex = ++m_frameIndex;
 
             state.hmdPose.isValid = true;
             state.hmdPose.position = { 0.0f, 1.70f, 0.0f };
             state.hmdPose.orientation = { 0.0f, 0.0f, 0.0f, 1.0f };
 
-            constexpr float HALF_IPD = 0.032f;
+            constexpr float HALF_IPD = kHalfIpdMeters;
             for (int i = 0; i < 16; ++i) {
                 state.leftEyeView.m[i] = (i % 5 == 0) ? 1.0f : 0.0f;
                 state.rightEyeView.m[i] = (i % 5 == 0) ? 1.0f : 0.0f;
@@ -1548,6 +1546,18 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                     if (clientState.leftEyeSharedHandle && clientState.rightEyeSharedHandle) {
                         EnsureSharedTextures(clientState.leftEyeSharedHandle, clientState.rightEyeSharedHandle);
                     }
+                    // GH #21/#38: consume-on-read mirror of RenderFrame — log
+                    // hook pulses once, then clear so latching is detectable.
+                    if (clientState.leftHapticPulse > 0.05f || clientState.rightHapticPulse > 0.05f) {
+                        hapticFrames++;
+                        if (!sawHookHaptics) {
+                            sawHookHaptics = true;
+                            std::cout << "[Mock Host] Hook haptic pulse observed (L="
+                                      << clientState.leftHapticPulse << " R="
+                                      << clientState.rightHapticPulse << ")" << std::endl;
+                        }
+                        ipcHost.ClearHaptics();
+                    }
                 }
 
                 totalFrames++;
@@ -1577,7 +1587,9 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                 float fps = framesCounted / 3.0f;
                 std::cout << "[Mock Host] Test Heartbeat: " << std::fixed << std::setprecision(1) << fps 
                           << " FPS | Total Frames: " << totalFrames << " | Game Connected: " 
-                          << (clientConnected ? "YES" : "WAITING") << std::endl;
+                          << (clientConnected ? "YES" : "WAITING")
+                          << " | HookHaptics: " << (sawHookHaptics ? "SEEN" : "none")
+                          << " (" << hapticFrames << " frames)" << std::endl;
                 lastReport = now;
                 framesCounted = 0;
             }

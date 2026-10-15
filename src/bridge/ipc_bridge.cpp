@@ -1,4 +1,5 @@
 #include "ipc_bridge.h"
+#include <cstdio>
 #include <iostream>
 
 namespace RiddickVR {
@@ -16,7 +17,12 @@ IpcBridgeHost::~IpcBridgeHost() {
 bool IpcBridgeHost::Initialize() {
     if (m_initialized) return true;
 
-    // Create or open the shared memory mapping
+    // GH #28: nullptr lpSecurityDescriptor requests the DEFAULT DACL from the
+    // caller's token (NOT a NULL DACL — a NULL DACL would grant Everyone full
+    // access). Default security keeps the mapping/process-local to the logon
+    // session, matching the "Local\\" namespace below.
+    // TODO: lock down further with an explicit DACL (OWNER + logon SID only)
+    // if a shared-PC threat model ever requires it.
     m_hMapFile = CreateFileMappingA(
         INVALID_HANDLE_VALUE,
         nullptr,
@@ -46,6 +52,8 @@ bool IpcBridgeHost::Initialize() {
     m_pSharedState->vrActive = true;
 
     // Create synchronization events (manual reset = false)
+    // GH #28: default security (see Initialize comment); Local\ namespace.
+    // TODO: explicit restrictive DACL if threat model requires it.
     m_hFrameReadyEvent = CreateEventA(nullptr, FALSE, FALSE, RIDDICK_VR_IPC_FRAME_READY_EVENT);
     m_hFrameConsumedEvent = CreateEventA(nullptr, FALSE, FALSE, RIDDICK_VR_IPC_FRAME_CONSUMED_EVENT);
     m_hMutex = CreateMutexA(nullptr, FALSE, RIDDICK_VR_IPC_MUTEX_NAME);
@@ -101,7 +109,7 @@ bool IpcBridgeHost::WriteState(const RiddickVRSharedState& state) {
         m_pSharedState->renderHeight = state.renderHeight;
         m_pSharedState->vrActive = state.vrActive;
         m_pSharedState->shouldRecenter = state.shouldRecenter;
-        m_pSharedState->heartbeatTimestamp = GetTickCount();
+        m_pSharedState->heartbeatTimestamp = static_cast<uint32_t>(GetTickCount64());
 
         ReleaseMutex(m_hMutex);
         return true;
@@ -160,8 +168,10 @@ IpcBridgeClient::~IpcBridgeClient() {
 bool IpcBridgeClient::Connect(uint32_t timeoutMs) {
     if (m_connected) return true;
 
-    const DWORD startTime = GetTickCount();
-    while (GetTickCount() - startTime < timeoutMs) {
+    // GH #28: GetTickCount64 has no 49-day wrap; GetTickCount would break the
+    // timeout arithmetic after ~49 days of uptime.
+    const ULONGLONG startTime = GetTickCount64();
+    while (GetTickCount64() - startTime < timeoutMs) {
         m_hMapFile = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, RIDDICK_VR_IPC_SHARED_MEM_NAME);
         if (m_hMapFile) break;
         Sleep(50);
@@ -181,7 +191,17 @@ bool IpcBridgeClient::Connect(uint32_t timeoutMs) {
         return false;
     }
 
-    if (m_pSharedState->protocolVersion != RIDDICK_VR_PROTOCOL_VERSION) {
+    // GH #28: MIN/MAX version handshake (protocol stays v1-compatible).
+    // Accept any peer in [MIN_SUPPORTED, VERSION]; reject anything else so a
+    // layout mismatch fails closed instead of aliasing garbage state.
+    if (m_pSharedState->protocolVersion < RIDDICK_VR_PROTOCOL_MIN_SUPPORTED ||
+        m_pSharedState->protocolVersion > RIDDICK_VR_PROTOCOL_VERSION) {
+        char msg[160];
+        sprintf_s(msg, "[RiddickVR IPC] protocol mismatch: peer=%u, supported=[%u..%u]. Disconnecting.\n",
+            m_pSharedState->protocolVersion,
+            RIDDICK_VR_PROTOCOL_MIN_SUPPORTED, RIDDICK_VR_PROTOCOL_VERSION);
+        fprintf(stderr, "%s", msg);
+        OutputDebugStringA(msg);
         Disconnect();
         return false;
     }
