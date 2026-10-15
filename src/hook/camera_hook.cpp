@@ -3352,6 +3352,107 @@ static MeleeStrikeIntent UpdateMeleeStrikes(MeleeState& st, DWORD now,
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// GH #17 step 10: section 2 ladder climbing & mantling state + detection.
+// The 5 Update-local statics (rung holds, climb direction, mantle cooldown)
+// hoisted here. Detection lives in UpdateLadder below; ALL side effects
+// (SendKeyTap/HapticRequest/VR_LOG_INFO) stay at the call site in
+// CameraHook::Update with identical strings. No behavior change: same
+// volumes (Y > 0.32, Z cone [-0.55, -0.16]), grip thresholds (> 0.5 grab /
+// < 0.40 release), capacitive touch check, Vy thresholds (+/-0.25), and
+// mantle cooldown (> 1000ms).
+// ---------------------------------------------------------------------------
+struct LadderState {
+    bool leftHoldingRung = false;
+    bool rightHoldingRung = false;
+    bool climbUp = false;
+    bool climbDown = false;
+    DWORD lastMantleTime = 0;
+};
+static LadderState s_ladder;
+
+struct LadderIntent {
+    bool leftGrabbed = false;  // edge: log + haptic + 'E' tap
+    float leftGrabY = 0.0f;
+    float leftGrabZ = 0.0f;
+    bool rightGrabbed = false; // edge: log + haptic + 'E' tap
+    float rightGrabY = 0.0f;
+    float rightGrabZ = 0.0f;
+    bool mantle = false;       // edge: log + SPACE tap + 0.6 haptics
+    bool climbUp = false;      // level: mirrors st (drives 'W')
+    bool climbDown = false;    // level: mirrors st (drives 'S')
+    bool lPullDown = false;
+    bool rPullDown = false;
+    bool lPushUp = false;
+    bool rPushUp = false;
+    bool climbingActive = false;
+};
+
+static LadderIntent UpdateLadder(LadderState& st, DWORD now,
+                                 const RiddickVRVector3& leftLocal,
+                                 const RiddickVRVector3& rightLocal,
+                                 float leftGrip, float rightGrip,
+                                 uint32_t leftButtons, uint32_t rightButtons,
+                                 float leftTrigger, float rightTrigger,
+                                 float lVelY, float rVelY,
+                                 bool physicalBlockEngaged) {
+    LadderIntent out;
+    // Rung grab initiate: hand raised overhead (Y > 0.32m, Z in [-0.55, -0.16])
+    // and grip squeezed (> 0.5f). ADR 0381: spatial forward-cone depth
+    // filtering decouples ladder grabs from over-shoulder weapon drawing.
+    // ADR 0386: capacitive sensor disambiguation (fingers curled, not resting).
+    if (!st.leftHoldingRung) {
+        bool leftTouchEngaged = (leftButtons & RIDDICK_VR_TOUCH_TRIGGER) != 0 || leftTrigger > 0.20f;
+        if (leftLocal.y > 0.32f && (leftLocal.z >= -0.55f && leftLocal.z <= -0.16f) &&
+            leftGrip > 0.5f && leftTouchEngaged && !physicalBlockEngaged) {
+            st.leftHoldingRung = true;
+            out.leftGrabbed = true;
+            out.leftGrabY = leftLocal.y;
+            out.leftGrabZ = leftLocal.z;
+        }
+    } else {
+        if (leftGrip < 0.40f) {
+            st.leftHoldingRung = false;
+        }
+    }
+
+    if (!st.rightHoldingRung) {
+        bool rightTouchEngaged = (rightButtons & RIDDICK_VR_TOUCH_TRIGGER) != 0 || rightTrigger > 0.20f;
+        if (rightLocal.y > 0.32f && (rightLocal.z >= -0.55f && rightLocal.z <= -0.16f) &&
+            rightGrip > 0.5f && rightTouchEngaged && !physicalBlockEngaged) {
+            st.rightHoldingRung = true;
+            out.rightGrabbed = true;
+            out.rightGrabY = rightLocal.y;
+            out.rightGrabZ = rightLocal.z;
+        }
+    } else {
+        if (rightGrip < 0.40f) {
+            st.rightHoldingRung = false;
+        }
+    }
+
+    // Climbing pull / push velocities.
+    out.lPullDown = st.leftHoldingRung && (lVelY < -0.25f);
+    out.rPullDown = st.rightHoldingRung && (rVelY < -0.25f);
+    out.lPushUp = st.leftHoldingRung && (lVelY > 0.25f);
+    out.rPushUp = st.rightHoldingRung && (rVelY > 0.25f);
+
+    // Two-handed mantle / ledge pull: both hands pulling down simultaneously.
+    if (out.lPullDown && out.rPullDown && (now - st.lastMantleTime > 1000)) {
+        st.lastMantleTime = now;
+        out.mantle = true;
+    }
+
+    // Pull-to-climb motion translation (alternating hands = hand-over-hand).
+    st.climbUp = (out.lPullDown || out.rPullDown);
+    st.climbDown = !st.climbUp && (out.lPushUp || out.rPushUp);
+    out.climbUp = st.climbUp;
+    out.climbDown = st.climbDown;
+
+    out.climbingActive = st.leftHoldingRung || st.rightHoldingRung || st.climbUp || st.climbDown;
+    return out;
+}
+
 void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (!m_initialized || !vrState.vrActive) return;
 
@@ -3516,52 +3617,28 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // - Pull-to-Climb: Gripping and pulling down (Vy < -0.25 m/s) dispatches 'W' (forward/upward climb)
     // - Push-to-Descend: Gripping and pushing upward (Vy > +0.25 m/s) dispatches 'S' (backward/downward climb)
     // - Two-Handed Mantle: Gripping and pulling both hands down simultaneously triggers Space (mantle confirm) with 0.6 haptics
-    static bool s_leftHoldingRung = false;
-    static bool s_rightHoldingRung = false;
-    static bool s_ladderClimbUp = false;
-    static bool s_ladderClimbDown = false;
-    static DWORD s_lastMantleTime = 0;
-
-    // Grab initiate: hand raised overhead (Y > 0.32m, Z in [-0.55, -0.16]) and grip squeezed (> 0.5f)
-    // ADR 0381: Spatial forward-cone depth filtering decouples ladder grabs from over-shoulder weapon drawing!
-    // ADR 0386: Capacitive sensor disambiguation: ensure fingers are curled around rung rather than resting
-    if (!s_leftHoldingRung) {
-        bool leftTouchEngaged = (vrState.leftController.buttons & RIDDICK_VR_TOUCH_TRIGGER) != 0 || vrState.leftController.trigger > 0.20f;
-        if (leftLocal.y > 0.32f && (leftLocal.z >= -0.55f && leftLocal.z <= -0.16f) && vrState.leftController.grip > 0.5f && leftTouchEngaged && !s_physicalBlockEngaged) {
-            s_leftHoldingRung = true;
-            VR_LOG_INFO("Physical Gesture: LADDER RUNG GRABBED (Left hand, Y: %.2fm, Z: %.2fm)", leftLocal.y, leftLocal.z);
-            HapticRequest(0, 0.35f, kHapticUi); // GH #32
-            SendKeyTap('E');
-        }
-    } else {
-        if (vrState.leftController.grip < 0.40f) {
-            s_leftHoldingRung = false;
-        }
+    // GH #17 step 10: detection delegated to UpdateLadder (explicit
+    // LadderState); side effects (keys/haptics/logs) stay at call site.
+    LadderIntent ladderIntent = UpdateLadder(s_ladder, now,
+        leftLocal, rightLocal,
+        vrState.leftController.grip, vrState.rightController.grip,
+        vrState.leftController.buttons, vrState.rightController.buttons,
+        vrState.leftController.trigger, vrState.rightController.trigger,
+        lVel.y, rVel.y,
+        s_physicalBlockEngaged);
+    if (ladderIntent.leftGrabbed) {
+        VR_LOG_INFO("Physical Gesture: LADDER RUNG GRABBED (Left hand, Y: %.2fm, Z: %.2fm)", ladderIntent.leftGrabY, ladderIntent.leftGrabZ);
+        HapticRequest(0, 0.35f, kHapticUi); // GH #32
+        SendKeyTap('E');
     }
-
-    if (!s_rightHoldingRung) {
-        bool rightTouchEngaged = (vrState.rightController.buttons & RIDDICK_VR_TOUCH_TRIGGER) != 0 || vrState.rightController.trigger > 0.20f;
-        if (rightLocal.y > 0.32f && (rightLocal.z >= -0.55f && rightLocal.z <= -0.16f) && vrState.rightController.grip > 0.5f && rightTouchEngaged && !s_physicalBlockEngaged) {
-            s_rightHoldingRung = true;
-            VR_LOG_INFO("Physical Gesture: LADDER RUNG GRABBED (Right hand, Y: %.2fm, Z: %.2fm)", rightLocal.y, rightLocal.z);
-            HapticRequest(1, 0.35f, kHapticUi); // GH #32
-            SendKeyTap('E');
-        }
-    } else {
-        if (vrState.rightController.grip < 0.40f) {
-            s_rightHoldingRung = false;
-        }
+    if (ladderIntent.rightGrabbed) {
+        VR_LOG_INFO("Physical Gesture: LADDER RUNG GRABBED (Right hand, Y: %.2fm, Z: %.2fm)", ladderIntent.rightGrabY, ladderIntent.rightGrabZ);
+        HapticRequest(1, 0.35f, kHapticUi); // GH #32
+        SendKeyTap('E');
     }
-
-    // Evaluate climbing pull / push velocities
-    bool lPullDown = s_leftHoldingRung && (lVel.y < -0.25f);
-    bool rPullDown = s_rightHoldingRung && (rVel.y < -0.25f);
-    bool lPushUp = s_leftHoldingRung && (lVel.y > 0.25f);
-    bool rPushUp = s_rightHoldingRung && (rVel.y > 0.25f);
 
     // Two-Handed Mantle / Ledge Pull: Both hands pulling downward simultaneously
-    if (lPullDown && rPullDown && (now - s_lastMantleTime > 1000)) {
-        s_lastMantleTime = now;
+    if (ladderIntent.mantle) {
         VR_LOG_INFO("Physical Gesture: TWO-HANDED MANTLE / LEDGE PULL executed");
         SendKeyTap(VK_SPACE);
         HapticRequest(0, 0.60f, kHapticLadder); // GH #32
@@ -3583,19 +3660,17 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     }
 
     // Pull-to-climb motion translation (alternating hands gives hand-over-hand climbing)
-    s_ladderClimbUp = (lPullDown || rPullDown);
-    s_ladderClimbDown = !s_ladderClimbUp && (lPushUp || rPushUp);
-
+    // (climb direction state lives in s_ladder; stroke haptics below at call site)
     // Subtle tactile haptic pulse during active climbing strokes
-    if (s_ladderClimbUp) {
-        if (lPullDown) HapticRequest(0, (0.20f), kHapticAmbient);
-        if (rPullDown) HapticRequest(1, (0.20f), kHapticAmbient);
-    } else if (s_ladderClimbDown) {
-        if (lPushUp) HapticRequest(0, (0.20f), kHapticAmbient);
-        if (rPushUp) HapticRequest(1, (0.20f), kHapticAmbient);
+    if (ladderIntent.climbUp) {
+        if (ladderIntent.lPullDown) HapticRequest(0, (0.20f), kHapticAmbient);
+        if (ladderIntent.rPullDown) HapticRequest(1, (0.20f), kHapticAmbient);
+    } else if (ladderIntent.climbDown) {
+        if (ladderIntent.lPushUp) HapticRequest(0, (0.20f), kHapticAmbient);
+        if (ladderIntent.rPushUp) HapticRequest(1, (0.20f), kHapticAmbient);
     }
 
-    bool isClimbingActive = s_leftHoldingRung || s_rightHoldingRung || s_ladderClimbUp || s_ladderClimbDown;
+    bool isClimbingActive = ladderIntent.climbingActive;
 
     // 2b. Diegetic NanoMED Health Station & Physical Cartridge Interaction (ADR 0407)
     // - Biometric Scanner Palm Contact: Open flat palm placed on the health station's scanner console
@@ -3668,8 +3743,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     bool wantA = locoIntent.left;
     bool wantD = locoIntent.right;
 
-    if (s_ladderClimbUp) wantW = true;
-    if (s_ladderClimbDown) wantS = true;
+    if (s_ladder.climbUp) wantW = true;
+    if (s_ladder.climbDown) wantS = true;
 
     if (wantW != s_wPressed) { SendKey('W', wantW); s_wPressed = wantW; }
     if (wantS != s_sPressed) { SendKey('S', wantS); s_sPressed = wantS; }
