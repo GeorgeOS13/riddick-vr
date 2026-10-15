@@ -30,6 +30,16 @@ struct PostureState {
     bool isStealthPeeking = false;
 };
 static PostureState s_posture;
+// Track C #17 step 4 (GH #17): NanoMED cartridge/palm state hoisted out of
+// CameraHook::Update section 2b into an explicit struct (no behavior change).
+struct NanoMedState {
+    bool holdingCartridge = false;
+    bool palmActive = false;
+    DWORD lastTouchTime = 0;
+    DWORD lastDrawTime = 0;
+    DWORD lastInsertTime = 0;
+};
+static NanoMedState s_nanomed;
 static bool s_twoHandedStabilizationActive = false;
 static bool s_physicalBlockEngaged = false;
 static DWORD s_lastReloadGestureTime = 0;
@@ -443,6 +453,72 @@ static NanoMedVolumes DetectNanoMEDContact(const RiddickVRVector3& domLocal,
                       (leftLocal.y >= -0.25f && leftLocal.y <= 0.25f) && (fabsf(leftLocal.x) < 0.28f);
     out.rightContact = rightPalmFlat && (rightLocal.z >= -0.65f && rightLocal.z <= -0.22f) &&
                        (rightLocal.y >= -0.25f && rightLocal.y <= 0.25f) && (fabsf(rightLocal.x) < 0.28f);
+    return out;
+}
+
+// Track C #17 step 4 (GH #17): section 2b NanoMED cartridge/palm detection.
+// Pure detection: updates st, returns edge intents; Update owns
+// SendGestureTap/HapticRequest/logs. Same volumes (via DetectNanoMEDContact),
+// cooldowns, and haptic cadence as the inline block it replaces.
+struct NanoMedIntent {
+    bool cartridgeDrawn = false;
+    bool cartridgeReturned = false;
+    bool cartridgeInserted = false;
+    bool palmEngaged = false; // edge: debounced 'E' tap + log
+    bool palmActive = false;  // level: continuous haptic cadence
+    bool leftContact = false;
+    bool rightContact = false;
+    float pulseAmp = 0.0f;
+};
+
+static NanoMedIntent UpdateNanoMED(NanoMedState& st, DWORD now,
+                                   const RiddickVRVector3& domHandLocal, float domHandVelY, float domGrip,
+                                   const RiddickVRVector3& leftLocal, const RiddickVRVector3& rightLocal,
+                                   bool leftPalmFlat, bool rightPalmFlat, bool physicalBlockEngaged) {
+    NanoMedIntent out;
+    NanoMedVolumes vol = DetectNanoMEDContact(domHandLocal, leftLocal, rightLocal, leftPalmFlat, rightPalmFlat);
+    out.leftContact = vol.leftContact;
+    out.rightContact = vol.rightContact;
+
+    // A. Hip holster cartridge draw / return.
+    if (!st.holdingCartridge) {
+        if (domHandLocal.y < -0.38f && domGrip > 0.60f && (now - st.lastDrawTime > 1200)) {
+            st.holdingCartridge = true;
+            st.lastDrawTime = now;
+            out.cartridgeDrawn = true;
+        }
+    } else {
+        // Return cartridge to holster if grip released away from station.
+        if (domGrip < 0.30f && (domHandLocal.z > -0.20f || domHandLocal.y < 0.0f)) {
+            st.holdingCartridge = false;
+            out.cartridgeReturned = true;
+        }
+    }
+
+    // B. Downward cartridge insertion into overhead station receiver slot.
+    if (st.holdingCartridge) {
+        if (vol.inReceiver && domHandVelY < -0.22f && (now - st.lastInsertTime > 1500)) {
+            st.holdingCartridge = false;
+            st.lastInsertTime = now;
+            out.cartridgeInserted = true;
+        }
+    }
+
+    // C. Biometric scanner palm contact.
+    bool wantPalmActive = (vol.leftContact || vol.rightContact) && !st.holdingCartridge && !physicalBlockEngaged;
+    if (wantPalmActive) {
+        if (!st.palmActive && (now - st.lastTouchTime > 1200)) {
+            st.lastTouchTime = now;
+            out.palmEngaged = true;
+        }
+        st.palmActive = true;
+        out.palmActive = true;
+        // Continuous restorative nanite injection haptic cadence (120 Hz pulse oscillation).
+        out.pulseAmp = 0.35f + 0.15f * sinf(static_cast<float>(now) * 0.015f);
+    } else {
+        st.palmActive = false;
+        out.palmActive = false;
+    }
     return out;
 }
 
@@ -1152,70 +1228,52 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     //   Reaching to hip holster/waist (Y < -0.38m, grip > 0.60f) draws a NanoMED cartridge with tactile click haptics.
     //   Pushing down into the overhead station slot (Z in [-0.60, -0.22]m, Y in [0.05, 0.40]m, Vy < -0.22 m/s)
     //   slams the cartridge into the receiver, triggering 'E' / MSG_TRIGGERREFILL with heavy latch haptics (0.85f).
-    static bool s_holdingNanoMedCartridge = false;
-    static DWORD s_lastNanoMedTouchTime = 0;
-    static DWORD s_lastCartridgeDrawTime = 0;
-    static DWORD s_lastCartridgeInsertTime = 0;
-    static bool s_nanoMedPalmActive = false;
+    // Track C #17 step 4 (GH #17): detection delegated to UpdateNanoMED
+    // (explicit NanoMedState); side effects (keys/haptics/logs) stay at call site.
     // Track C #14: dominant-hand holster path resolves via southpaw.
     const RiddickVRVector3& domHandLocal = g_vrConfig.southpaw ? leftLocal : rightLocal;
     float domHandVelY = g_vrConfig.southpaw ? lVel.y : rVel.y;
     // Track C #17: palm-flat state hoisted for DetectNanoMEDContact (pure move).
     bool leftPalmFlat = (vrState.leftController.trigger < 0.20f && vrState.leftController.grip < 0.25f);
     bool rightPalmFlat = (vrState.rightController.trigger < 0.20f && vrState.rightController.grip < 0.25f);
-    NanoMedVolumes nanoVol = DetectNanoMEDContact(domHandLocal, leftLocal, rightLocal, leftPalmFlat, rightPalmFlat);
+    NanoMedIntent nanoIntent = UpdateNanoMED(s_nanomed, now, domHandLocal, domHandVelY, domCtrl.grip,
+                                             leftLocal, rightLocal, leftPalmFlat, rightPalmFlat,
+                                             s_physicalBlockEngaged);
 
     // A. Hip Holster Cartridge Draw
-    if (!s_holdingNanoMedCartridge) {
-        if (domHandLocal.y < -0.38f && domCtrl.grip > 0.60f && (now - s_lastCartridgeDrawTime > 1200)) {
-            s_holdingNanoMedCartridge = true;
-            s_lastCartridgeDrawTime = now;
-            HapticRequest(1, (0.50f), kHapticReload); // Firm cartridge draw snap
-            VR_LOG_INFO("Diegetic Interaction: NANOMED CARTRIDGE DRAWN FROM WAIST HOLSTER");
-        }
-    } else {
+    if (nanoIntent.cartridgeDrawn) {
+        HapticRequest(1, (0.50f), kHapticReload); // Firm cartridge draw snap
+        VR_LOG_INFO("Diegetic Interaction: NANOMED CARTRIDGE DRAWN FROM WAIST HOLSTER");
+    } else if (nanoIntent.cartridgeReturned) {
         // Return cartridge to holster if grip released away from station
-        if (domCtrl.grip < 0.30f && (domHandLocal.z > -0.20f || domHandLocal.y < 0.0f)) {
-            s_holdingNanoMedCartridge = false;
-            HapticRequest(1, (0.20f), kHapticAmbient);
-            VR_LOG_INFO("Diegetic Interaction: NANOMED CARTRIDGE RETURNED TO HOLSTER");
-        }
+        HapticRequest(1, (0.20f), kHapticAmbient);
+        VR_LOG_INFO("Diegetic Interaction: NANOMED CARTRIDGE RETURNED TO HOLSTER");
     }
 
     // B. Downward Cartridge Insertion into Overhead Station Receiver Slot
-    if (s_holdingNanoMedCartridge) {
-        bool inReceiverVolume = nanoVol.inReceiver; // Track C #17
-        if (inReceiverVolume && domHandVelY < -0.22f && (now - s_lastCartridgeInsertTime > 1500)) {
-            s_holdingNanoMedCartridge = false;
-            s_lastCartridgeInsertTime = now;
-            SendGestureTap('E', "nanomed/cartridge-insert"); // Track C #15
-            HapticRequest(1, (0.85f), kHapticReload); // Heavy mechanical locking latch impact
-            VR_LOG_INFO("Diegetic Interaction: NANOMED CARTRIDGE INSERTED INTO STATION RECEIVER (MSG_TRIGGERREFILL)");
-        }
+    if (nanoIntent.cartridgeInserted) {
+        SendGestureTap('E', "nanomed/cartridge-insert"); // Track C #15
+        HapticRequest(1, (0.85f), kHapticReload); // Heavy mechanical locking latch impact
+        VR_LOG_INFO("Diegetic Interaction: NANOMED CARTRIDGE INSERTED INTO STATION RECEIVER (MSG_TRIGGERREFILL)");
     }
 
     // C. Biometric Scanner Palm Contact (Open Palm on Health Station Scanner)
-    bool leftScannerContact = nanoVol.leftContact; // Track C #17
-    bool rightScannerContact = nanoVol.rightContact;
+    bool leftScannerContact = nanoIntent.leftContact;
+    bool rightScannerContact = nanoIntent.rightContact;
 
-    bool wantPalmActive = (leftScannerContact || rightScannerContact) && !s_holdingNanoMedCartridge && !s_physicalBlockEngaged;
-    if (wantPalmActive) {
-        if (!s_nanoMedPalmActive && (now - s_lastNanoMedTouchTime > 1200)) {
-            s_lastNanoMedTouchTime = now;
-            SendGestureTap('E', "nanomed/palm-scan"); // Track C #15
-            VR_LOG_INFO("Diegetic Interaction: BIOMETRIC PALM SCANNER CONTACT ENGAGED (Left: %d, Right: %d)",
-                leftScannerContact ? 1 : 0, rightScannerContact ? 1 : 0);
-        }
-        s_nanoMedPalmActive = true;
+    if (nanoIntent.palmEngaged) {
+        SendGestureTap('E', "nanomed/palm-scan"); // Track C #15
+        VR_LOG_INFO("Diegetic Interaction: BIOMETRIC PALM SCANNER CONTACT ENGAGED (Left: %d, Right: %d)",
+            leftScannerContact ? 1 : 0, rightScannerContact ? 1 : 0);
+    }
+    if (nanoIntent.palmActive) {
         // Continuous restorative nanite injection haptic cadence (120 Hz pulse oscillation)
-        float pulseAmp = 0.35f + 0.15f * sinf(static_cast<float>(now) * 0.015f);
+        float pulseAmp = nanoIntent.pulseAmp;
         if (leftScannerContact) HapticRequest(0, pulseAmp, kHapticReload); // GH #32: NanoMED
         if (rightScannerContact) HapticRequest(1, pulseAmp, kHapticReload); // GH #32: NanoMED
-    } else {
-        s_nanoMedPalmActive = false;
     }
 
-    s_vrFirstActionActive = isClimbingActive || s_nanoMedPalmActive || s_holdingNanoMedCartridge;
+    s_vrFirstActionActive = isClimbingActive || s_nanomed.palmActive || s_nanomed.holdingCartridge;
 
     // 3. Radial Locomotion Deadzone & Diagonal Movement Normalization (ADR 0372)
     static bool s_wPressed = false, s_sPressed = false, s_aPressed = false, s_dPressed = false;
