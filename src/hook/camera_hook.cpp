@@ -2155,6 +2155,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                                      rVel.y < -2.70f && lVel.y < -2.45f &&
                                                      fabsf(rVel.x - lVel.x) > 2.05f);
 
+            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Cranial Post Fulcrum Leverage Clavicle Fracture Ground Pin (ADR 0353)
+            static DWORD s_lastCranialFulcrumClaviclePinTime = 0;
+            static char s_cranialFulcrumClaviclePinDirKey = 'A';
+            bool cranialFulcrumClaviclePinStance = (handsDistSledge < 0.26f &&
+                                                    leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                                    vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
+            bool cranialFulcrumClaviclePinPlunge = (cranialFulcrumClaviclePinStance && rVel.y < -2.70f &&
+                                                    lVel.y < -2.45f && fabsf(lVel.x) > 1.30f);
+            if (cranialFulcrumClaviclePinPlunge && (now - s_lastCranialFulcrumClaviclePinTime > 2000)) {
+                s_cranialFulcrumClaviclePinDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+            }
+
+            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Multiverse Singularity Overdrive (ADR 0354)
+            static DWORD s_lastPlasmaMultiverseSingularityTime = 0;
+            bool plasmaMultiverseSingularityStance = (handsDistSledge < 0.28f &&
+                                                      vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
+                                                      vrState.rightController.trigger > 0.65f);
+            bool plasmaMultiverseSingularityPlunge = (plasmaMultiverseSingularityStance && isJumpingStance &&
+                                                      rVel.y < -2.75f && lVel.y < -2.50f &&
+                                                      fabsf(rVel.x - lVel.x) > 2.10f);
+
             // Inmate Pit Brawl Outside Leg Hook Sweep & Ground Knee Drop (ADR 0209)
             static DWORD s_lastOutsideLegSweepTime = 0;
             static DWORD s_outsideLegSweepHookTime = 0;
@@ -2199,6 +2220,141 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 }
             } else {
                 s_crossBlockHoldStart = 0;
+            }
+
+            if (plasmaMultiverseSingularityPlunge && (now - s_lastPlasmaMultiverseSingularityTime > 2000)) {
+                s_lastPlasmaMultiverseSingularityTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM MULTIVERSE SINGULARITY OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
+                SendKey(VK_SPACE, true);
+                SendKey('W', true);
+                SendKey('Q', true);
+                SendKey(VK_TAB, true);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                SendKey('C', true);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                SendKey(VK_TAB, true);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                SendKey('Q', true);
+                SendKey(VK_TAB, true);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                SendKey(VK_TAB, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                SendKey(VK_TAB, true);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                SendKey(VK_TAB, true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_TAB, false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_TAB, false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_TAB, false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_TAB, false);
+                SendKey('Q', false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_TAB, false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey('C', false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_TAB, false);
+                SendKey('Q', false);
+                SendKey('W', false);
+                SendKey(VK_SPACE, false);
+                vrState.rightHapticPulse = 0.98f; // Resonant cataclysm multiverse singularity overdrive shockwave (510 Hz)
+                vrState.leftHapticPulse = 0.98f;  // Structural deck multiverse recoil (440 Hz)
+                goto combat_gesture_done;
+            }
+            if (cranialFulcrumClaviclePinPlunge && (now - s_lastCranialFulcrumClaviclePinTime > 2000)) {
+                s_lastCranialFulcrumClaviclePinTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST FULCRUM CLAVICLE PIN EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialFulcrumClaviclePinDirKey, rVel.y, lVel.y);
+                SendKey('W', true);
+                SendKey(s_cranialFulcrumClaviclePinDirKey, true);
+                SendKey('C', true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, true);
+                SendKey('C', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, true);
+                SendKey('Q', true);
+                SendKey(VK_TAB, true);
+                SendKey(VK_RETURN, true);
+                SendKey(VK_SPACE, true);
+                SendKey('C', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('C', false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_TAB, false);
+                SendKey('Q', false);
+                SendKey(VK_SPACE, false);
+                SendKey('C', false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_SPACE, false);
+                SendKey('C', false);
+                SendKey(s_cranialFulcrumClaviclePinDirKey, false);
+                SendKey('W', false);
+                vrState.rightHapticPulse = 0.98f; // Concussive clavicle fracture shockwave (510 Hz)
+                vrState.leftHapticPulse = 0.95f;  // Whizzer overhook drag torque (440 Hz)
+                goto combat_gesture_done;
             }
 
             if (plasmaContinuumSingularityPlunge && (now - s_lastPlasmaContinuumSingularityTime > 2000)) {
@@ -8527,6 +8683,45 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 vrState.rightHapticPulse = 0.95f; // Strobe lens push-to-test micro-switch click (400 Hz)
                 vrState.leftHapticPulse = 0.55f;  // VFD enclosure acoustic vibration (145 Hz)
+            }
+
+            // Dark Athena EVA Solar Collector Photovoltaic Array Primary Sun-Tracking Gimbal Elevation/Pitch Limit Switch Cam Dog Engagement (ADR 0351)
+            static DWORD s_lastGimbalElevationCamDogTime = 0;
+            bool handAtElevationLimitBracket = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
+                                                vrState.leftController.grip > 0.55f);
+            bool handOnElevationCamDog = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
+                                          vrState.rightController.trigger < 0.40f);
+            bool gimbalElevationCamDogStroke = (fabsf(rVel.y) > 0.65f && rVel.z < -0.50f);
+            if (handAtElevationLimitBracket && handOnElevationCamDog && gimbalElevationCamDogStroke && (now - s_lastGimbalElevationCamDogTime > 1800)) {
+                s_lastGimbalElevationCamDogTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA SOLAR GIMBAL ELEVATION LIMIT CAM DOG ENGAGED (Ry: %.2f, Rz: %.2f)", rVel.y, rVel.z);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap(VK_TAB);
+                SendKeyTap(VK_RETURN);
+                SendKeyTap(VK_RETURN);
+                vrState.rightHapticPulse = 0.95f; // Alloy cam dog detent snap (410 Hz)
+                vrState.leftHapticPulse = 0.55f;  // Limit switch housing resonance (165 Hz)
+            }
+
+            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Motor Starter Auxiliary Contact Block Mechanical Latch Verification (ADR 0352)
+            static DWORD s_lastAuxContactLatchTime = 0;
+            bool handAtAuxContactBlockFrame = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
+                                               vrState.leftController.grip > 0.55f);
+            bool handPointingAuxContactPlunger = (twoHandDist < 0.22f && vrState.rightController.grip < 0.45f &&
+                                                  vrState.rightController.trigger < 0.35f);
+            bool auxContactLatchStroke = (rVel.z < -0.75f);
+            if (handAtAuxContactBlockFrame && handPointingAuxContactPlunger && auxContactLatchStroke && (now - s_lastAuxContactLatchTime > 1800)) {
+                s_lastAuxContactLatchTime = now;
+                VR_LOG_INFO("Environmental Gesture: DRAFT FAN MOTOR STARTER AUXILIARY CONTACT LATCHED (Rz: %.2f)", rVel.z);
+                SendKeyTap('E');
+                SendKeyTap('Q');
+                SendKeyTap(VK_TAB);
+                SendKeyTap(VK_RETURN);
+                SendKeyTap(VK_RETURN);
+                SendKeyTap(VK_SPACE);
+                vrState.rightHapticPulse = 0.95f; // Mechanical auxiliary contact latch snap (410 Hz)
+                vrState.leftHapticPulse = 0.55f;  // Starter enclosure resonance (150 Hz)
             }
         }
     }
