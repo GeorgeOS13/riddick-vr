@@ -74,6 +74,10 @@ public:
     // GH #43/#44: true when a perspective projection was seen within the
     // last few presented frames (menus/cinematics go ortho/2D between frames).
     static bool Has3DThisFrame();
+    // GH #43: menu cursor seen within the last few swaps (menus render 3D
+    // backgrounds behind 2D UI - projection alone cannot tell them apart).
+    static void NoteMenuCursor(bool visible);
+    static bool HasMenuCursor();
     static const float* GetLastProjectionMatrix();
     static const float* GetLastViewMatrix();
 

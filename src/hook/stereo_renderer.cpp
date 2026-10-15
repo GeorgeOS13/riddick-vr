@@ -698,6 +698,8 @@ void StereoRenderer::ScanActiveRegion(GLint ox, GLint oy, GLint srcW, GLint srcH
     if (!m_hasActiveRect) {
         m_activeX0 = x0; m_activeY0 = y0; m_activeX1 = x1; m_activeY1 = y1;
         m_hasActiveRect = true;
+        VR_LOG_INFO("BarScan: first active rect (%d,%d)-(%d,%d) of (%d,%d) win",
+            x0, y0, x1, y1, fx1, fy1);
         return;
     }
     // Snap on large jumps (mode/scene change), else ease toward detection.
@@ -705,6 +707,7 @@ void StereoRenderer::ScanActiveRegion(GLint ox, GLint oy, GLint srcW, GLint srcH
     if (snap(x0, m_activeX0, srcW) || snap(x1, m_activeX1, srcW) ||
         snap(y0, m_activeY0, srcH) || snap(y1, m_activeY1, srcH)) {
         m_activeX0 = x0; m_activeY0 = y0; m_activeX1 = x1; m_activeY1 = y1;
+        VR_LOG_INFO("BarScan: snap to (%d,%d)-(%d,%d)", x0, y0, x1, y1);
     } else {
         m_activeX0 = (m_activeX0 + x0) / 2; m_activeY0 = (m_activeY0 + y0) / 2;
         m_activeX1 = (m_activeX1 + x1) / 2; m_activeY1 = (m_activeY1 + y1) / 2;
@@ -808,9 +811,21 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
             GLint dstH = m_eyeHeight;
 
             // GH #43/#44: cinema screen for menus/cinematics (2D frames),
-            // full-bleed immersion for 3D gameplay.
-            bool isCinema = !OpenGLProxy::Has3DThisFrame();
+            // full-bleed immersion for 3D gameplay. Menus often render 3D
+            // backgrounds, so an OS cursor also forces cinema mode.
+            bool isCinema = !OpenGLProxy::Has3DThisFrame() || OpenGLProxy::HasMenuCursor();
             m_sharedState.cinemaMode = isCinema;
+            {
+                static bool s_lastCinema = false;
+                static bool s_cinemaLogged = false;
+                if (isCinema != s_lastCinema || !s_cinemaLogged) {
+                    s_lastCinema = isCinema;
+                    s_cinemaLogged = true;
+                    VR_LOG_INFO("DisplayMode: %s (3Dfresh=%d menuCursor=%d)",
+                        isCinema ? "CINEMA screen (menus/cinematics)" : "FULL-BLEED gameplay",
+                        (int)OpenGLProxy::Has3DThisFrame(), (int)OpenGLProxy::HasMenuCursor());
+                }
+            }
 
             // Read from default backbuffer 0
             OpenGLProxy::real_glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */, 0);

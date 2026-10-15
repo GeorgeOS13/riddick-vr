@@ -332,6 +332,13 @@ void VRHandRenderer::RenderHands(const RiddickVRSharedState& state, bool isLeftE
     float pulse = 0.5f + 0.5f * sinf(static_cast<float>(GetTickCount()) * 0.008f);
     float leftGlow = nearReceiver ? (0.4f + 0.6f * pulse) : 0.0f;
     float rightGlow = nearReceiver ? (0.4f + 0.6f * pulse) : 0.0f;
+    // GH #46: fade our overlay where the engine's own gun/hands dominate the
+    // view (firing grip, ADS pose, two-handed hold) so we don't double-render
+    // over the game's arms. Full opacity for open/interacting hands.
+    bool twoHanded = (leftCtrl.grip > 0.70f && rightCtrl.grip > 0.70f);
+    float leftFade = (leftCtrl.trigger > 0.60f || twoHanded) ? 0.25f : 1.0f;
+    float rightFade = (rightCtrl.trigger > 0.60f || twoHanded) ? 0.25f : 1.0f;
+    VRHandRenderer::Instance().SetHandFade(leftFade, rightFade);
     // Grab proximity (vents, biometric terminals, guard throat-grip corridor):
     // hand forward of chest with grip closed (grab) or index extended (poke).
     auto GrabGlowFor = [](const RiddickVRVector3& local, const RiddickVRControllerInput& c) {

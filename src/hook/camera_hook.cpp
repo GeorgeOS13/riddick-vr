@@ -3373,6 +3373,9 @@ struct LadderState {
     // second hand may land slightly late instead of requiring simultaneity.
     DWORD firstPullTime = 0;
     bool firstPullLeft = false;
+    // GH #47: idle-while-hanging hint - holding a rung with no pull motion.
+    DWORD lastPullActivityTime = 0;
+    bool idleHintFired = false;
 };
 static LadderState s_ladder;
 
@@ -3386,6 +3389,7 @@ struct LadderIntent {
     bool mantle = false;       // edge: log + SPACE tap + 0.6 haptics
     bool mantleWindow = false;   // level: first pull down, waiting for second (ready cue)
     bool mantleWindowOpened = false; // edge: window just opened (single ready double-pulse)
+    bool hangingIdleHint = false;  // edge: holding rung 1.5s with no pull (teach PULL DOWN)
     bool climbUp = false;      // level: mirrors st (drives 'W')
     bool climbDown = false;    // level: mirrors st (drives 'S')
     bool lPullDown = false;
@@ -3479,6 +3483,19 @@ static LadderIntent UpdateLadder(LadderState& st, DWORD now,
     st.climbDown = !st.climbUp && (out.lPushUp || out.rPushUp);
     out.climbUp = st.climbUp;
     out.climbDown = st.climbDown;
+
+    // GH #47: teach the hang. Holding a rung with zero pull motion for
+    // 1.5s fires a one-shot hint (call site: pulse + PULL DOWN log) so a
+    // player stuck on a ledge learns the next move. Resets on any pull/push.
+    bool anyPullMotion = out.lPullDown || out.rPullDown || out.lPushUp || out.rPushUp;
+    if (anyPullMotion) {
+        st.lastPullActivityTime = now;
+        st.idleHintFired = false;
+    } else if ((st.leftHoldingRung || st.rightHoldingRung) && !st.idleHintFired &&
+               (now - st.lastPullActivityTime > 1500)) {
+        st.idleHintFired = true;
+        out.hangingIdleHint = true;
+    }
 
     out.climbingActive = st.leftHoldingRung || st.rightHoldingRung || st.climbUp || st.climbDown;
     return out;
@@ -3772,6 +3789,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (GetCursorInfo(&ci)) {
         cursorShowing = (ci.flags & CURSOR_SHOWING) != 0;
     }
+    // GH #43: feed the renderer mode detector (menus show cursor over 3D bg).
+    OpenGLProxy::NoteMenuCursor(cursorShowing);
 
     uint32_t btns = vrState.rightController.buttons | vrState.leftController.buttons;
     // Track C #14 (southpaw): dominant/off-hand aliases resolved once in the
@@ -3943,6 +3962,12 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // below teaches the sequence: first pull -> double-pulse + log hint.
     if (ladderIntent.mantleWindowOpened) {
         VR_LOG_INFO("Climb Hint: MANTLE READY - pull DOWN with your other hand now!");
+        HapticRequest(0, 0.30f, kHapticUi);
+        HapticRequest(1, 0.30f, kHapticUi);
+    }
+    // GH #47: hanging with no pull motion - teach PULL DOWN TO CLIMB.
+    if (ladderIntent.hangingIdleHint) {
+        VR_LOG_INFO("Climb Hint: HOLDING RUNG - PULL DOWN hand-over-hand to climb, both hands down to mantle!");
         HapticRequest(0, 0.30f, kHapticUi);
         HapticRequest(1, 0.30f, kHapticUi);
     }

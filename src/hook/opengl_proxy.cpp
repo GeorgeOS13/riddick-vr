@@ -86,6 +86,17 @@ static bool s_has3DGameplayProjection = false;
 // stamp the swap-frame of each perspective sighting instead.
 static uint64_t s_swapFrameCount = 0;
 static uint64_t s_last3DFrame = 0;
+// GH #43: menus show the OS cursor while 3D backgrounds may still render
+// perspective behind them - track cursor visibility per swap as well.
+static uint64_t s_lastCursorFrame = 0;
+
+void OpenGLProxy::NoteMenuCursor(bool visible) {
+    if (visible) s_lastCursorFrame = s_swapFrameCount;
+}
+
+bool OpenGLProxy::HasMenuCursor() {
+    return (s_swapFrameCount - s_lastCursorFrame <= 3);
+}
 static uint32_t s_projMatrixCount = 0;
 static uint32_t s_modelviewMatrixCount = 0;
 
