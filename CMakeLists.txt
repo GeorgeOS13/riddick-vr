@@ -37,6 +37,8 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4 AND RIDDICKVR_BUILD_PROXY)
         src/hook/iat_hook.h
         src/hook/stereo_renderer.cpp
         src/hook/stereo_renderer.h
+        src/hook/vr_hand_renderer.cpp
+        src/hook/vr_hand_renderer.h
         src/hook/camera_hook.cpp
         src/hook/camera_hook.h
         src/hook/logging.cpp

@@ -1462,12 +1462,20 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
             state.rightController.isConnected = true;
             state.leftController.buttons = RIDDICK_VR_TOUCH_TRIGGER | RIDDICK_VR_TOUCH_THUMBSTICK;
             state.rightController.buttons = RIDDICK_VR_TOUCH_TRIGGER | RIDDICK_VR_TOUCH_THUMBSTICK;
+            state.leftController.gripPose.isValid = true;
+            state.rightController.gripPose.isValid = true;
+            state.leftController.aimPose.isValid = true;
+            state.rightController.aimPose.isValid = true;
             state.leftController.gripPose.position = { -0.2f, 1.2f, -0.3f };
             state.rightController.gripPose.position = { 0.2f, 1.2f, -0.3f };
             state.leftController.gripPose.orientation = { 0, 0, 0, 1 };
             state.rightController.gripPose.orientation = { 0, 0, 0, 1 };
             state.leftController.aimPose = state.leftController.gripPose;
             state.rightController.aimPose = state.rightController.gripPose;
+            state.leftController.grip = 0.5f + 0.45f * sinf(totalFrames * 0.08f);
+            state.rightController.grip = 0.5f + 0.45f * cosf(totalFrames * 0.08f);
+            state.leftController.trigger = 0.5f + 0.45f * sinf(totalFrames * 0.12f);
+            state.rightController.trigger = 0.5f + 0.45f * cosf(totalFrames * 0.12f);
 
             // Automated self-play simulation:
             // 1. Natural head orientation oscillation (looking around in VR)

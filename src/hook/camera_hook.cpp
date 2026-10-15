@@ -71,6 +71,13 @@ static void SendKeyTap(WORD vk) {
     SendKey(vk, false);
 }
 
+// VR-First 1:1 Physical Interaction Anchor State (ADR 0406)
+// Prevents engine action cutscene cameras (usethirdperson = 1 during NanoMED healing and ladders)
+// from yanking the player out of 1:1 first person.
+static bool s_vrFirstActionActive = false;
+static float s_firstPersonAnchor[3] = {0.0f, 0.0f, 0.0f};
+static bool s_hasFirstPersonAnchor = false;
+
 void CameraHook::StabilizeViewMatrix(float* outView, const float* inView, const RiddickVRSharedState& vrState, int eyePass) {
     if (!inView || !outView) return;
 
@@ -161,10 +168,34 @@ void CameraHook::StabilizeViewMatrix(float* outView, const float* inView, const 
     stabilizedBase[10] = cosY;
     stabilizedBase[11] = 0.0f;
 
-    // Retain full 3D neck/camera translation from inView
-    stabilizedBase[12] = inView[12];
-    stabilizedBase[13] = inView[13];
-    stabilizedBase[14] = inView[14];
+    // Retain full 3D neck/camera translation from inView, with anti-pullback stabilization (ADR 0406)
+    if (s_vrFirstActionActive && s_hasFirstPersonAnchor) {
+        float dx = inView[12] - s_firstPersonAnchor[0];
+        float dy = inView[13] - s_firstPersonAnchor[1];
+        float dz = inView[14] - s_firstPersonAnchor[2];
+        float distSq = dx * dx + dy * dy + dz * dz;
+        // If distance suddenly exceeds 0.65m (characteristic of 3rd person action cutscene pullback), anchor to 1st person
+        if (distSq > 0.4225f) {
+            stabilizedBase[12] = s_firstPersonAnchor[0];
+            stabilizedBase[13] = inView[13]; // Retain vertical translation height
+            stabilizedBase[14] = s_firstPersonAnchor[2];
+        } else {
+            stabilizedBase[12] = inView[12];
+            stabilizedBase[13] = inView[13];
+            stabilizedBase[14] = inView[14];
+            s_firstPersonAnchor[0] = inView[12];
+            s_firstPersonAnchor[1] = inView[13];
+            s_firstPersonAnchor[2] = inView[14];
+        }
+    } else {
+        stabilizedBase[12] = inView[12];
+        stabilizedBase[13] = inView[13];
+        stabilizedBase[14] = inView[14];
+        s_firstPersonAnchor[0] = inView[12];
+        s_firstPersonAnchor[1] = inView[13];
+        s_firstPersonAnchor[2] = inView[14];
+        s_hasFirstPersonAnchor = true;
+    }
     stabilizedBase[15] = 1.0f;
 
     // Combine stabilized base with 6DOF eye pose
@@ -757,6 +788,79 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     }
 
     bool isClimbingActive = s_leftHoldingRung || s_rightHoldingRung || s_ladderClimbUp || s_ladderClimbDown;
+
+    // 2b. Diegetic NanoMED Health Station & Physical Cartridge Interaction (ADR 0407)
+    // - Biometric Scanner Palm Contact: Open flat palm placed on the health station's scanner console
+    //   (Z in [-0.65, -0.20]m, Y in [-0.25, 0.25]m, |X| < 0.28m, open fingers: trigger < 0.20 && grip < 0.25).
+    //   Dispatches 'E' and pulses rhythmic 120 Hz nanite restorative haptics while contact is maintained.
+    // - Cartridge Draw & Insertion:
+    //   Reaching to hip holster/waist (Y < -0.38m, grip > 0.60f) draws a NanoMED cartridge with tactile click haptics.
+    //   Pushing down into the overhead station slot (Z in [-0.60, -0.22]m, Y in [0.05, 0.40]m, Vy < -0.22 m/s)
+    //   slams the cartridge into the receiver, triggering 'E' / MSG_TRIGGERREFILL with heavy latch haptics (0.85f).
+    static bool s_holdingNanoMedCartridge = false;
+    static DWORD s_lastNanoMedTouchTime = 0;
+    static DWORD s_lastCartridgeDrawTime = 0;
+    static DWORD s_lastCartridgeInsertTime = 0;
+    static bool s_nanoMedPalmActive = false;
+
+    // A. Hip Holster Cartridge Draw
+    if (!s_holdingNanoMedCartridge) {
+        if (rightLocal.y < -0.38f && vrState.rightController.grip > 0.60f && (now - s_lastCartridgeDrawTime > 1200)) {
+            s_holdingNanoMedCartridge = true;
+            s_lastCartridgeDrawTime = now;
+            vrState.rightHapticPulse = 0.50f; // Firm cartridge draw snap
+            VR_LOG_INFO("Diegetic Interaction: NANOMED CARTRIDGE DRAWN FROM WAIST HOLSTER");
+        }
+    } else {
+        // Return cartridge to holster if grip released away from station
+        if (vrState.rightController.grip < 0.30f && (rightLocal.z > -0.20f || rightLocal.y < 0.0f)) {
+            s_holdingNanoMedCartridge = false;
+            vrState.rightHapticPulse = 0.20f;
+            VR_LOG_INFO("Diegetic Interaction: NANOMED CARTRIDGE RETURNED TO HOLSTER");
+        }
+    }
+
+    // B. Downward Cartridge Insertion into Overhead Station Receiver Slot
+    if (s_holdingNanoMedCartridge) {
+        bool inReceiverVolume = (rightLocal.z >= -0.62f && rightLocal.z <= -0.20f) &&
+                                (rightLocal.y >= 0.05f && rightLocal.y <= 0.42f) &&
+                                (fabsf(rightLocal.x) < 0.30f);
+        if (inReceiverVolume && rVel.y < -0.22f && (now - s_lastCartridgeInsertTime > 1500)) {
+            s_holdingNanoMedCartridge = false;
+            s_lastCartridgeInsertTime = now;
+            SendKeyTap('E');
+            vrState.rightHapticPulse = 0.85f; // Heavy mechanical locking latch impact
+            VR_LOG_INFO("Diegetic Interaction: NANOMED CARTRIDGE INSERTED INTO STATION RECEIVER (MSG_TRIGGERREFILL)");
+        }
+    }
+
+    // C. Biometric Scanner Palm Contact (Open Palm on Health Station Scanner)
+    bool leftPalmFlat = (vrState.leftController.trigger < 0.20f && vrState.leftController.grip < 0.25f);
+    bool rightPalmFlat = (vrState.rightController.trigger < 0.20f && vrState.rightController.grip < 0.25f);
+
+    bool leftScannerContact = leftPalmFlat && (leftLocal.z >= -0.65f && leftLocal.z <= -0.22f) &&
+                              (leftLocal.y >= -0.25f && leftLocal.y <= 0.25f) && (fabsf(leftLocal.x) < 0.28f);
+    bool rightScannerContact = rightPalmFlat && (rightLocal.z >= -0.65f && rightLocal.z <= -0.22f) &&
+                               (rightLocal.y >= -0.25f && rightLocal.y <= 0.25f) && (fabsf(rightLocal.x) < 0.28f);
+
+    bool wantPalmActive = (leftScannerContact || rightScannerContact) && !s_holdingNanoMedCartridge && !s_physicalBlockEngaged;
+    if (wantPalmActive) {
+        if (!s_nanoMedPalmActive && (now - s_lastNanoMedTouchTime > 1200)) {
+            s_lastNanoMedTouchTime = now;
+            SendKeyTap('E');
+            VR_LOG_INFO("Diegetic Interaction: BIOMETRIC PALM SCANNER CONTACT ENGAGED (Left: %d, Right: %d)",
+                leftScannerContact ? 1 : 0, rightScannerContact ? 1 : 0);
+        }
+        s_nanoMedPalmActive = true;
+        // Continuous restorative nanite injection haptic cadence (120 Hz pulse oscillation)
+        float pulseAmp = 0.35f + 0.15f * sinf(static_cast<float>(now) * 0.015f);
+        if (leftScannerContact) vrState.leftHapticPulse = pulseAmp;
+        if (rightScannerContact) vrState.rightHapticPulse = pulseAmp;
+    } else {
+        s_nanoMedPalmActive = false;
+    }
+
+    s_vrFirstActionActive = isClimbingActive || s_nanoMedPalmActive || s_holdingNanoMedCartridge;
 
     // 3. Radial Locomotion Deadzone & Diagonal Movement Normalization (ADR 0372)
     static bool s_wPressed = false, s_sPressed = false, s_aPressed = false, s_dPressed = false;

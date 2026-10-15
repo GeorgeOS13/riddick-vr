@@ -1,5 +1,6 @@
 #include "stereo_renderer.h"
 #include "camera_hook.h"
+#include "vr_hand_renderer.h"
 #include "logging.h"
 #include <tlhelp32.h>
 #include <string>
@@ -538,6 +539,9 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
                 GL_COLOR_BUFFER_BIT, GL_LINEAR
             );
 
+            // Render always-visible 3D VR tactical hands into Left Eye buffer
+            VRHandRenderer::Instance().RenderHands(m_sharedState, true, m_eyeWidth, m_eyeHeight);
+
             // Blit into Right Eye FBO (vertically flipped: srcY goes from srcH down to 0)
             OpenGLProxy::real_glBindFramebuffer(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, m_rightFbo);
             OpenGLProxy::glBlitFramebuffer(
@@ -545,6 +549,9 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
                 dstX, dstY, dstX + dstW, dstY + dstH,
                 GL_COLOR_BUFFER_BIT, GL_LINEAR
             );
+
+            // Render always-visible 3D VR tactical hands into Right Eye buffer
+            VRHandRenderer::Instance().RenderHands(m_sharedState, false, m_eyeWidth, m_eyeHeight);
 
             // Force alpha channel to fully opaque 1.0f on both eye buffers to eliminate
             // Virtual Desktop / VDXR green screen chroma keying and transparency flashes
