@@ -1447,6 +1447,31 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             bool radialDisarmThrust = (s_radialDisarmTwistTime > 0 && (now - s_radialDisarmTwistTime < 500) && rVel.z < -1.35f);
 
+            // Inmate Pit Brawl Clinch Thai Plum Collar Tie & Liver Knee Strike (ADR 0217)
+            static DWORD s_lastThaiPlumTime = 0;
+            static DWORD s_thaiPlumClinchTime = 0;
+            bool thaiPlumGrip = (handsDistSledge < 0.25f &&
+                                 leftLocal.y > -0.10f && rightLocal.y > -0.10f &&
+                                 vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
+            if (thaiPlumGrip && (now - s_lastThaiPlumTime > 2000)) {
+                if (s_thaiPlumClinchTime == 0) {
+                    s_thaiPlumClinchTime = now;
+                    VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL THAI PLUM COLLAR TIE LOCKED (Ly: %.2f, Ry: %.2f)", leftLocal.y, rightLocal.y);
+                    vrState.leftHapticPulse = 0.90f;  // Cervical collar drag tension (220 Hz)
+                    vrState.rightHapticPulse = 0.90f;
+                }
+            }
+            bool thaiPlumKneeDrive = (s_thaiPlumClinchTime > 0 && (now - s_thaiPlumClinchTime < 600) &&
+                                      lVel.y < -1.10f && rVel.y < -1.10f);
+
+            // Security Guard Stun Baton Forward Two-Handed Javelin Vault Leap Thrust (ADR 0218)
+            static DWORD s_lastJavelinVaultTime = 0;
+            bool javelinVaultStance = (handsDistSledge < 0.22f &&
+                                       vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
+                                       vrState.rightController.trigger > 0.65f);
+            bool isJumpingMotion = ((vrState.rightController.buttons & RIDDICK_VR_BTN_B) != 0 || rVel.y > 0.85f || lVel.y > 0.85f);
+            bool javelinVaultStrike = (javelinVaultStance && isJumpingMotion && rVel.z < -1.40f && lVel.z < -1.20f);
+
             // Inmate Pit Brawl Outside Leg Hook Sweep & Ground Knee Drop (ADR 0209)
             static DWORD s_lastOutsideLegSweepTime = 0;
             static DWORD s_outsideLegSweepHookTime = 0;
@@ -1493,7 +1518,36 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_crossBlockHoldStart = 0;
             }
 
-            if (radialDisarmThrust && (now - s_lastRadialDisarmTime > 2000)) {
+            if (javelinVaultStrike && (now - s_lastJavelinVaultTime > 2000)) {
+                s_lastJavelinVaultTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Tactical Melee: STUN BATON JAVELIN VAULT LEAP THRUST EXECUTED (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
+                SendKey(VK_SPACE, true);
+                SendKey('W', true);
+                SendKey('Q', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('Q', false);
+                SendKey('W', false);
+                SendKey(VK_SPACE, false);
+                vrState.rightHapticPulse = 0.98f; // Airborne arc detonation blast (360 Hz)
+                vrState.leftHapticPulse = 0.90f;  // Landing deck recoil (60 Hz)
+            } else if (thaiPlumKneeDrive && (now - s_lastThaiPlumTime > 2000)) {
+                s_lastThaiPlumTime = now;
+                s_thaiPlumClinchTime = 0;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL THAI PLUM LIVER KNEE STRUCK (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
+                SendKey('W', true);
+                SendKey('C', true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, false);
+                SendKey('C', false);
+                SendKey('W', false);
+                vrState.leftHapticPulse = 0.95f;  // Ribcage fracture & posture break (280 Hz)
+                vrState.rightHapticPulse = 0.98f; // Concussive liver impact shockwave (320 Hz)
+            } else if (radialDisarmThrust && (now - s_lastRadialDisarmTime > 2000)) {
                 s_lastRadialDisarmTime = now;
                 s_radialDisarmTwistTime = 0;
                 s_lastPunchTime = now;
@@ -4409,6 +4463,40 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     SendKeyTap(VK_TAB);
                     vrState.rightHapticPulse = 0.95f; // Mechanical end-stop thud (220 Hz)
                 }
+            }
+
+            // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Axial Play Shimming Washer Insertion (ADR 0215)
+            static DWORD s_lastShimWasherTime = 0;
+            bool handAtHingeGapClevis = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
+                                         vrState.leftController.grip > 0.55f);
+            bool handHoldingSlottedShim = (twoHandDist < 0.22f && vrState.rightController.grip > 0.60f);
+            bool shimLateralSlide = (fabsf(rVel.x) > 0.85f);
+            if (handAtHingeGapClevis && handHoldingSlottedShim && shimLateralSlide && (now - s_lastShimWasherTime > 1800)) {
+                s_lastShimWasherTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA TRUSS SHIM WASHER INSERTED & SEATED (Rx: %.2f)", rVel.x);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap(VK_TAB);
+                SendKeyTap('Q');
+                vrState.rightHapticPulse = 0.95f; // Mechanical gap detent seating click (280 Hz)
+                vrState.leftHapticPulse = 0.65f;  // Shim sliding friction (190 Hz)
+            }
+
+            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Flue Gas Thermocouple Well Threaded Plug Tightening (ADR 0216)
+            static DWORD s_lastThermocouplePlugTime = 0;
+            bool handAtThermocouplePlug = (rightLocal.z > -0.40f && rightLocal.z < -0.16f && rightLocal.y > -0.10f && rightLocal.y < 0.25f &&
+                                           vrState.rightController.grip > 0.45f && vrState.rightController.grip < 0.85f &&
+                                           vrState.rightController.trigger < 0.40f);
+            bool thermocouplePlugTwist = (fabsf(rVel.x) > 0.65f);
+            if (handAtThermocouplePlug && thermocouplePlugTwist && (now - s_lastThermocouplePlugTime > 1800)) {
+                s_lastThermocouplePlugTime = now;
+                VR_LOG_INFO("Environmental Gesture: HYDROPONICS THERMOCOUPLE PLUG TORQUED & SEALED (Rx: %.2f)", rVel.x);
+                SendKeyTap('E');
+                SendKeyTap('Q');
+                SendKeyTap(VK_TAB);
+                SendKeyTap(VK_SPACE);
+                vrState.rightHapticPulse = 0.98f; // Metallic torque stop thud (270 Hz)
+                vrState.leftHapticPulse = 0.55f;  // Copper crush washer deformation (160 Hz)
             }
         }
     }
