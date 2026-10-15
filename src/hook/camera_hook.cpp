@@ -1027,7 +1027,45 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             bool blindRiposteStrike = (s_eyeRubWipeTime > 0 && (now - s_eyeRubWipeTime < 600) && rVel.z < -1.15f);
 
-            if (isDischargingArcWave) {
+            // Inmate Pit Brawl Shin Kick & Knee Stomp Hyper-Extension (ADR 0141)
+            static DWORD s_lastKneeStompTime = 0;
+            bool kneeStompPosture = (s_currentBlockEngaged || s_isPhysicallyCrouched || s_isDeepProne);
+            bool kneeStompStrike = (rVel.y < -1.10f && lVel.z < -0.70f);
+            bool isKneeStomp = kneeStompPosture && kneeStompStrike;
+
+            // Security Guard Stun Baton Weapon Shock Induction Arc Overheat (ADR 0142)
+            static DWORD s_lastInductionOverheatTime = 0;
+            static DWORD s_inductionOverheatStart = 0;
+            bool inductionGroundedStance = (handsDistSledge < 0.16f) &&
+                                           (vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f) &&
+                                           (vrState.leftController.trigger > 0.65f && vrState.rightController.trigger > 0.65f);
+            bool isInductionOverheated = false;
+            if (inductionGroundedStance) {
+                if (s_inductionOverheatStart == 0) s_inductionOverheatStart = now;
+                DWORD overchargeTime = now - s_inductionOverheatStart;
+                float rampRatio = (overchargeTime < 350) ? (overchargeTime / 350.0f) : 1.0f;
+                vrState.leftHapticPulse = 0.35f + 0.55f * rampRatio; // Ascending electrostatic buzz (90 -> 280 Hz)
+                vrState.rightHapticPulse = 0.35f + 0.55f * rampRatio;
+                if (overchargeTime >= 350 && (now - s_lastInductionOverheatTime > 2500)) {
+                    s_lastInductionOverheatTime = now;
+                    s_inductionOverheatStart = 0;
+                    isInductionOverheated = true;
+                }
+            } else {
+                s_inductionOverheatStart = 0;
+            }
+
+            if (isInductionOverheated) {
+                VR_LOG_INFO("Tactical Melee: STUN BATON INDUCTION COIL OVERHEAT ARC DETONATED");
+                SendKey('S', true);
+                SendKey('Q', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('Q', false);
+                SendKey('S', false);
+                vrState.leftHapticPulse = 0.98f;  // Blinding EMP arc detonation shockwave (300 Hz)
+                vrState.rightHapticPulse = 0.98f;
+            } else if (isDischargingArcWave) {
                 VR_LOG_INFO("Tactical Melee: STUN BATON OVERLOAD RADIAL ARC WAVE DISCHARGED (Lx: %.2f, Rx: %.2f)", lVel.x, rVel.x);
                 SendKey('S', true);
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
@@ -1037,6 +1075,18 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 vrState.leftHapticPulse = 0.98f;  // High-voltage electrostatic arc ring shockwave (300 Hz)
                 vrState.rightHapticPulse = 0.98f;
+            } else if (isKneeStomp && (now - s_lastKneeStompTime > 1500)) {
+                s_lastKneeStompTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL SHIN KICK & KNEE HYPER-EXTENSION (Ry: %.2f, Lz: %.2f)", rVel.y, lVel.z);
+                SendKey('C', true);
+                SendKey('S', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('S', false);
+                SendKey('C', false);
+                vrState.rightHapticPulse = 0.98f; // Joint-crushing skeletal fracture shockwave (240 Hz)
+                vrState.leftHapticPulse = 0.60f;  // Body-weight plant & brace feedback (100 Hz)
             } else if (blindRiposteStrike && (now - s_lastEyeRubRiposteTime > 1500)) {
                 s_lastEyeRubRiposteTime = now;
                 s_eyeRubWipeTime = 0;
@@ -2728,6 +2778,37 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     vrState.rightHapticPulse = 0.90f; // Mechanical dog lock snap (90 Hz)
                     vrState.leftHapticPulse = 0.50f;
                 }
+            }
+
+            // Dark Athena EVA Solar Collector Truss Angular Lock Pin Shear & Drop (ADR 0139)
+            static DWORD s_lastTrussPinShearTime = 0;
+            bool handAtTrussShearPin = (rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > 0.10f && rightLocal.y < 0.45f && vrState.rightController.grip > 0.60f);
+            bool downwardPinShearStrike = (rVel.y < -0.85f);
+            if (handAtTrussShearPin && downwardPinShearStrike && (now - s_lastTrussPinShearTime > 1500)) {
+                s_lastTrussPinShearTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA SOLAR COLLECTOR TRUSS LOCK PIN SHEARED & DROPPED (Ry: %.2f)", rVel.y);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap(VK_TAB);
+                vrState.rightHapticPulse = 0.95f; // Metallurgical shear crack shockwave (260 Hz)
+                vrState.leftHapticPulse = 0.60f;
+            }
+
+            // Subterranean Hydroponics Bio-Filter Carbon Mesh Cartridge Extraction (ADR 0140)
+            static DWORD s_lastBioFilterExtractTime = 0;
+            bool bothAtBioFilterHousing = (twoHandDist < 0.28f &&
+                                           leftLocal.z > -0.38f && leftLocal.z < -0.14f && leftLocal.y > -0.20f && leftLocal.y < 0.20f &&
+                                           rightLocal.z > -0.38f && rightLocal.z < -0.14f && rightLocal.y > -0.20f && rightLocal.y < 0.20f &&
+                                           vrState.leftController.grip > 0.55f && vrState.rightController.grip > 0.55f);
+            bool dualFilterRearwardPull = (lVel.z > 0.65f && rVel.z > 0.65f);
+            if (bothAtBioFilterHousing && dualFilterRearwardPull && (now - s_lastBioFilterExtractTime > 1500)) {
+                s_lastBioFilterExtractTime = now;
+                VR_LOG_INFO("Environmental Gesture: HYDROPONICS BIO-FILTER CARBON CARTRIDGE EXTRACTED (Lz: %.2f, Rz: %.2f)", lVel.z, rVel.z);
+                SendKeyTap('E');
+                SendKeyTap('Q');
+                SendKeyTap(VK_TAB);
+                vrState.leftHapticPulse = 0.85f;  // Filter canal sliding release clunk (180 Hz)
+                vrState.rightHapticPulse = 0.85f;
             }
         }
     }
