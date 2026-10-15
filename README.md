@@ -81,6 +81,11 @@ Key technical choices, trade-offs, and implementation strategies are documented 
 | [**ADR-0048**](docs/adr/0048-mining-cart-handbrake-and-rail-shunting.md) | Mining Cart Handbrake & Rail Shunting | Locomotion: Lever push/pull throttle & braking with 60Hz steel wheel rail shudder (0.40) |
 | [**ADR-0049**](docs/adr/0049-heavy-mech-cockpit-canopy-and-seal-purge.md) | Heavy Mech Cockpit Canopy & Emergency Seal Purge | Vehicles: Overhead canopy slam down (0.85 surge) and dual-grip/stick emergency ejection |
 | [**ADR-0050**](docs/adr/0050-inmate-bunk-mattress-stash-search-and-shiv-concealment.md) | Inmate Bunk Mattress Stash Search & Contraband | Exploration: Crouched off-hand mattress lift with dominant under-bed sweep (200Hz chime) |
+| [**ADR-0371**](docs/adr/0371-thumbstick-turning-ergonomics-and-snap-hysteresis.md) | Thumbstick Snap vs Smooth Turning Ergonomics | Controls: Decoupled snap turn hysteresis (45°) and cubic smooth turning curves |
+| [**ADR-0372**](docs/adr/0372-radial-locomotion-deadzone-and-diagonal-normalization.md) | Radial Locomotion Deadzone & Diagonal Normalization | Movement: Circular 0.22 deadzone with ±25° forward-priority angular deadband |
+| [**ADR-0373**](docs/adr/0373-speed-adaptive-one-euro-filter-for-weapon-aim-stabilization.md) | Speed-Adaptive One-Euro Filter for Aim Stabilization | Gunplay: Velocity-scaled temporal filtering (alpha 0.22 - 0.90) for one-handed aim |
+| [**ADR-0374**](docs/adr/0374-quest-controller-ergonomic-barrel-pitch-calibration.md) | Quest Controller Ergonomic Barrel Pitch Calibration | Gunplay: -10.5° downward pitch offset aligning gun barrel with relaxed forearm index line |
+
 
 ---
 

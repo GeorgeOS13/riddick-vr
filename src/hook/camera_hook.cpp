@@ -369,6 +369,11 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                 ctrlPitch = asinf(sinCtrlPitch);
                             }
 
+                            // ADR 0374: Quest Controller Ergonomic Barrel Pitch Calibration
+                            // Natural wrist resting angle offsets the raw aim ray ~10.5 degrees downward
+                            constexpr float ERGONOMIC_BARREL_PITCH_OFFSET = -0.1832f; // -10.5 deg in radians
+                            ctrlPitch += ERGONOMIC_BARREL_PITCH_OFFSET;
+
                             // Apply transient muzzle climb recoil kick (exponential recovery over ~120ms)
                             ctrlPitch += s_recoilKickPitch;
                             s_recoilKickPitch *= 0.82f;
@@ -691,14 +696,36 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
     bool isClimbingActive = s_leftHoldingRung || s_rightHoldingRung || s_ladderClimbUp || s_ladderClimbDown;
 
-    // 3. Motion Controller Locomotion (Left Thumbstick -> WASD) + Physical Climbing Coordination
+    // 3. Radial Locomotion Deadzone & Diagonal Movement Normalization (ADR 0372)
     static bool s_wPressed = false, s_sPressed = false, s_aPressed = false, s_dPressed = false;
-    constexpr float DEADZONE = 0.25f;
+    constexpr float RADIAL_DEADZONE = 0.22f;
+    float stickLX = vrState.leftController.thumbstickX;
+    float stickLY = vrState.leftController.thumbstickY;
+    float moveMag = sqrtf(stickLX * stickLX + stickLY * stickLY);
 
-    bool wantW = (vrState.leftController.thumbstickY > DEADZONE) || s_ladderClimbUp;
-    bool wantS = (vrState.leftController.thumbstickY < -DEADZONE) || s_ladderClimbDown;
-    bool wantD = vrState.leftController.thumbstickX > DEADZONE;
-    bool wantA = vrState.leftController.thumbstickX < -DEADZONE;
+    bool wantW = false;
+    bool wantS = false;
+    bool wantA = false;
+    bool wantD = false;
+
+    if (moveMag >= RADIAL_DEADZONE) {
+        float dirX = stickLX / moveMag;
+        float dirY = stickLY / moveMag;
+
+        // Apply angular deadband around forward/backward axis (±25 degrees, sin(25°) ≈ 0.42)
+        // This prevents unintentional sideways strafing drift when walking forward/backward
+        constexpr float FORWARD_THRESHOLD = 0.35f;
+        constexpr float STRAFE_THRESHOLD = 0.42f;
+
+        if (dirY > FORWARD_THRESHOLD) wantW = true;
+        else if (dirY < -FORWARD_THRESHOLD) wantS = true;
+
+        if (dirX > STRAFE_THRESHOLD) wantD = true;
+        else if (dirX < -STRAFE_THRESHOLD) wantA = true;
+    }
+
+    if (s_ladderClimbUp) wantW = true;
+    if (s_ladderClimbDown) wantS = true;
 
     if (wantW != s_wPressed) { SendKey('W', wantW); s_wPressed = wantW; }
     if (wantS != s_sPressed) { SendKey('S', wantS); s_sPressed = wantS; }
@@ -741,21 +768,56 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         vrState.rightHapticPulse = 0.65f;
     }
 
-    // 4. Smooth & Snap Turning (Right Thumbstick X)
+    // 4. Thumbstick Snap vs Smooth Turning Ergonomics & Input Hysteresis (ADR 0371)
+    enum VRTurnMode {
+        VR_TURN_SNAP = 0,    // Discrete 45° snap turns with zero pre-snap crawl
+        VR_TURN_SMOOTH = 1   // Continuous rotation with cubic acceleration curve
+    };
+    static VRTurnMode s_turnMode = VR_TURN_SNAP;
     static bool s_snapTurnArmed = true;
+
+    // Mode Toggle: Left Grip + Right Stick Click toggles turn mode
+    static bool s_prevStickClickToggle = false;
+    bool stickRightClick = (btns & RIDDICK_VR_BTN_STICK_RIGHT) != 0;
+    bool leftGripHeld = vrState.leftController.grip > 0.5f;
+    if (stickRightClick && leftGripHeld && !s_prevStickClickToggle) {
+        s_turnMode = (s_turnMode == VR_TURN_SNAP) ? VR_TURN_SMOOTH : VR_TURN_SNAP;
+        VR_LOG_INFO("Turning Mode Toggled: %s", (s_turnMode == VR_TURN_SNAP) ? "SNAP TURN (45 deg)" : "SMOOTH TURN (Cubic Curve)");
+        vrState.rightHapticPulse = (s_turnMode == VR_TURN_SNAP) ? 0.40f : 0.25f;
+    }
+    s_prevStickClickToggle = (stickRightClick && leftGripHeld);
+
     float stickX = vrState.rightController.thumbstickX;
 
-    if (fabsf(stickX) > 0.75f) {
-        if (s_snapTurnArmed) {
-            s_snapTurnArmed = false;
-            int snapDelta = (stickX > 0.0f) ? 350 : -350;
-            mouse_event(MOUSEEVENTF_MOVE, snapDelta, 0, 0, 0);
+    if (s_turnMode == VR_TURN_SNAP) {
+        // Pure Snap Turn: require deflection > 0.70f, trigger clean single 45° mouse delta
+        // CRITICAL: Absolutely no smooth mouse move during ramp-up or return to center!
+        constexpr float SNAP_THRESHOLD = 0.70f;
+        constexpr float RESET_THRESHOLD = 0.30f;
+
+        if (fabsf(stickX) > SNAP_THRESHOLD) {
+            if (s_snapTurnArmed) {
+                s_snapTurnArmed = false;
+                int snapDelta = (stickX > 0.0f) ? 350 : -350;
+                mouse_event(MOUSEEVENTF_MOVE, snapDelta, 0, 0, 0);
+                vrState.rightHapticPulse = 0.25f; // Crisp tactile click on snap
+            }
+        } else if (fabsf(stickX) < RESET_THRESHOLD) {
+            s_snapTurnArmed = true;
         }
-    } else if (fabsf(stickX) > DEADZONE) {
-        int deltaX = static_cast<int>(stickX * 16.0f);
-        mouse_event(MOUSEEVENTF_MOVE, deltaX, 0, 0, 0);
     } else {
-        s_snapTurnArmed = true;
+        // Pure Smooth Turn: continuous rotation with progressive cubic curve
+        // Zero sudden 350-pixel snaps at stick limits
+        constexpr float SMOOTH_DEADZONE = 0.20f;
+        if (fabsf(stickX) > SMOOTH_DEADZONE) {
+            float norm = (fabsf(stickX) - SMOOTH_DEADZONE) / (1.0f - SMOOTH_DEADZONE);
+            float curvedSpeed = norm * norm * 18.0f; // Smooth cubic ramp
+            int deltaX = static_cast<int>(std::copysign(curvedSpeed, stickX));
+            if (deltaX == 0 && norm > 0.05f) {
+                deltaX = (stickX > 0.0f) ? 1 : -1;
+            }
+            mouse_event(MOUSEEVENTF_MOVE, deltaX, 0, 0, 0);
+        }
     }
 
     // 4b. Dialogue & Menu Navigation (Right Thumbstick Y -> Up / Down Arrow Keys)
@@ -6339,6 +6401,53 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 vrState.rightController.aimPose = s_stabilizedAimPose;
             }
         } else {
+            // ADR 0373: Speed-Adaptive One-Euro Filter for One-Handed Weapon Aim Stabilization
+            // When firing or aiming one-handed, natural physiological hand tremor (3-8 Hz) causes sight jitter.
+            // When controller speed is low (< 0.10 m/s), apply high damping (alpha ≈ 0.22) to lock sight rock-steady.
+            // As movement speed increases, ramp alpha up to 0.90 for zero-latency target acquisition.
+            static RiddickVRTrackedPose s_oneHandedPose{};
+            static bool s_hasOneHandedPose = false;
+
+            if (!s_hasOneHandedPose) {
+                s_oneHandedPose = vrState.rightController.aimPose;
+                s_hasOneHandedPose = true;
+            } else {
+                float rSpeed = sqrtf(rVel.x * rVel.x + rVel.y * rVel.y + rVel.z * rVel.z);
+                float alpha = 0.22f;
+                if (rSpeed > 0.10f) {
+                    float factor = (rSpeed - 0.10f) / 0.35f;
+                    if (factor > 1.0f) factor = 1.0f;
+                    alpha = 0.22f + factor * 0.68f; // Ramp from 0.22 up to 0.90
+                }
+
+                s_oneHandedPose.position.x += alpha * (vrState.rightController.aimPose.position.x - s_oneHandedPose.position.x);
+                s_oneHandedPose.position.y += alpha * (vrState.rightController.aimPose.position.y - s_oneHandedPose.position.y);
+                s_oneHandedPose.position.z += alpha * (vrState.rightController.aimPose.position.z - s_oneHandedPose.position.z);
+
+                float dot = s_oneHandedPose.orientation.x * vrState.rightController.aimPose.orientation.x +
+                            s_oneHandedPose.orientation.y * vrState.rightController.aimPose.orientation.y +
+                            s_oneHandedPose.orientation.z * vrState.rightController.aimPose.orientation.z +
+                            s_oneHandedPose.orientation.w * vrState.rightController.aimPose.orientation.w;
+                float qSign = (dot < 0.0f) ? -1.0f : 1.0f;
+
+                s_oneHandedPose.orientation.x += alpha * (qSign * vrState.rightController.aimPose.orientation.x - s_oneHandedPose.orientation.x);
+                s_oneHandedPose.orientation.y += alpha * (qSign * vrState.rightController.aimPose.orientation.y - s_oneHandedPose.orientation.y);
+                s_oneHandedPose.orientation.z += alpha * (qSign * vrState.rightController.aimPose.orientation.z - s_oneHandedPose.orientation.z);
+                s_oneHandedPose.orientation.w += alpha * (qSign * vrState.rightController.aimPose.orientation.w - s_oneHandedPose.orientation.w);
+
+                float qNorm = sqrtf(s_oneHandedPose.orientation.x * s_oneHandedPose.orientation.x +
+                                    s_oneHandedPose.orientation.y * s_oneHandedPose.orientation.y +
+                                    s_oneHandedPose.orientation.z * s_oneHandedPose.orientation.z +
+                                    s_oneHandedPose.orientation.w * s_oneHandedPose.orientation.w);
+                if (qNorm > 0.0001f) {
+                    s_oneHandedPose.orientation.x /= qNorm;
+                    s_oneHandedPose.orientation.y /= qNorm;
+                    s_oneHandedPose.orientation.z /= qNorm;
+                    s_oneHandedPose.orientation.w /= qNorm;
+                }
+
+                vrState.rightController.aimPose = s_oneHandedPose;
+            }
             s_hasStabilizedPose = false;
         }
     }
