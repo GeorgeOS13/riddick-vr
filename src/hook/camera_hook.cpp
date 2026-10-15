@@ -1017,60 +1017,30 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         }
     }
 
-    // 4b. Dialogue & Menu Navigation (Dual Thumbsticks -> Up / Down / Left / Right Arrow Keys in Cinema / Menus)
-    if (vrState.cinemaMode) {
+    // 4b. Dialogue & Menu Selection Navigation via Right Thumbstick Y (ADR 0410)
+    // In VR, vertical right-stick deflection is unused for camera pitch (head pitch is 1:1 physically tracked).
+    // Mapping right stick Y deflection to VK_UP / VK_DOWN provides intuitive dialogue choice selection
+    // and inventory navigation without interfering with locomotion or camera look.
+    {
         static bool s_stickYUpArmed = true, s_stickYDownArmed = true;
-        static bool s_stickXLeftArmed = true, s_stickXRightArmed = true;
+        float stickRY = vrState.rightController.thumbstickY;
+        constexpr float MENU_STICK_THRESHOLD = 0.50f;
 
-        float stickY = (fabsf(vrState.leftController.thumbstickY) > fabsf(vrState.rightController.thumbstickY)) ?
-            vrState.leftController.thumbstickY : vrState.rightController.thumbstickY;
-        float stickX = (fabsf(vrState.leftController.thumbstickX) > fabsf(vrState.rightController.thumbstickX)) ?
-            vrState.leftController.thumbstickX : vrState.rightController.thumbstickX;
-
-        constexpr float MENU_STICK_THRESHOLD = 0.45f;
-
-        if (stickY > MENU_STICK_THRESHOLD) {
+        if (stickRY > MENU_STICK_THRESHOLD) {
             if (s_stickYUpArmed) {
                 s_stickYUpArmed = false;
                 SendKeyTap(VK_UP);
-                vrState.leftHapticPulse = 0.20f;
                 vrState.rightHapticPulse = 0.20f;
             }
-        } else {
-            s_stickYUpArmed = true;
-        }
-
-        if (stickY < -MENU_STICK_THRESHOLD) {
+        } else if (stickRY < -MENU_STICK_THRESHOLD) {
             if (s_stickYDownArmed) {
                 s_stickYDownArmed = false;
                 SendKeyTap(VK_DOWN);
-                vrState.leftHapticPulse = 0.20f;
                 vrState.rightHapticPulse = 0.20f;
             }
-        } else {
+        } else if (fabsf(stickRY) < 0.25f) {
+            s_stickYUpArmed = true;
             s_stickYDownArmed = true;
-        }
-
-        if (stickX > MENU_STICK_THRESHOLD) {
-            if (s_stickXRightArmed) {
-                s_stickXRightArmed = false;
-                SendKeyTap(VK_RIGHT);
-                vrState.leftHapticPulse = 0.20f;
-                vrState.rightHapticPulse = 0.20f;
-            }
-        } else {
-            s_stickXRightArmed = true;
-        }
-
-        if (stickX < -MENU_STICK_THRESHOLD) {
-            if (s_stickXLeftArmed) {
-                s_stickXLeftArmed = false;
-                SendKeyTap(VK_LEFT);
-                vrState.leftHapticPulse = 0.20f;
-                vrState.rightHapticPulse = 0.20f;
-            }
-        } else {
-            s_stickXLeftArmed = true;
         }
     }
 
@@ -10382,7 +10352,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         if (wantRightGrip) vrState.rightHapticPulse = 0.5f;
     }
 
-    // 10. Face Buttons Mapping (ADR 0401: Decoupled Menu Confirmation & Pure Gameplay Inputs)
+    // 10. Face Buttons Mapping (ADR 0410: Unified Action & Dialogue Confirmation)
     bool btnA = (btns & RIDDICK_VR_BTN_A) != 0;
     bool prevBtnA = (s_prevButtons & RIDDICK_VR_BTN_A) != 0;
     bool btnB = (btns & RIDDICK_VR_BTN_B) != 0;
@@ -10390,57 +10360,30 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     bool btnX = (btns & RIDDICK_VR_BTN_X) != 0;
     bool prevBtnX = (s_prevButtons & RIDDICK_VR_BTN_X) != 0;
 
-    if (vrState.cinemaMode) {
-        // --- CINEMA / MENU MODE ---
-        // BUTTON A -> Select / Confirm (Return / Left Click)
-        if (btnA != prevBtnA) {
-            SendKey(VK_RETURN, btnA);
-            if (btnA) mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-            else mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-            if (btnA) vrState.rightHapticPulse = 0.35f;
-        }
+    // BUTTON A -> Primary Interact / Use / Talk / Climb / Open ('E') + Dialogue Confirm (VK_RETURN)
+    if (btnA != prevBtnA) {
+        SendKey('E', btnA);
+        SendKey(VK_RETURN, btnA);
+        if (btnA) vrState.rightHapticPulse = 0.35f;
+    }
 
-        // BUTTON B -> Back / Escape / Cancel
-        if (btnB != prevBtnB) {
-            SendKey(VK_ESCAPE, btnB);
-            SendKey(VK_BACK, btnB);
-            if (btnB) vrState.rightHapticPulse = 0.30f;
+    // BUTTON B -> Jump (Space) & Crouch-Jump Mantle Clearance (ADR 0025)
+    if (btnB != prevBtnB) {
+        if (btnB && s_isPhysicallyCrouched) {
+            VR_LOG_INFO("Movement Stance: PHYSICAL CROUCH-JUMP / MANTLE CLEARANCE executed");
+            SendKey('C', true);
+            SendKey(VK_SPACE, true);
+            vrState.rightHapticPulse = 0.45f;
+        } else {
+            SendKey(VK_SPACE, btnB);
         }
+        if (btnB && !s_isPhysicallyCrouched) vrState.rightHapticPulse = 0.30f;
+    }
 
-        // BUTTON X -> Secondary Confirm (Return)
-        if (btnX && !prevBtnX) {
-            SendKeyTap(VK_RETURN);
-            vrState.leftHapticPulse = 0.30f;
-        }
-    } else {
-        // --- 3D GAMEPLAY ACTION MODE ---
-        // BUTTON A -> Primary Interact / Use / Talk / Climb / Open ('E')
-        // Pure single-action input: zero jump (Space) or fire (LMB) cross-talk
-        if (btnA != prevBtnA) {
-            SendKey('E', btnA);
-            if (btnA) vrState.rightHapticPulse = 0.35f;
-        }
-
-        // BUTTON B -> Jump (Space) & Crouch-Jump Mantle Clearance (ADR 0025)
-        // Pure jump input: zero Escape or Tab cross-talk
-        if (btnB != prevBtnB) {
-            if (btnB && s_isPhysicallyCrouched) {
-                VR_LOG_INFO("Movement Stance: PHYSICAL CROUCH-JUMP / MANTLE CLEARANCE executed");
-                SendKey('C', true);
-                SendKey(VK_SPACE, true);
-                vrState.rightHapticPulse = 0.45f;
-            } else {
-                SendKey(VK_SPACE, btnB);
-            }
-            if (btnB && !s_isPhysicallyCrouched) vrState.rightHapticPulse = 0.30f;
-        }
-
-        // BUTTON X -> Crouch Toggle ('C')
-        // Pure crouch input: zero E or Return cross-talk
-        if (btnX && !prevBtnX) {
-            SendKeyTap('C');
-            vrState.leftHapticPulse = 0.30f;
-        }
+    // BUTTON X -> Crouch Toggle ('C')
+    if (btnX && !prevBtnX) {
+        SendKeyTap('C');
+        vrState.leftHapticPulse = 0.30f;
     }
 
     // Dual Thumbstick Click -> Emergency Ejection / Drone Neural Disconnect (ADR 0031)
