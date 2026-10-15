@@ -1,11 +1,50 @@
 typedef void* HMODULE;
 typedef void* FARPROC;
+typedef unsigned int UINT;
+typedef unsigned long DWORD;
+typedef char CHAR;
 __declspec(dllimport) FARPROC __stdcall GetProcAddress(HMODULE hModule, const char* lpProcName);
+__declspec(dllimport) HMODULE __stdcall GetModuleHandleA(const char* lpModuleName);
+__declspec(dllimport) HMODULE __stdcall LoadLibraryA(const char* lpLibFileName);
+__declspec(dllimport) UINT __stdcall GetSystemDirectoryA(char* lpBuffer, UINT uSize);
 #define NULL ((void*)0)
+
+// GH #42: forwarders MUST resolve lazily. The bulk LOAD_FORWARDER table is
+// populated by OpenGLProxy::Initialize (deferred to first wglCreateContext),
+// but engines call plain gl entry points during video-mode setup BEFORE any
+// context exists. A naked jmp through a still-NULL pointer jumps to 0x0
+// (EIP=0, read 0x0 crash, zero logs). Each stub therefore self-resolves its
+// target from the SYSTEM opengl32 on first use (app thread: LoadLibrary here
+// is safe; DllMain itself still does no loading per GH #27). After bulk init
+// the cached pointer makes this a single predictable branch per call.
+#define RIDDICKVR_FWD_RESOLVE(func) \
+    static void EnsureResolved_##func(void) { \
+        char sysPath[260]; \
+        char* p; \
+        void* q; \
+        HMODULE hReal; \
+        UINT n; \
+        if (pReal_##func) return; \
+        n = GetSystemDirectoryA(sysPath, 260); \
+        if (n == 0 || n > 245) return; \
+        p = sysPath + n; \
+        *p++ = '\\'; \
+        *p++ = 'o'; *p++ = 'p'; *p++ = 'e'; *p++ = 'n'; \
+        *p++ = 'g'; *p++ = 'l'; *p++ = '3'; *p++ = '2'; \
+        *p++ = '.'; *p++ = 'd'; *p++ = 'l'; *p++ = 'l'; *p = '\0'; \
+        hReal = LoadLibraryA(sysPath); \
+        if (!hReal) return; \
+        q = (void*)GetProcAddress(hReal, #func); \
+        if (q) pReal_##func = q; \
+    }
 
 #define DEFINE_FORWARDER(func) \
     static void* pReal_##func = NULL; \
+    RIDDICKVR_FWD_RESOLVE(func) \
     __declspec(naked) void __stdcall func(void) { \
+        __asm { pushad } \
+        EnsureResolved_##func(); \
+        __asm { popad } \
         __asm { jmp dword ptr [pReal_##func] } \
     }
 

@@ -35,6 +35,18 @@ def main():
     if missing:
         print("[hook-init] FAIL: pre-context calls would run uninitialized (GH #42 class)")
         return 1
+    # GH #42 part 2: plain-gl forwarder stubs must self-resolve. A naked
+    # jmp through a still-NULL pointer (bulk table populated only at deferred
+    # init) jumps to 0x0 on the first pre-context gl call. Assert the macro
+    # carries lazy resolution.
+    fwd = (Path(__file__).resolve().parent.parent / "src" / "hook" / "opengl_forwarders.c").read_text(encoding="utf-8")
+    macro_ok = ("RIDDICKVR_FWD_RESOLVE" in fwd and "EnsureResolved_" in fwd
+                and "GetSystemDirectoryA" in fwd and "jmp dword ptr [pReal_" in fwd)
+    n_fwd = fwd.count("DEFINE_FORWARDER(")
+    print(f"[hook-init] forwarder stubs: {n_fwd}, lazy-resolve macro present: {macro_ok}")
+    if not macro_ok or n_fwd < 350:
+        print("[hook-init] FAIL: forwarder table lacks pre-context self-resolution (GH #42 class)")
+        return 1
     print("[hook-init] PASS")
     return 0
 
