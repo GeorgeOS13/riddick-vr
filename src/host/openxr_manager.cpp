@@ -1507,6 +1507,11 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
             if ((totalFrames % 100) >= 80 && (totalFrames % 100) <= 86) {
                 state.rightController.buttons |= RIDDICK_VR_BTN_B;
             }
+            // Tap Button Y (Riddick Eyeshine night vision) so dark scenes stay
+            // visible in captures: 6-frame press every 200 frames.
+            if ((totalFrames % 200) >= 100 && (totalFrames % 200) <= 105) {
+                state.leftController.buttons |= RIDDICK_VR_BTN_Y;
+            }
 
             // 3. Locomotion: Move forward into level and turn
             if (totalFrames > 60) {

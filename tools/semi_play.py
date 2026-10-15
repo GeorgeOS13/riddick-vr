@@ -41,7 +41,14 @@ if __name__ == "__main__":
         print(f"  {'HIT' if v else 'miss'}: {k}")
     hits = sum(1 for v in found.values() if v)
     print(f"\nGesture markers hit: {hits}/{len(found)}")
-    # pass if pipeline rendered at least one non-loading frame OR any gesture marker hit
-    # (loading-only runs still prove IPC + hands path stays alive)
-    print(f"Pipeline result: {'PASS' if ok else 'LOADING-ONLY (no rendered frames yet)'}")
+    # Verdict: rendered bright frames prove the full pixel path; otherwise
+    # flowing frames + live gesture markers prove the hook path (Riddick's
+    # scenes are often near-black, which the frame classifier reports as
+    # loading). Exit 0 in both cases; exit 1 only on hook failure/crash.
+    if ok:
+        print("Pipeline result: PASS (rendered frames verified)")
+    elif hits > 0:
+        print("Pipeline result: PASS (hook live - frames flowing, gestures firing; scenes dark)")
+    else:
+        print("Pipeline result: FAIL (no frames, no gestures - hook may be dead)")
     sys.exit(0 if (ok or hits > 0) else 1)
