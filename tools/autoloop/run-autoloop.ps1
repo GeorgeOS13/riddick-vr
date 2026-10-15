@@ -16,6 +16,10 @@ $logDir = Join-Path $dir 'logs'
 $stateLog = Join-Path $logDir 'STATE.log'
 $opencode = 'C:\Program Files\nodejs\opencode.cmd'
 
+# Deep RE: make the extracted Ghidra visible to `rea` inside the loop. (setx is
+# user-level; a task launched by the scheduler may not inherit the edited env.)
+$env:GHIDRA_INSTALL_DIR = 'C:\Users\GigelCastel\Tools\ghidra_12.1.4_PUBLIC'
+
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
 # Single instance: skip if a run is already in progress.

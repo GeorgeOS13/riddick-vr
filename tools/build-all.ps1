@@ -4,7 +4,11 @@
 [CmdletBinding()]
 param(
     [string]$Config = "Release",
-    [switch]$Clean
+    [switch]$Clean,
+    # Opt-in: copy built binaries into the game folder. Off by default so that
+    # builds (and automated loops) never overwrite a user's game install or
+    # silently enable launching the hooked game.
+    [switch]$Deploy
 )
 
 $ErrorActionPreference = "Stop"
@@ -99,14 +103,17 @@ Riddick VR — Release Artifacts
 Set-Content -Path (Join-Path $DistDir "README.txt") -Value $distReadme
 
 $gameDir = "F:\The Chronicles of Riddick - Assault on Dark Athena\System\Win32_x86"
-if (Test-Path $gameDir) {
-    Write-Host "`n>>> Auto-deploying binaries to Game Folder: $gameDir" -ForegroundColor Magenta
+if ($Deploy -and (Test-Path $gameDir)) {
+    Write-Host "`n>>> Deploying binaries to Game Folder: $gameDir" -ForegroundColor Magenta
     Copy-Item -Force (Join-Path $DistDir "opengl32.dll") $gameDir
     Copy-Item -Force (Join-Path $DistDir "riddickvr-host.exe") $gameDir
     if (Test-Path (Join-Path $DistDir "openxr_loader.dll")) {
         Copy-Item -Force (Join-Path $DistDir "openxr_loader.dll") $gameDir
     }
     Write-Host "  -> Deployed opengl32.dll, riddickvr-host.exe, and openxr_loader.dll to game directory!" -ForegroundColor Green
+}
+else {
+    Write-Host "`n>>> Auto-deploy skipped. Pass -Deploy to copy artifacts into the game folder." -ForegroundColor Yellow
 }
 
 Write-Host "`n========================================================" -ForegroundColor Green
