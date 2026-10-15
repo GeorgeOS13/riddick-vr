@@ -45,7 +45,7 @@ PDB `Dll_XR.pdb`; image base `0x10000000`).
       u32  -> +0x04           f32 y   ) bind-pose local translation
       u32  -> +0x08           f32 z   )
       u16  -> +0x0C           reserved (0 in every shipped asset)
-      u16  -> +0x0E           index    (per-node id/offset, uninterpreted)
+      u16  -> +0x0E           child_start (first child's slot in NODEINDICES)
       u16  -> +0x10           child_count
       u16  -> +0x12           parent
       u32  -> +0x14           f32     ) scale (1.0, 1.0 in every shipped asset)
@@ -70,8 +70,11 @@ NODES        : N * 34-byte records, version 0x100 (fields above).
                rotation_slot == their own index, and child_count counts only
                their used children.
 
-NODEINDICES  : u16[used_nodes - 1], listing every used non-root node exactly
-               once — the skeleton's bone/traversal order.
+NODEINDICES  : u16[used_nodes - 1], the flattened child table; node i's children
+               are NODEINDICES[child_start_i : child_start_i + child_count_i].
+               The used nodes' ranges tile the table exactly, so it lists every
+               used non-root node exactly once — the skeleton's bone/traversal
+               order. See the update below for how this was pinned down.
 
 (ATTACHPOINTS is present when non-empty; stride 0x10, not decoded here.)
 ```
@@ -114,11 +117,49 @@ NODEINDICES  : u16[used_nodes - 1], listing every used non-root node exactly
   node records.
 
 ## Unknowns / follow-ups
-- The `+0x0E` per-node field ("index") and the `rotation`/`movement` slot
-  semantics (animation channel addressing) are decoded structurally but not yet
-  interpreted.
+- The `rotation`/`movement` slot semantics (animation-channel addressing) are
+  decoded structurally but not yet interpreted.
 - `ATTACHPOINTS` (stride `0x10`) is not decoded.
 - Next: extract the Riddick hand/forearm surfaces (`RIDDICK_ARMSCAR_D/S/N` in
   `Riddick_B05.xmd`) with geometry + UVs + skeleton + skin, and add a native mesh
   path behind a config flag, keeping `VRHandRenderer` as the fallback
   (GH #46 / #55).
+
+## Update — 2026-10-16 (wake 8): `+0x0E` is `child_start`; `NODEINDICES` is the child table
+The first pass left the `+0x0E` node field uninterpreted ("index") and treated
+`NODEINDICES` only as the *set* of used non-root nodes. A second decompilation
+pass pins both down exactly.
+
+- **Evidence** (read-only; Ghidra 12.1.4 via `rea`). The load-time hierarchy
+  builder **`FUN_1001e040`** (called by `FUN_1001f2e0`, itself called at the end
+  of the skeleton reader `FUN_100219d0`) recurses over the tree. For node
+  `param_1` it computes the record address `nodes_base + param_1 * 0x20` and,
+  with `uVar4 = *(u8*)(node + 0x10)` (**child_count**) and
+  `iVar5 = *(i16*)(node + 0x0e)` (**child_start**), reads each child as
+  `*(u16*)(NODEINDICES_base + (iVar5 + child) * 2)` and recurses on it. It never
+  reads the `parent` field (`+0x12`). So `+0x0E` is the slot of the node's first
+  child in `NODEINDICES`, and `NODEINDICES` is the **flattened child table**.
+- **Re-validated layout** (edges now derived from the table, the `parent` field
+  cross-checked as its inverse):
+  - every used node's `child_start + child_count <= len(NODEINDICES)`;
+  - the used nodes' `[child_start, child_start + child_count)` ranges **tile**
+    `NODEINDICES` exactly (each entry owned once);
+  - `sum(child_count) == len(NODEINDICES) == used_nodes - 1`;
+  - `children_of(i) == NODEINDICES[child_start_i : child_start_i + child_count_i]`;
+  - the table-derived parent of every used non-root node equals its `parent`
+    field (the field is the inverse of the table, not an independent tree).
+- **Verification on shipped content** (`tools/mos_xmd.py` API, all models):
+  **249** skeletons / **12593** nodes / **12424 used** (+**169 padding**) /
+  **12175** indices; **0** tiling failures, **0** `child_start` overruns, **0**
+  `child_count`/indices-sum mismatches, **0** table-vs-parent-field mismatches;
+  `max rotation slot 73`, `max movement slot 20`; deepest chain 12.
+  `--inventory ... --check` remains **631/631 `ok`, 0 failures**.
+- `tools/mos_xmd.py`: `SkeletonNode.child_start` replaces `unknown_e`;
+  `Skeleton.children_of()` now reads the table (mirroring `FUN_1001e040`), and
+  `child_ranges_tile()` / `derived_parents()` / `child_count_matches()` add the
+  new cross-checks; `--check` and `geometry_summary()` report them.
+  `tools/test_mos_xmd.py`: +3 headless tests (child-table chain walk, overrun,
+  parent-field-vs-table mismatch).
+- Consequence: the skeleton hierarchy is now recovered exactly as the engine
+  walks it (child-list order, not just parent pointers), which is what a native
+  skinned-hand path needs to pose the arm chain to tracked controllers.

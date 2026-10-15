@@ -340,7 +340,8 @@ def _bonedeform(vertices, influences, matrix_map_id=None, matrix_bones=()):
 
 def _flat_nodes(n: int) -> bytes:
     """A minimal valid skeleton: node 0 as root with ``n-1`` direct children."""
-    recs = [dict(rotation_slot=0, movement_slot=0, child_count=n - 1, parent=0)]
+    recs = [dict(rotation_slot=0, movement_slot=0, child_start=0,
+                 child_count=n - 1, parent=0)]
     for i in range(1, n):
         recs.append(dict(rotation_slot=i,
                          movement_slot=mos_xmd.NODE_SLOT_NONE, parent=0))
@@ -348,15 +349,18 @@ def _flat_nodes(n: int) -> bytes:
 
 
 def _skin_container(vf_payload, bd_payload, bones):
-    """VERTEXFRAMES + BONEDEFORM (+ NODES carrying ``bones`` skeleton nodes)."""
+    """VERTEXFRAMES + BONEDEFORM (+ NODES/NODEINDICES skeleton with ``bones``)."""
     stride = mos_xmd.NODE_RECORD_LEN
     nodes_payload = _flat_nodes(bones)
+    idx = _node_indices(range(1, bones))
     nodes = [
         ("VERTEXFRAMES", stride * 2, 0, len(vf_payload), 1, 0),
         ("BONEDEFORM", stride * 3, 0, len(bd_payload), 0, 0),
-        ("NODES", 0, 0, len(nodes_payload), bones, 0),
+        ("NODES", stride * 4, 0, len(nodes_payload), bones, 0),
+        ("NODEINDICES", 0, 0, len(idx), len(idx) // 2, 0),
     ]
-    return build_container(nodes, [vf_payload, bd_payload, nodes_payload])
+    return build_container(
+        nodes, [vf_payload, bd_payload, nodes_payload, idx])
 
 
 def test_skin_roundtrip(tmp_dir):
@@ -498,11 +502,11 @@ def test_skin_absent_is_ok(tmp_dir):
 
 
 def _node_record(version=mos_xmd.NODE_ENTRY_VERSION, translation=(0.0, 0.0, 0.0),
-                 uc=0, ue=0, child_count=0, parent=0, scale=(1.0, 1.0),
+                 uc=0, child_start=0, child_count=0, parent=0, scale=(1.0, 1.0),
                  rotation_slot=0, movement_slot=mos_xmd.NODE_SLOT_NONE) -> bytes:
     out = struct.pack("<HfffHHHHffHH", version, translation[0],
-                      translation[1], translation[2], uc, ue, child_count,
-                      parent, scale[0], scale[1], rotation_slot,
+                      translation[1], translation[2], uc, child_start,
+                      child_count, parent, scale[0], scale[1], rotation_slot,
                       movement_slot)
     assert len(out) == mos_xmd.NODE_ENTRY_LEN, len(out)
     return out
@@ -645,6 +649,70 @@ def test_skeleton_absent_is_ok(tmp_dir):
         os.remove(path)
 
 
+def test_skeleton_child_table(tmp_dir):
+    # Three-level chain 0 -> 1 -> 2 -> 3. The child table lists 1,2,3 and each
+    # node's child_start indexes into it (the FUN_1001e040 walk).
+    recs = [
+        dict(rotation_slot=0, movement_slot=0, child_start=0, child_count=1,
+             parent=0),
+        dict(rotation_slot=1, movement_slot=1, child_start=1, child_count=1,
+             parent=0),
+        dict(rotation_slot=2, child_start=2, child_count=1, parent=1),
+        dict(rotation_slot=3, child_start=3, child_count=0, parent=2),
+    ]
+    payload = _nodes_payload(recs)
+    blob = _skeleton_container(payload, 4, _node_indices([1, 2, 3]))
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        sk = x.skeleton()
+        assert sk.node_indices == (1, 2, 3), sk.node_indices
+        assert sk.children_of(0) == [1], sk.children_of(0)
+        assert sk.children_of(1) == [2], sk.children_of(1)
+        assert sk.children_of(2) == [3], sk.children_of(2)
+        assert sk.children_of(3) == [] and sk.children_of(99) == []
+        assert sk.child_ranges_tile() and sk.child_count_matches()
+        assert sk.derived_parents() == {1: 0, 2: 1, 3: 2}, sk.derived_parents()
+        assert x.validate() == [], x.validate()
+        assert x.geometry_summary()["skeleton_child_table_ok"] is True
+    finally:
+        os.remove(path)
+
+
+def test_skeleton_detects_child_range_overrun(tmp_dir):
+    recs = _basic_skeleton_records()
+    recs[0]["child_start"] = 1          # 1 + 2 children > 2 indices
+    payload = _nodes_payload(recs)
+    blob = _skeleton_container(payload, 4, _node_indices([1, 2]))
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        problems = x.validate()
+        assert any("child range" in p for p in problems), problems
+    finally:
+        os.remove(path)
+
+
+def test_skeleton_detects_parent_table_mismatch(tmp_dir):
+    # node 2's parent field says root but the child table makes node 1 its parent
+    recs = [
+        dict(rotation_slot=0, movement_slot=0, child_start=0, child_count=1,
+             parent=0),
+        dict(rotation_slot=1, movement_slot=1, child_start=1, child_count=1,
+             parent=0),
+        dict(rotation_slot=2, child_start=2, child_count=0, parent=0),
+    ]
+    payload = _nodes_payload(recs)
+    blob = _skeleton_container(payload, 3, _node_indices([1, 2]))
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        problems = x.validate()
+        assert any("child-table parent" in p for p in problems), problems
+    finally:
+        os.remove(path)
+
+
 def main() -> int:
     tests = (test_roundtrip, test_rejects_bad_magic,
              test_geometry_roundtrip, test_geometry_detects_index_out_of_range,
@@ -660,7 +728,10 @@ def main() -> int:
              test_skeleton_detects_bad_node_indices,
              test_skeleton_detects_size_mismatch,
              test_skeleton_detects_padding_not_zeroed,
-             test_skeleton_detects_bad_version, test_skeleton_absent_is_ok)
+             test_skeleton_detects_bad_version, test_skeleton_absent_is_ok,
+             test_skeleton_child_table,
+             test_skeleton_detects_child_range_overrun,
+             test_skeleton_detects_parent_table_mismatch)
     with tempfile.TemporaryDirectory() as d:
         for t in tests:
             t(d)

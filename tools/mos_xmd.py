@@ -117,19 +117,25 @@ Geometry (recovered from MXR.dll ``CTriangleMeshCore::Read`` +
                      u16  version           = 0x100
                      f32  translation[3]    bind-pose local translation
                      u16  reserved          (0 in every shipped asset)
-                     u16  index             (per-node id/offset; uninterpreted)
-                     u16  child_count       number of *used* direct children
+                     u16  child_start       first child's slot in NODEINDICES
+                     u16  child_count       number of direct children
                      u16  parent            parent index (0..N-1)
-                     f32  scale[2]          (1.0f, 1.0f in every shipped asset)
+                     f32  scale[2]           (1.0f, 1.0f in every shipped asset)
                      u16  rotation_slot     == node index; 0xFFFF = padding
                      u16  movement_slot     < 0x20, or 0xFFFF for "none"
 
                  A record with ``rotation_slot == 0xFFFF`` is a **padding** node
                  (also ``movement_slot == 0xFFFF``, zero translation,
-                 ``parent == 0``) and is excluded from ``NODEINDICES``.
+                 ``parent == 0``, ``child_count == 0``) and is excluded from
+                 ``NODEINDICES``.
 
-                 ``NODEINDICES`` is ``u16[used_nodes - 1]`` listing every used
-                 non-root node exactly once: the skeleton's bone/traversal order.
+                 ``NODEINDICES`` is the **flattened child table**: a ``u16`` per
+                 entry, consumed as ``node.child_count`` consecutive values at
+                 ``node.child_start``. The used nodes' ``[child_start,
+                 child_start + child_count)`` ranges tile the whole table exactly,
+                 so ``node.children == NODEINDICES[child_start:child_start+count]``
+                 and ``len(NODEINDICES) == used_nodes - 1`` — this is exactly how
+                 the load-time hierarchy builder ``FUN_1001e040`` walks the tree.
                  Validated by ``--check`` on all 249 shipped skeletons.
 
 This parser is intentionally dependency-free and strictly read-only: it never
@@ -509,8 +515,8 @@ class SkeletonNode:
         u16  version
         f32  translation[3]    x,y,z bind-pose local translation
         u16  unknown_c         (0 in every shipped asset)
-        u16  unknown_e         (per-node index/offset; not yet interpreted)
-        u16  child_count       number of *used* direct children
+        u16  child_start       first child's slot in NODEINDICES
+        u16  child_count       number of direct children
         u16  parent            parent index (0..N-1; node 0 is the root)
         f32  scale_xy[2]       (1.0f, 1.0f in every shipped asset)
         u16  rotation_slot     == node index for used nodes; 0xFFFF = padding
@@ -518,20 +524,25 @@ class SkeletonNode:
 
     A record whose ``rotation_slot`` is ``NODE_SLOT_NONE`` (0xFFFF) is a
     **padding/unused** node: it also carries ``movement_slot == 0xFFFF``, a zero
-    translation and ``parent == 0``, and is excluded from ``NODEINDICES``.
+    translation, ``parent == 0`` and ``child_count == 0``, and is excluded from
+    ``NODEINDICES``.
+
+    A used node's children are ``NODEINDICES[child_start : child_start +
+    child_count]`` — see :meth:`Skeleton.children_of` and the load-time walker
+    ``FUN_1001e040`` (ADR-0418 §Update).
     """
 
-    __slots__ = ("index", "version", "translation", "unknown_c", "unknown_e",
+    __slots__ = ("index", "version", "translation", "unknown_c", "child_start",
                  "child_count", "parent", "scale_xy", "rotation_slot",
                  "movement_slot")
 
-    def __init__(self, index, version, translation, unknown_c, unknown_e,
+    def __init__(self, index, version, translation, unknown_c, child_start,
                  child_count, parent, scale_xy, rotation_slot, movement_slot):
         self.index = index
         self.version = version
         self.translation = translation      # (x, y, z) floats
         self.unknown_c = unknown_c
-        self.unknown_e = unknown_e
+        self.child_start = child_start
         self.child_count = child_count
         self.parent = parent
         self.scale_xy = scale_xy            # (sx, sy) floats (1.0, 1.0)
@@ -551,11 +562,11 @@ class SkeletonNode:
             "version": self.version,
             "translation": list(self.translation),
             "parent": self.parent,
+            "child_start": self.child_start,
             "child_count": self.child_count,
             "rotation_slot": self.rotation_slot,
             "movement_slot": self.movement_slot,
             "unknown_c": self.unknown_c,
-            "unknown_e": self.unknown_e,
             "scale_xy": list(self.scale_xy),
         }
 
@@ -580,8 +591,43 @@ class Skeleton:
         return [n for n in self.nodes if not n.is_used()]
 
     def children_of(self, index: int) -> list[int]:
-        return [n.index for n in self.used_nodes()
-                if n.parent == index and n.index != index and n.index != 0]
+        """Direct children of ``index`` via the NODEINDICES child table.
+
+        This mirrors the load-time walker ``FUN_1001e040``: a used node's
+        children are ``NODEINDICES[child_start : child_start + child_count]``.
+        Padding records and out-of-range ranges yield ``[]``."""
+        if not 0 <= index < len(self.nodes):
+            return []
+        n = self.nodes[index]
+        if not n.is_used():
+            return []
+        end = n.child_start + n.child_count
+        if end > len(self.node_indices):
+            return []
+        return list(self.node_indices[n.child_start:end])
+
+    def child_ranges_tile(self) -> bool:
+        """True when the used nodes' child ranges tile NODEINDICES exactly."""
+        m = len(self.node_indices)
+        cover = [0] * m
+        for n in self.nodes:
+            if n.child_count == 0:
+                continue
+            if n.child_start + n.child_count > m:
+                return False
+            for k in range(n.child_start, n.child_start + n.child_count):
+                cover[k] += 1
+        return all(c == 1 for c in cover)
+
+    def derived_parents(self) -> dict[int, int]:
+        """Map each non-root child to its parent, read from the child table.
+
+        Independent of the ``parent`` field, so it cross-checks the hierarchy."""
+        out: dict[int, int] = {}
+        for n in self.used_nodes():
+            for c in self.children_of(n.index):
+                out.setdefault(c, n.index)
+        return out
 
     def roots(self) -> list[int]:
         """Used nodes that are their own parent (node 0 normally)."""
@@ -614,8 +660,21 @@ class Skeleton:
         return max(slots, default=-1)
 
     def child_count_matches(self) -> bool:
-        return all(n.child_count == len(self.children_of(n.index))
-                   for n in self.used_nodes())
+        """True when every node's child table agrees with its ``parent`` field.
+
+        The child table (``NODEINDICES``) is authoritative for the walker; the
+        ``parent`` field must be its inverse for the skeleton to be coherent."""
+        for n in self.used_nodes():
+            if n.child_start + n.child_count > len(self.node_indices):
+                return False
+            table = set(self.children_of(n.index))
+            scan = {m.index for m in self.used_nodes()
+                    if m.parent == n.index and m.index != n.index}
+            if n.index == 0:
+                scan.discard(0)
+            if table != scan:
+                return False
+        return True
 
     def as_dict(self, with_nodes=False):
         used = self.used_nodes()
@@ -627,6 +686,7 @@ class Skeleton:
             "roots": self.roots(),
             "tree": self.is_tree(),
             "child_count_matches": self.child_count_matches(),
+            "child_ranges_tile": self.child_ranges_tile(),
             "max_rotation_slot": self.max_rotation_slot(),
             "max_movement_slot": self.max_movement_slot(),
             "size": self.size,
@@ -659,11 +719,11 @@ def decode_skeleton(b: bytes, nodes_off: int, nodes_size: int, count: int,
         raise GeometryError("NODES payload runs past EOF")
     nodes = []
     for i in range(n):
-        (ver, ax, ay, az, uc, ue, cc, par, sx, sy, rot, mov
+        (ver, ax, ay, az, uc, cs, cc, par, sx, sy, rot, mov
          ) = struct.unpack_from("<HfffHHHHffHH", b,
                                 nodes_off + i * NODE_ENTRY_LEN)
         nodes.append(SkeletonNode(
-            i, ver, (ax, ay, az), uc, ue, cc, par, (sx, sy), rot, mov))
+            i, ver, (ax, ay, az), uc, cs, cc, par, (sx, sy), rot, mov))
     node_indices: tuple[int, ...] = ()
     if indices_off is not None and indices_size:
         if indices_size % 2:
@@ -807,6 +867,8 @@ class Xmd:
             len(skel.unused_nodes()) if skel else 0)
         summary["skeleton_indices"] = len(skel.node_indices) if skel else 0
         summary["skeleton_tree_ok"] = skel.is_tree() if skel else None
+        summary["skeleton_child_table_ok"] = (
+            skel.child_ranges_tile() if skel else None)
         summary["skeleton_max_rotation_slot"] = (
             skel.max_rotation_slot() if skel else None)
         summary["skeleton_max_movement_slot"] = (
@@ -991,6 +1053,7 @@ class Xmd:
                 else:
                     if (nd.movement_slot != NODE_SLOT_NONE
                             or nd.parent != 0
+                            or nd.child_count != 0
                             or tuple(nd.translation) != (0.0, 0.0, 0.0)):
                         problems.append(
                             f"skeleton node {nd.index}: padding record not "
@@ -1013,6 +1076,34 @@ class Xmd:
                                       != len(skel.node_indices)):
                 problems.append(
                     "NODEINDICES is not exactly the used non-root node set")
+            # The child table: NODEINDICES[child_start : child_start+child_count]
+            # is the authoritative child list (FUN_1001e040). The used nodes'
+            # ranges must stay in bounds, tile the table exactly, and the derived
+            # hierarchy must match the parent field.
+            m = len(skel.node_indices)
+            for nd in skel.used_nodes():
+                if nd.child_start + nd.child_count > m:
+                    problems.append(
+                        f"skeleton node {nd.index}: child range "
+                        f"{nd.child_start}+{nd.child_count} past NODEINDICES "
+                        f"({m} entries)")
+                    break
+            else:
+                if not skel.child_ranges_tile():
+                    problems.append(
+                        "skeleton child ranges do not tile NODEINDICES")
+            if sum(nd.child_count for nd in skel.used_nodes()) != m:
+                problems.append(
+                    f"skeleton child_count sum != NODEINDICES length {m}")
+            derived = skel.derived_parents()
+            for nd in skel.used_nodes():
+                if nd.index == 0:
+                    continue
+                if derived.get(nd.index) != nd.parent:
+                    problems.append(
+                        f"skeleton node {nd.index}: parent field {nd.parent} "
+                        f"!= child-table parent {derived.get(nd.index)}")
+                    break
         return problems
 
     # -- geometry ---------------------------------------------------------
@@ -1325,15 +1416,17 @@ def report_file(path: str, want_json: bool, with_strings: bool,
                   f"used={len(skel.used_nodes())} "
                   f"padding={len(skel.unused_nodes())} "
                   f"indices={len(skel.node_indices)} tree={skel.is_tree()} "
+                  f"child_table_ok={skel.child_ranges_tile()} "
                   f"max_rotation_slot={skel.max_rotation_slot()} "
                   f"max_movement_slot={skel.max_movement_slot()}")
             for nd in skel.nodes[:24]:
                 tag = "" if nd.is_used() else "  [padding]"
                 print(f"      node {nd.index:3d} parent={nd.parent:3d} "
                       f"children={nd.child_count} "
-                      f"t=({nd.translation[0]:8.3f},{nd.translation[1]:8.3f},"
-                      f"{nd.translation[2]:8.3f}) rot={nd.rotation_slot} "
-                      f"mov={nd.movement_slot}{tag}")
+                      f"@{nd.child_start}")
+                print(f"           t=({nd.translation[0]:8.3f},"
+                      f"{nd.translation[1]:8.3f},{nd.translation[2]:8.3f}) "
+                      f"rot={nd.rotation_slot} mov={nd.movement_slot}{tag}")
             print("      node order: "
                   + " ".join(str(i) for i in skel.node_indices[:32])
                   + (" ..." if len(skel.node_indices) > 32 else ""))
