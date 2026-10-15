@@ -15,6 +15,7 @@ struct VRConfig {
     float turnDeadzone = 0.20f;      // right-stick smooth-turn deadzone
     int comfortEnabled = 1;          // #9 comfort vignette proxy toggle
     float comfortStrength = 1.0f;    // vignette proxy gain multiplier
+    float comfortMaxDim = 0.45f;     // GH #9: peripheral dimming ceiling (0=off, max alpha)
     int seated = 0;                  // #11 seated mode
     float seatedEyeOffset = 0.15f;   // #11 seated eye-height compensation
     float standingEyeHeight = 0.0f;  // optional baseline override (0 = auto)
