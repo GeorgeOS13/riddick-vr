@@ -3,7 +3,13 @@
   "game": "DarkAthena.exe",
   "game_version_pin": "Steam build 1.1 (md5 pinned at validation time)",
   "pointer_size": 4,
-  "note": "TRACK C #34 FIRST STEP ONLY: scaffold table + validator self-test. Keystroke emulation remains the active input path; NOTHING here is called by the hook yet.",
+  "note": "TRACK C #34 FIRST STEP ONLY: scaffold table + validator self-test. Keystroke emulation remains the active input path; NOTHING here is called by the hook yet. Static recon 2026-10-15: DarkAthena.exe is x86 GUI (base 0x400000, 5.1MB thin client); imports USER32/GDI32/WINMM/WS2_32 + MSystem.dll/MCCDyn.dll/dvm.dll, NO dinput8/DirectInput. Input flows via USER32 message/polling path or MSystem abstraction, which validates the SendInput strategy; future REA binding targets MSystem action dispatch, not input injection.",
+  "engine_input_path": {
+    "directinput": false,
+    "user32_message_path": true,
+    "abstraction": "MSystem.dll (5.1MB) + MXR.dll (4.6MB); RndrGL.dll (0.94MB) owns GL present",
+    "implication": "SendInput keystrokes travel the same USER32 path the engine polls; keep foreground guard (#33). REA/Ghidra follow-up: locate player action dispatcher inside MSystem.dll."
+  },
   "entries": [
     {
       "id": "RndrGL.PresentHook",
