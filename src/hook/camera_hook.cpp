@@ -1201,7 +1201,71 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             bool hammerfistStrike = (s_shinTrapTime > 0 && (now - s_shinTrapTime < 500) && rVel.y < -1.30f);
 
-            if (isBatonLateralDisarm && (now - s_lastBatonDisarmTime > 1500)) {
+            // Inmate Pit Brawl Underhook Suplex & Spine Slam (ADR 0173)
+            static DWORD s_lastSuplexSlamTime = 0;
+            static DWORD s_suplexHoistTime = 0;
+            bool underhookGripHold = (handsDistSledge < 0.25f && vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
+            bool underhookVerticalHoist = (lVel.y > 1.10f && rVel.y > 1.10f);
+            if (underhookGripHold && underhookVerticalHoist && (now - s_lastSuplexSlamTime > 1800)) {
+                if (s_suplexHoistTime == 0) {
+                    s_suplexHoistTime = now;
+                    VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL DOUBLE UNDERHOOK HOIST INITIATED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
+                    vrState.leftHapticPulse = 0.90f;  // Torso lift resistance (220 Hz)
+                    vrState.rightHapticPulse = 0.90f;
+                }
+            }
+            bool suplexSpineSlam = (s_suplexHoistTime > 0 && (now - s_suplexHoistTime < 500) && lVel.y < -1.20f && rVel.y < -1.20f);
+
+            // Security Guard Stun Baton Dual-Hand Cross-Block Reactive Arc Burst (ADR 0174)
+            static DWORD s_lastCrossArcBurstTime = 0;
+            static DWORD s_crossArcStartTime = 0;
+            bool crossWristFrame = (handsDistSledge < 0.16f &&
+                                    rightLocal.y > -0.15f && rightLocal.y < 0.15f && rightLocal.z > -0.30f && rightLocal.z < -0.10f &&
+                                    vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
+                                    vrState.leftController.trigger > 0.65f && vrState.rightController.trigger > 0.65f);
+            bool isCrossArcBurstReady = false;
+            if (crossWristFrame) {
+                if (s_crossArcStartTime == 0) s_crossArcStartTime = now;
+                if (now - s_crossArcStartTime >= 300) {
+                    vrState.leftHapticPulse = 0.60f;  // Pre-charge hum (240 Hz)
+                    vrState.rightHapticPulse = 0.60f;
+                    if (rVel.z < -1.15f || lVel.z < -1.15f) {
+                        isCrossArcBurstReady = true;
+                    }
+                }
+            } else {
+                s_crossArcStartTime = 0;
+            }
+
+            if (isCrossArcBurstReady && (now - s_lastCrossArcBurstTime > 1800)) {
+                s_lastCrossArcBurstTime = now;
+                s_crossArcStartTime = 0;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Tactical Melee: STUN BATON DUAL-HAND CROSS-BLOCK REACTIVE ARC BURST DISCHARGED");
+                mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
+                SendKey(VK_SPACE, true);
+                SendKey('Q', true);
+                mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
+                SendKey('Q', false);
+                SendKey(VK_SPACE, false);
+                vrState.leftHapticPulse = 0.98f;  // Concussive electrostatic repulsion blast (320 Hz)
+                vrState.rightHapticPulse = 0.98f;
+            } else if (suplexSpineSlam && (now - s_lastSuplexSlamTime > 1800)) {
+                s_lastSuplexSlamTime = now;
+                s_suplexHoistTime = 0;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL UNDERHOOK SUPLEX SPINE SLAM EXECUTED");
+                SendKey('S', true);
+                SendKey(VK_SPACE, true);
+                SendKey('C', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('C', false);
+                SendKey(VK_SPACE, false);
+                SendKey('S', false);
+                vrState.leftHapticPulse = 0.98f;  // Deep sub-bass floor impact shockwave (45 Hz)
+                vrState.rightHapticPulse = 0.98f;
+            } else if (isBatonLateralDisarm && (now - s_lastBatonDisarmTime > 1500)) {
                 s_lastBatonDisarmTime = now;
                 s_lastPunchTime = now;
                 char dirKey = (rVel.x < 0) ? 'A' : 'D';
@@ -3369,6 +3433,43 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 vrState.rightHapticPulse = 0.98f; // Slag percussion fracture blast (260 Hz)
                 vrState.leftHapticPulse = 0.85f;
+            }
+
+            // Dark Athena EVA Solar Collector Heat Radiator Shutter Louver Multi-Slit Slide (ADR 0171)
+            static DWORD s_lastLouverSlideTime = 0;
+            bool handAtLouverSlider = (rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > -0.15f && rightLocal.y < 0.25f &&
+                                       vrState.rightController.grip > 0.60f);
+            bool louverSlideStroke = (fabsf(rVel.y) > 0.70f || fabsf(rVel.x) > 0.70f);
+            if (handAtLouverSlider && louverSlideStroke && (now - s_lastLouverSlideTime > 1500)) {
+                s_lastLouverSlideTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA RADIATOR LOUVER SHUTTERS SLID & SEALED (Vy: %.2f, Vx: %.2f)", rVel.y, rVel.x);
+                SendKeyTap('E');
+                SendKeyTap('C');
+                SendKeyTap(VK_TAB);
+                vrState.rightHapticPulse = 0.90f; // Detent latch lock pulse (280 Hz)
+                vrState.leftHapticPulse = 0.50f;
+            }
+
+            // Subterranean Hydroponics Bio-Waste Incinerator Flame Sensor Quartz Sight-Glass Scrape (ADR 0172)
+            static DWORD s_lastSightGlassTime = 0;
+            static int s_sightGlassCount = 0;
+            bool handAtSightGlass = (rightLocal.z > -0.40f && rightLocal.z < -0.16f && rightLocal.y > -0.10f && rightLocal.y < 0.25f &&
+                                     vrState.rightController.grip > 0.55f);
+            float sightGlassSpeed = sqrtf(rVel.x * rVel.x + rVel.y * rVel.y);
+            if (handAtSightGlass && sightGlassSpeed > 0.52f && (now - s_lastSightGlassTime > 200)) {
+                s_lastSightGlassTime = now;
+                s_sightGlassCount++;
+                VR_LOG_INFO("Environmental Gesture: HYDROPONICS SIGHT-GLASS SCRAPE STROKE #%d (Speed: %.2f)", s_sightGlassCount, sightGlassSpeed);
+                vrState.rightHapticPulse = 0.45f; // Quartz rasp friction (220 Hz)
+                if (s_sightGlassCount >= 4) {
+                    s_sightGlassCount = 0;
+                    VR_LOG_INFO("Environmental Gesture: SIGHT-GLASS WINDOW CLEARED / BURNER OPTICS RESTORED");
+                    SendKeyTap('E');
+                    SendKeyTap(VK_TAB);
+                    SendKeyTap(VK_RETURN);
+                    vrState.rightHapticPulse = 0.85f; // Optical sync resonant confirmation chime (320 Hz)
+                    vrState.leftHapticPulse = 0.50f;
+                }
             }
         }
     }
