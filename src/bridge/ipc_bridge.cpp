@@ -136,6 +136,17 @@ bool IpcBridgeHost::IsClientConnected() const {
     return m_pSharedState->clientConnected;
 }
 
+bool IpcBridgeHost::ClearHaptics() {
+    if (!m_initialized || !m_pSharedState) return false;
+    if (WaitForSingleObject(m_hMutex, 50) == WAIT_OBJECT_0) {
+        m_pSharedState->leftHapticPulse = 0.0f;
+        m_pSharedState->rightHapticPulse = 0.0f;
+        ReleaseMutex(m_hMutex);
+        return true;
+    }
+    return false;
+}
+
 // ============================================================================
 // IpcBridgeClient Implementation (used by 32-bit opengl32.dll)
 // ============================================================================
@@ -240,6 +251,21 @@ bool IpcBridgeClient::WriteState(const RiddickVRSharedState& state) {
         m_pSharedState->leftEyeSharedHandle = state.leftEyeSharedHandle;
         m_pSharedState->rightEyeSharedHandle = state.rightEyeSharedHandle;
         m_pSharedState->cinemaMode = state.cinemaMode;
+        // Hook -> Host feedback: publish haptics + diegetic flags so the 64-bit
+        // OpenXR host can render them. Previously dropped (GH #21) which also
+        // meant reload / NanoMED / grab pulses never reached the headset.
+        // Merge with max so concurrent gestures in one frame don't silently
+        // lose the first pulse (partial mitigation for GH #32 last-writer-wins).
+        if (state.leftHapticPulse > m_pSharedState->leftHapticPulse)
+            m_pSharedState->leftHapticPulse = state.leftHapticPulse;
+        if (state.rightHapticPulse > m_pSharedState->rightHapticPulse)
+            m_pSharedState->rightHapticPulse = state.rightHapticPulse;
+        m_pSharedState->eyeshineActive = state.eyeshineActive;
+        m_pSharedState->flashlightActive = state.flashlightActive;
+        // shouldRecenter is hook->host edge signal (GH #37 follow-up uses sequence;
+        // publish OR so a hook request is never wiped before the host sees it).
+        if (state.shouldRecenter)
+            m_pSharedState->shouldRecenter = true;
         ReleaseMutex(m_hMutex);
         return true;
     }

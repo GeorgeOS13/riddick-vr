@@ -22,6 +22,9 @@ public:
 
     bool IsClientConnected() const;
 
+    // Consume-on-read for haptics (GH #38): zero latched pulses after host applies them.
+    bool ClearHaptics();
+
 private:
     HANDLE m_hMapFile = nullptr;
     RiddickVRSharedState* m_pSharedState = nullptr;

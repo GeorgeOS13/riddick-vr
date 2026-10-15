@@ -1111,6 +1111,11 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
 
             ApplyTactileHaptics(m_leftHandPath, clientState.leftHapticPulse);
             ApplyTactileHaptics(m_rightHandPath, clientState.rightHapticPulse);
+            // Consume-on-read (GH #38): clear latched pulses so a finisher buzz
+            // does not re-fire every frame. Hook republishes while active.
+            if (clientState.leftHapticPulse > 0.05f || clientState.rightHapticPulse > 0.05f) {
+                ipcHost.ClearHaptics();
+            }
         }
     }
 

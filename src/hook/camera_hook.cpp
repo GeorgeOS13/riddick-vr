@@ -264,6 +264,15 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
     DWORD now = GetTickCount();
 
+    // Haptic decay (GH #38): fade stale pulses each frame so a one-shot reload /
+    // NanoMED buzz ends even if the host clear races. New gestures overwrite via max below.
+    // Note: full per-gesture arbitration (GH #32) still needs a central dispatch queue;
+    // client WriteState merges with max as a partial mitigation.
+    vrState.leftHapticPulse *= 0.70f;
+    vrState.rightHapticPulse *= 0.70f;
+    if (vrState.leftHapticPulse < 0.05f) vrState.leftHapticPulse = 0.0f;
+    if (vrState.rightHapticPulse < 0.05f) vrState.rightHapticPulse = 0.0f;
+
     // Detect if Windows mouse cursor is visible (Menus, Loading, Dialogue UI)
     CURSORINFO ci{ sizeof(CURSORINFO) };
     bool cursorShowing = false;
