@@ -18,7 +18,7 @@ if (Test-Path $stateFile) {
     try { $state = Get-Content $stateFile -Raw | ConvertFrom-Json } catch { $state = @{ stuck = 0 } }
 }
 if ($state.stuck -ge 3) {
-    "SKIP game launch: $state.stuck consecutive pre-GL stalls (display down?) - build only this tick" | Tee-Object -FilePath "$Root\tools\worker.log" -Append
+    "SKIP game launch: $($state.stuck) consecutive pre-GL stalls (display down?) - build only this tick" | Tee-Object -FilePath "$Root\tools\worker.log" -Append
     # Probe cheaply: is the display back? A 20s mini-run decides without thrash.
     python3 "$Root\tools\semi_play.py" --frames 15 --interval 15 --timeout 20 2>&1 | Select-Object -Last 6 | Tee-Object -FilePath "$Root\tools\worker.log" -Append
     if ($LASTEXITCODE -eq 0) { $state.stuck = 0 } else { $state.stuck = $state.stuck + 1 }

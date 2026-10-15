@@ -35,3 +35,5 @@ all_exports.txt
 tests/artifacts/
 
 __pycache__/
+
+tools/worker-state.json
