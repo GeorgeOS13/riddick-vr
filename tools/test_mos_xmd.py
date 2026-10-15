@@ -144,6 +144,29 @@ def _triangles(indices) -> bytes:
     return bytes(out)
 
 
+def _tv200_frame(uvs, mn=(0.0, 0.0), mx=(1.0, 1.0)) -> bytes:
+    """Build a TVERTEXFRAMES payload: ``u32 n; 4* f32; u16 uv[n][2]``."""
+    n = len(uvs)
+    out = bytearray(struct.pack("<I", n))
+    out += struct.pack("<2f", *mn)
+    out += struct.pack("<2f", *mx)
+    for (u, v) in uvs:
+        out += struct.pack("<2H", u, v)
+    assert len(out) == 20 + 4 * n, len(out)
+    return bytes(out)
+
+
+def _uv_container(vf_payload, uv_payload, tri_payload, tri_count):
+    stride = mos_xmd.NODE_RECORD_LEN
+    # contiguous 0x30 records: VERTEXFRAMES @0x30, TVERTEXFRAMES @0x60, TRIANGLES @0x90
+    nodes = [
+        ("VERTEXFRAMES", stride * 2, 0, len(vf_payload), 1, 0),
+        ("TVERTEXFRAMES", stride * 3, 0, len(uv_payload), 1, 0x201),
+        ("TRIANGLES", 0, 0, len(tri_payload), tri_count, 0),
+    ]
+    return build_container(nodes, [vf_payload, uv_payload, tri_payload])
+
+
 def _geometry_container(vf_payload, tri_payload, tri_count):
     stride = mos_xmd.NODE_RECORD_LEN
     node1 = stride * 2  # VERTEXFRAMES @0x60 when preceded by a 0x30 root
@@ -219,10 +242,90 @@ def test_geometry_detects_size_mismatch(tmp_dir):
         os.remove(path)
 
 
+def test_uv_roundtrip(tmp_dir):
+    verts = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)]
+    normals = [(0, 0, 0)] * 4
+    uvs = [(0, 0), (65535, 0), (0, 65535), (65535, 65535)]
+    uv_payload = _tv200_frame(uvs, mn=(0.25, 0.5), mx=(0.75, 1.0))
+    blob = _uv_container(_vf204_frame(verts, normals), uv_payload,
+                         _triangles([0, 1, 2, 0, 2, 3]), 2)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        frames = x.tvertex_frames()
+        assert len(frames) == 1, frames
+        f = frames[0]
+        assert f.version == 0x200 and f.count == 4, (f.version, f.count)
+        assert f.bounds_min == (0.25, 0.5), f.bounds_min
+        assert f.bounds_max == (0.75, 1.0), f.bounds_max
+        # q=0 -> min, q=65535 -> max
+        assert f.uvs[0] == (0.25, 0.5), f.uvs[0]
+        assert abs(f.uvs[1][0] - 0.75) < 1e-6 and f.uvs[1][1] == 0.5, f.uvs[1]
+        assert f.uvs[2][0] == 0.25 and abs(f.uvs[2][1] - 1.0) < 1e-6, f.uvs[2]
+        assert x.validate() == [], x.validate()
+        c = x.cluster_meshes()[0]
+        assert c["uv_count"] == 4 and c["uv_matches"] is True, c
+        stats = x.geometry_stats()
+        assert stats["uv_clusters"] == 1 and stats["decoded_uvs"] == 4, stats
+    finally:
+        os.remove(path)
+
+
+def test_uv_detects_count_mismatch(tmp_dir):
+    verts = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)]
+    normals = [(0, 0, 0)] * 4
+    # only 3 UVs for 4 vertices
+    uv_payload = _tv200_frame([(0, 0), (1, 0), (0, 1)])
+    blob = _uv_container(_vf204_frame(verts, normals), uv_payload,
+                         _triangles([0, 1, 2]), 1)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        problems = x.validate()
+        assert any("UV count 3 != vertex count" in p for p in problems), problems
+    finally:
+        os.remove(path)
+
+
+def test_uv_detects_bad_tiling(tmp_dir):
+    verts = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+    normals = [(0, 0, 0)] * 3
+    good = bytearray(_tv200_frame([(0, 0), (1, 0), (0, 1)]))
+    # bump the declared count so size no longer tiles the chunk
+    struct.pack_into("<I", good, 0, 5)
+    blob = _uv_container(_vf204_frame(verts, normals), bytes(good),
+                         _triangles([0, 1, 2]), 1)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        problems = x.validate()
+        assert any("UV frame" in p for p in problems), problems
+    finally:
+        os.remove(path)
+
+
+def test_uv_empty_chunk_is_ok(tmp_dir):
+    verts = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+    normals = [(0, 0, 0)] * 3
+    blob = _uv_container(_vf204_frame(verts, normals), b"",
+                         _triangles([0, 1, 2]), 1)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        assert x.tvertex_frames() == []
+        assert x.validate() == [], x.validate()
+        c = x.cluster_meshes()[0]
+        assert c["uv_count"] is None and c["uv_matches"] is None, c
+    finally:
+        os.remove(path)
+
+
 def main() -> int:
     tests = (test_roundtrip, test_rejects_bad_magic,
              test_geometry_roundtrip, test_geometry_detects_index_out_of_range,
-             test_geometry_detects_size_mismatch)
+             test_geometry_detects_size_mismatch,
+             test_uv_roundtrip, test_uv_detects_count_mismatch,
+             test_uv_detects_bad_tiling, test_uv_empty_chunk_is_ok)
     with tempfile.TemporaryDirectory() as d:
         for t in tests:
             t(d)

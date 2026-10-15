@@ -2,6 +2,52 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 5 — 2026-10-15 22:48 (scheduled loop)
+- **Unit:** GH #55 → #46 — decode the `.xmd` `TVERTEXFRAMES` (UV) payloads from
+  the shipped `MXR.dll` loader.
+- Observation (real evidence, read-only; Ghidra 12.1.4 via `rea`): the
+  `TVERTEXFRAMES` per-frame reader is **`FUN_100807d0`** in `MXR.dll`
+  (`CTriangleMeshCore::Read` calls it once per cluster right after reading
+  `VERTEXFRAMES`; `FUN_1007fce0` sizes the UV list, `FUN_1007fba0` the position
+  list). It switches on a version argument: `0x201` = deferred/seeking form
+  (`RelSeek(count*4 + 0x10)`), `0` = raw `u32[n][2]`, else
+  `throw "Unsupported version %.4x"`. The branch every shipped asset selects is
+  **`0x200`**.
+- Recovered (VF version 0x200 UV frame): `u32 n; f32 min_u; f32 min_v; f32
+  max_u; f32 max_v; u16 uv[n][2]`; dequant `min + q*(max-min)/65535` (same
+  `1.5259022e-05` constant as positions); frame size exactly **`20 + 4n`**. A
+  cluster with no UVs stores an **empty** (`data_size == 0`) `TVERTEXFRAMES`
+  node.
+- Change:
+  - `tools/mos_xmd.py`: added `TVertexFrame`, `decode_tvertex_frame`,
+    `Xmd.tvertex_frames()`; `cluster_meshes()` now pairs each cluster's
+    `VERTEXFRAMES`/`TVERTEXFRAMES`/`TRIANGLES` and records `uv_count`/
+    `uv_matches`; `validate()` cross-checks exact UV tiling + UV/vertex count
+    agreement; `geometry_stats()`/`geometry_summary()` report `uv_clusters`/
+    `decoded_uvs`; docstring documents the layout; `--mesh`/`--cluster N` print
+    UVs.
+  - `tools/test_mos_xmd.py`: +4 headless synthetic-container UV tests
+    (round-trip/dequant, count mismatch, bad tiling, empty chunk).
+  - `docs/adr/0416-xmd-uv-tvertexframes.md` (new); ADR-0415 follow-up marked
+    done.
+- Evidence: `mos_xmd.py --inventory <game>\Content\Models --check` → **631/631
+  `ok`, 0 failures**. Aggregate decode → **4662 clusters**: **2099 carry UVs**
+  (each tiling exactly `20+4n`, `n` == paired vertex count) and **2563 store an
+  empty node** (untextured); **423,559** decoded UV pairs; **0** bad clusters,
+  **0** UV/vertex mismatches. Sample `Riddick_H01.xmd` cluster 0:
+  985 verts / 985 UVs / `uv_match=True`. `test_mos_xmd.py` PASS;
+  `validate_addresses.py`, `verify_reported_fixes.py`, `scenario_tests.py
+  --check`, `verify_hook_init.py` all pass. No C++ changed, so
+  `build-all.ps1`/CTest were not rerun (as in Wakes 3–4).
+- Blocker: none. Next: decode `BONEDEFORM`/`BONEINFLUENCE`/`BONEMATRIXMAP`
+  (skinning; `FUN_1007d260` = BONEDEFORM reader — per-vertex
+  `(u16 bone_index, u8 influence_count, ...)` + per-influence `u16 bone,
+  f32 weight`), then extract the Riddick hand/forearm surfaces
+  (`RIDDICK_ARMSCAR_*`, `Pa2_Hand_01`) with geometry + UVs + skin and add a
+  native mesh path behind a flag, keeping `VRHandRenderer` as fallback.
+- Branch: committed on `docs/rea-mos-loader-layout` (single-writer mode — no new
+  branch; not pushed; `main` untouched).
+
 ## Wake 4 — 2026-10-15 22:40 (scheduled loop)
 - **Unit:** GH #55 → #46 — decode the `.xmd` `VERTEXFRAMES`/`TRIANGLES`
   geometry payloads from the shipped `MXR.dll` loader.

@@ -101,5 +101,7 @@ TRIANGLES         : u32 triangle_count, then triangle_count * (u16,u16,u16).
   and `BONEDEFORM`/`BONEINFLUENCE`/`BONEMATRIXMAP` (skinning) so a decoded mesh
   can be skin-weighted, then extract the Riddick hand/forearm surfaces
   (`RIDDICK_ARMSCAR_*`, `Pa2_Hand_01`).
+  - **Done (ADR-0416):** `TVERTEXFRAMES` decoded (version 0x200, size `20+4n`).
+  - Remaining: skinning (`BONEDEFORM`/`BONEINFLUENCE`/`BONEMATRIXMAP`).
 - Render the extracted mesh in `VRHandRenderer`, keeping the procedural fallback
   until a native path is tested in-headset.

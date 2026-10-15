@@ -42,8 +42,9 @@ Usage:
     python tools/mos_xmd.py --inventory <root-dir> --check
 
 Geometry (recovered from MXR.dll ``CTriangleMeshCore::Read`` +
-``CVertexFrame::Read`` + ``CVertexFrame204::Read``, see
-``docs/adr/0415-xmd-vertex-frame-geometry.md``):
+``CVertexFrame::Read`` + ``CVertexFrame204::Read`` + the TVERTEXFRAMES reader
+``FUN_100807d0``, see ``docs/adr/0415-xmd-vertex-frame-geometry.md`` and
+``docs/adr/0416-xmd-uv-tvertexframes.md``):
 
   VERTEXFRAMES : ``u32 frame_count`` (only when the model version is > 0x100),
                  then ``frame_count`` frames. Each decoded frame (version 0x204,
@@ -65,9 +66,26 @@ Geometry (recovered from MXR.dll ``CTriangleMeshCore::Read`` +
 
   TRIANGLES    : ``u32 triangle_count`` then ``triangle_count`` *u16* triplets.
 
-  Clusters     : one ``VERTEXFRAMES``/``TRIANGLES`` pair per submesh, in
-                 traversal order; every index must be < the paired frame's
-                 vertex count (validated by ``--check``).
+  TVERTEXFRAMES: one quantized UV frame, recovered from MXR.dll
+                 ``FUN_100807d0`` (the version-0x200 branch, which every
+                 shipped asset selects)::
+
+                     u32  uv_count  n
+                     f32  min_u
+                     f32  min_v
+                     f32  max_u
+                     f32  max_v
+                     u16  uv[n][2]           (u,v in 0..65535)
+
+                 ``u = min_u + q_u * (max_u - min_u) / 65535`` (and *v*
+                 likewise) with the same ``1.5259022e-05`` reciprocal. Size is
+                 exactly ``20 + 4n``. A cluster with **no** UVs stores an empty
+                 (``data_size == 0``) ``TVERTEXFRAMES`` node.
+
+  Clusters     : one ``VERTEXFRAMES``/``TVERTEXFRAMES``/``TRIANGLES`` triple per
+                 submesh, in traversal order; every index must be < the paired
+                 frame's vertex count and a non-empty UV frame's count must
+                 equal its position frame's count (validated by ``--check``).
 
 This parser is intentionally dependency-free and strictly read-only: it never
 writes next to the game install. It backs the native first-person hand/arm
@@ -102,6 +120,9 @@ QUANTIZED_VF_VERSIONS = (0x202, 0x203, 0x204)
 _Q16_SCALE = 1.0 / 65535.0
 # 1/127: i8 normal component scale (re-normalized after decode).
 _I8_NORMAL_SCALE = 1.0 / 127.0
+# TVERTEXFRAMES payload (MXR.dll FUN_100807d0). Every shipped asset takes the
+# version-0x200 branch: one quantized UV frame, size == 20 + 4n (see docstring).
+TVERTEX_FRAME_VERSION = 0x200
 
 
 class XmdError(Exception):
@@ -209,6 +230,65 @@ def decode_triangles(b: bytes, off: int, size: int) -> tuple[int, tuple[int, ...
         raise GeometryError(
             f"TRIANGLES size {size} != 4 + {cnt}*6 = {need}")
     return cnt, struct.unpack_from("<%dH" % (cnt * 3), b, off + 4)
+
+
+class TVertexFrame:
+    """One decoded ``TVERTEXFRAMES`` frame (a quantized UV set)."""
+
+    __slots__ = ("version", "count", "bounds_min", "bounds_max", "uvs",
+                 "size", "exact")
+
+    def __init__(self, version, count, bounds_min, bounds_max, uvs, size, exact):
+        self.version = version
+        self.count = count
+        self.bounds_min = bounds_min          # (min_u, min_v)
+        self.bounds_max = bounds_max          # (max_u, max_v)
+        self.uvs = uvs                        # list of (u, v)
+        self.size = size
+        self.exact = exact
+
+    def as_dict(self, with_geometry=False):
+        d = {
+            "version": self.version,
+            "uv_count": self.count,
+            "bounds_min": list(self.bounds_min),
+            "bounds_max": list(self.bounds_max),
+            "size": self.size,
+            "exact": self.exact,
+        }
+        if with_geometry:
+            d["uvs"] = [list(uv) for uv in self.uvs]
+        return d
+
+
+def decode_tvertex_frame(b: bytes, off: int) -> tuple[TVertexFrame, int]:
+    """Decode one ``TVERTEXFRAMES`` payload at ``off``.
+
+    Mirrors the version-0x200 branch of ``FUN_100807d0`` in MXR.dll (the branch
+    every shipped asset selects). Returns ``(frame, size)`` where ``size`` is
+    the payload length ``20 + 4 * uv_count``. Raises ``GeometryError`` if the
+    payload runs past EOF."""
+    if off + 4 > len(b):
+        raise GeometryError(
+            f"TVERTEXFRAMES frame at 0x{off:X} is truncated (no count word)")
+    n = _u32(b, off)
+    p = off + 4
+    mn = struct.unpack_from("<2f", b, p)
+    p += 8
+    mx = struct.unpack_from("<2f", b, p)
+    p += 8
+    size = 20 + 4 * n
+    if off + size > len(b):
+        raise GeometryError(
+            f"TVERTEXFRAMES frame at 0x{off:X} runs past EOF (needs {size} bytes)")
+    su = (mx[0] - mn[0]) * _Q16_SCALE
+    sv = (mx[1] - mn[1]) * _Q16_SCALE
+    uvs = []
+    for i in range(n):
+        qu, qv = struct.unpack_from("<2H", b, p + i * 4)
+        uvs.append((mn[0] + qu * su, mn[1] + qv * sv))
+    frame = TVertexFrame(TVERTEX_FRAME_VERSION, n, mn, mx, uvs, size, exact=True)
+    return frame, size
 
 
 def _u32(b: bytes, off: int) -> int:
@@ -327,6 +407,8 @@ class Xmd:
         summary["clusters"] = dec["cluster_count"]
         summary["decoded_vertices"] = dec["decoded_vertices"]
         summary["decoded_triangles"] = dec["decoded_triangles"]
+        summary["uv_clusters"] = dec["uv_clusters"]
+        summary["decoded_uvs"] = dec["decoded_uvs"]
         summary["bad_clusters"] = dec["bad_clusters"]
         return summary
 
@@ -435,8 +517,9 @@ class Xmd:
             problems.append(
                 f"payloads end at 0x{prev:X}, file is 0x{len(self.data):X}")
 
-        # Geometry cross-check (GH #55): each decoded VERTEXFRAMES/TRIANGLES
-        # cluster pair must agree - triangle indices inside the vertex range.
+        # Geometry cross-check (GH #55): each decoded VERTEXFRAMES/
+        # TVERTEXFRAMES/TRIANGLES cluster triple must agree - triangle indices
+        # inside the vertex range, UV count equal to the position count.
         for c in self.cluster_meshes():
             if c.get("error_kind") == "corrupt":
                 problems.append(f"cluster {c['index']}: {c['error']}")
@@ -444,6 +527,10 @@ class Xmd:
                 problems.append(
                     f"cluster {c['index']}: triangle index {c['max_index']} "
                     f">= decoded vertex count")
+            elif c.get("uv_matches") is False:
+                problems.append(
+                    f"cluster {c['index']}: UV count {c['uv_count']} != vertex "
+                    f"count")
         return problems
 
     # -- geometry ---------------------------------------------------------
@@ -483,14 +570,41 @@ class Xmd:
             return 0, ()
         return decode_triangles(self.data, node.data_offset, node.data_size)
 
-    def cluster_meshes(self) -> list[dict]:
-        """Pair ``VERTEXFRAMES`` and ``TRIANGLES`` chunks in traversal order.
+    def tvertex_frames(self, node: Node | None = None) -> list[TVertexFrame]:
+        """Decode the UV frame of one ``TVERTEXFRAMES`` chunk.
 
-        Each model stores one ``VERTEXFRAMES``/``TRIANGLES`` pair per cluster
-        (submesh). Decoding geometrically cross-checks the two: every triangle
-        index must fall inside the paired frame's vertex range."""
+        Mirrors ``FUN_100807d0`` in MXR.dll. An empty chunk (``data_size == 0``)
+        means the cluster carries no UVs and decodes to ``[]``."""
+        if node is None:
+            node = self.chunk("TVERTEXFRAMES")
+        if node is None or node.data_size == 0:
+            return []
+        b = self.data
+        off, end = node.data_offset, node.data_offset + node.data_size
+        frames: list[TVertexFrame] = []
+        while off < end:
+            frame, size = decode_tvertex_frame(b, off)
+            if size <= 0 or off + size > end:
+                raise GeometryError(
+                    f"{node.name}@0x{node.offset:X}: UV frame tiling overflow")
+            frames.append(frame)
+            off += size
+        if off != end:
+            raise GeometryError(
+                f"{node.name}@0x{node.offset:X}: UV frames end at 0x{off:X}, "
+                f"chunk ends at 0x{end:X}")
+        return frames
+
+    def cluster_meshes(self) -> list[dict]:
+        """Pair ``VERTEXFRAMES``/``TVERTEXFRAMES``/``TRIANGLES`` chunks in order.
+
+        Each model stores one such triple per cluster (submesh). Decoding
+        geometrically cross-checks them: every triangle index must fall inside
+        the paired frame's vertex range, and a non-empty UV frame must have the
+        same count as its position frame."""
         order = self.walk_linked()
         vf_nodes = [n for n in order if n.name == "VERTEXFRAMES"]
+        tv_nodes = [n for n in order if n.name == "TVERTEXFRAMES"]
         tri_nodes = [n for n in order if n.name == "TRIANGLES"]
         clusters = []
         for i, vn in enumerate(vf_nodes):
@@ -498,6 +612,9 @@ class Xmd:
                 "index": i,
                 "vertex_chunk": vn.as_dict(),
                 "frames": [],
+                "uv_chunk": None,
+                "uv_count": None,
+                "uv_matches": None,
                 "triangle_chunk": None,
                 "triangle_count": None,
                 "max_index": None,
@@ -513,6 +630,19 @@ class Xmd:
                 entry["error_kind"] = ("unsupported" if "not decodable" in str(e)
                                        else "corrupt")
                 frames = []
+            if i < len(tv_nodes):
+                tv = tv_nodes[i]
+                entry["uv_chunk"] = tv.as_dict()
+                try:
+                    uv_frames = self.tvertex_frames(tv)
+                    if uv_frames:
+                        entry["uv_count"] = uv_frames[-1].count
+                        if frames:
+                            entry["uv_matches"] = (
+                                uv_frames[-1].count == frames[-1].count)
+                except GeometryError as e:
+                    entry["error"] = (entry["error"] or "") + f"; {e}"
+                    entry["error_kind"] = "corrupt"
             if i < len(tri_nodes):
                 tn = tri_nodes[i]
                 entry["triangle_chunk"] = tn.as_dict()
@@ -536,18 +666,26 @@ class Xmd:
         clusters = self.cluster_meshes()
         total_verts = 0
         total_tris = 0
+        total_uvs = 0
+        uv_clusters = 0
         bad = 0
         for c in clusters:
             if c["frames"]:
                 total_verts += c["frames"][-1]["vertex_count"]
             if c["triangle_count"] is not None:
                 total_tris += c["triangle_count"]
-            if c["error"] or c["index_in_range"] is False:
+            if c["uv_count"] is not None:
+                total_uvs += c["uv_count"]
+                uv_clusters += 1
+            if (c["error"] or c["index_in_range"] is False
+                    or c.get("uv_matches") is False):
                 bad += 1
         return {
             "cluster_count": len(clusters),
             "decoded_vertices": total_verts,
             "decoded_triangles": total_tris,
+            "uv_clusters": uv_clusters,
+            "decoded_uvs": total_uvs,
             "bad_clusters": bad,
         }
 
@@ -593,6 +731,11 @@ def report_file(path: str, want_json: bool, with_strings: bool,
                            f"(0..{len(vf_nodes) - 1})")
         rec["cluster_detail"] = [
             f.as_dict(with_geometry=True) for f in x.vertex_frames(vf_nodes[cluster])]
+        tv_nodes = [n for n in x.walk_linked() if n.name == "TVERTEXFRAMES"]
+        if cluster < len(tv_nodes):
+            rec["uv_detail"] = [
+                f.as_dict(with_geometry=True)
+                for f in x.tvertex_frames(tv_nodes[cluster])]
     if not want_json:
         print(f"== {os.path.basename(path)}  ({len(x.data)} bytes, "
               f"{len(x.nodes)} nodes, data@0x{x.data_start:X})")
@@ -605,6 +748,7 @@ def report_file(path: str, want_json: bool, with_strings: bool,
               f"skinning={g['has_skinning']}")
         print(f"   clusters={g['clusters']}  decoded_verts={g['decoded_vertices']}"
               f"  decoded_tris={g['decoded_triangles']}"
+              f"  uv_clusters={g['uv_clusters']}  decoded_uvs={g['decoded_uvs']}"
               f"  bad_clusters={g['bad_clusters']}")
         if with_mesh:
             for c in rec.get("clusters", []):
@@ -612,7 +756,8 @@ def report_file(path: str, want_json: bool, with_strings: bool,
                 print(f"   cluster {c['index']}: verts={fr.get('vertex_count')} "
                       f"ver={fr.get('version') and hex(fr['version'])} "
                       f"tris={c['triangle_count']} max_index={c['max_index']} "
-                      f"in_range={c['index_in_range']}"
+                      f"in_range={c['index_in_range']} "
+                      f"uvs={c['uv_count']} uv_match={c['uv_matches']}"
                       + (f"  ERR {c['error']}" if c["error"] else ""))
         if cluster is not None:
             for d in rec["cluster_detail"]:
@@ -621,6 +766,12 @@ def report_file(path: str, want_json: bool, with_strings: bool,
                       f"{d['bounds_max']})")
                 for p in d["positions"][:8]:
                     print("      pos %8.3f %8.3f %8.3f" % tuple(p))
+            for u in rec.get("uv_detail", []):
+                print(f"   cluster {cluster} uv frame ver=0x{u['version']:x} "
+                      f"uvs={u['uv_count']} bounds=({u['bounds_min']} .. "
+                      f"{u['bounds_max']})")
+                for uv in u["uvs"][:8]:
+                    print("      uv  %8.4f %8.4f" % tuple(uv))
         if with_tree:
             for line in x.tree_lines():
                 print("   " + line)
