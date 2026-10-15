@@ -1589,6 +1589,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                          vrState.rightController.trigger > 0.65f);
             bool vaultGroundArcPlunge = (vaultGroundArcStance && isJumpingStance && rVel.y < -1.40f && lVel.y < -1.15f);
 
+            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Grating Slam (ADR 0245)
+            static DWORD s_lastThoracicSlamTime = 0;
+            static char s_thoracicSlamDirKey = 'A';
+            bool thoracicSlamStance = (handsDistSledge < 0.26f &&
+                                       leftLocal.y > -0.20f && leftLocal.y < 0.15f &&
+                                       vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
+            bool thoracicSlamThrow = (thoracicSlamStance && rVel.y < -1.30f &&
+                                      fabsf(lVel.x) > 0.90f && lVel.y > 0.60f);
+            if (thoracicSlamThrow && (now - s_lastThoracicSlamTime > 2000)) {
+                s_thoracicSlamDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+            }
+
+            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Kinetic Cleave Shockwave (ADR 0246)
+            static DWORD s_lastVaultKineticCleaveTime = 0;
+            bool vaultKineticCleaveStance = (handsDistSledge < 0.28f &&
+                                             rightLocal.y > 0.15f &&
+                                             vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
+                                             vrState.rightController.trigger > 0.65f);
+            bool vaultKineticCleavePlunge = (vaultKineticCleaveStance && isJumpingStance &&
+                                             rVel.y < -1.45f && lVel.y < -1.15f);
+
             // Inmate Pit Brawl Outside Leg Hook Sweep & Ground Knee Drop (ADR 0209)
             static DWORD s_lastOutsideLegSweepTime = 0;
             static DWORD s_outsideLegSweepHookTime = 0;
@@ -1635,7 +1656,39 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_crossBlockHoldStart = 0;
             }
 
-            if (vaultGroundArcPlunge && (now - s_lastVaultGroundArcTime > 2000)) {
+            if (vaultKineticCleavePlunge && (now - s_lastVaultKineticCleaveTime > 2000)) {
+                s_lastVaultKineticCleaveTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Tactical Melee: STUN BATON VAULT KINETIC CLEAVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
+                SendKey(VK_SPACE, true);
+                SendKey('W', true);
+                SendKey('Q', true);
+                SendKey('S', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('S', false);
+                SendKey('Q', false);
+                SendKey('W', false);
+                SendKey(VK_SPACE, false);
+                vrState.rightHapticPulse = 0.98f; // Kinetic plasma detonation blast (360 Hz)
+                vrState.leftHapticPulse = 0.90f;  // Two-handed landing frame recoil (80 Hz)
+            } else if (thoracicSlamThrow && (now - s_lastThoracicSlamTime > 2000)) {
+                s_lastThoracicSlamTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL THORACIC GRATING SLAM EXECUTED (Dir: %c, Ry: %.2f, Lx: %.2f)", s_thoracicSlamDirKey, rVel.y, lVel.x);
+                SendKey('W', true);
+                SendKey(s_thoracicSlamDirKey, true);
+                SendKey('C', true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, false);
+                SendKey('C', false);
+                SendKey(s_thoracicSlamDirKey, false);
+                SendKey('W', false);
+                vrState.rightHapticPulse = 0.98f; // Ribcage crush and deck grating impact shockwave (360 Hz)
+                vrState.leftHapticPulse = 0.90f;  // Thoracic squeeze lift strain (220 Hz)
+            } else if (vaultGroundArcPlunge && (now - s_lastVaultGroundArcTime > 2000)) {
                 s_lastVaultGroundArcTime = now;
                 s_lastPunchTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON VAULT JUMP GROUND ARC EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
@@ -5027,6 +5080,43 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_RETURN);
                 vrState.rightHapticPulse = 0.98f; // Plier mechanical bottom-out snap (310 Hz)
                 vrState.leftHapticPulse = 0.65f;  // Blade deformation resistance (170 Hz)
+            }
+
+            // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Axial Play Vernier Caliper Dial Gauge Retaining Dog Set Screw (ADR 0243)
+            static DWORD s_lastVernierDogScrewTime = 0;
+            bool handAtVernierFixture = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
+                                         vrState.leftController.grip > 0.55f);
+            bool handOnDogSetScrew = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
+                                      vrState.rightController.trigger < 0.40f);
+            bool dogSetScrewTorque = (fabsf(rVel.x) > 0.65f);
+            if (handAtVernierFixture && handOnDogSetScrew && dogSetScrewTorque && (now - s_lastVernierDogScrewTime > 1800)) {
+                s_lastVernierDogScrewTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA TRUSS VERNIER DOG SET SCREW TORQUED & LOCKED (Rx: %.2f)", rVel.x);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap(VK_TAB);
+                SendKeyTap(VK_RETURN);
+                vrState.rightHapticPulse = 0.95f; // Hardened dog screw torque stop (290 Hz)
+                vrState.leftHapticPulse = 0.60f;  // Hinge lug friction (160 Hz)
+            }
+
+            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Phase Angle Stroboscope Synchronization (ADR 0244)
+            static DWORD s_lastStrobeSyncTime = 0;
+            bool handAimingStrobe = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
+                                     vrState.leftController.grip > 0.55f);
+            bool handTuningStrobeDial = (twoHandDist < 0.22f &&
+                                         vrState.rightController.grip > 0.45f && vrState.rightController.grip < 0.85f &&
+                                         vrState.rightController.trigger < 0.35f);
+            bool strobeDialTwist = (fabsf(rVel.x) > 0.65f);
+            if (handAimingStrobe && handTuningStrobeDial && strobeDialTwist && (now - s_lastStrobeSyncTime > 1800)) {
+                s_lastStrobeSyncTime = now;
+                VR_LOG_INFO("Environmental Gesture: DRAFT FAN STROBOSCOPE PHASE LOCKED (Rx: %.2f)", rVel.x);
+                SendKeyTap('E');
+                SendKeyTap('Q');
+                SendKeyTap(VK_TAB);
+                SendKeyTap(VK_SPACE);
+                vrState.rightHapticPulse = 0.55f; // Optical flash sync micro-clicks (190 Hz)
+                vrState.leftHapticPulse = 0.90f;  // Stationary rotor strobe lock tone (310 Hz)
             }
         }
     }
