@@ -1714,6 +1714,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                            rVel.y < -1.65f && lVel.y < -1.40f &&
                                            fabsf(rVel.x - lVel.x) > 1.00f);
 
+            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Sternum Bone Fracture Thoracic Grating Slam (ADR 0269)
+            static DWORD s_lastSternumGratingSlamTime = 0;
+            static char s_sternumGratingSlamDirKey = 'A';
+            bool sternumGratingSlamStance = (handsDistSledge < 0.26f &&
+                                             leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                             vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
+            bool sternumGratingSlamThrow = (sternumGratingSlamStance && rVel.y < -1.65f &&
+                                            lVel.y < -1.40f && fabsf(lVel.x) > 0.85f);
+            if (sternumGratingSlamThrow && (now - s_lastSternumGratingSlamTime > 2000)) {
+                s_sternumGratingSlamDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+            }
+
+            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Shockwave Overload (ADR 0270)
+            static DWORD s_lastPlasmaOverloadWaveTime = 0;
+            bool plasmaOverloadWaveStance = (handsDistSledge < 0.28f &&
+                                             vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
+                                             vrState.rightController.trigger > 0.65f);
+            bool plasmaOverloadWavePlunge = (plasmaOverloadWaveStance && isJumpingStance &&
+                                             rVel.y < -1.70f && lVel.y < -1.45f &&
+                                             fabsf(rVel.x - lVel.x) > 1.05f);
+
             // Inmate Pit Brawl Outside Leg Hook Sweep & Ground Knee Drop (ADR 0209)
             static DWORD s_lastOutsideLegSweepTime = 0;
             static DWORD s_outsideLegSweepHookTime = 0;
@@ -1760,7 +1781,45 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_crossBlockHoldStart = 0;
             }
 
-            if (plasmaCleaveWavePlunge && (now - s_lastPlasmaCleaveWaveTime > 2000)) {
+            if (plasmaOverloadWavePlunge && (now - s_lastPlasmaOverloadWaveTime > 2000)) {
+                s_lastPlasmaOverloadWaveTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA OVERLOAD WAVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
+                SendKey(VK_SPACE, true);
+                SendKey('W', true);
+                SendKey('Q', true);
+                SendKey(VK_TAB, true);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                SendKey('C', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('C', false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_TAB, false);
+                SendKey('Q', false);
+                SendKey('W', false);
+                SendKey(VK_SPACE, false);
+                vrState.rightHapticPulse = 0.98f; // Plasma overload detonation wave (360 Hz)
+                vrState.leftHapticPulse = 0.98f;  // Structural deck recoil (110 Hz)
+            } else if (sternumGratingSlamThrow && (now - s_lastSternumGratingSlamTime > 2000)) {
+                s_lastSternumGratingSlamTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER STERNUM GRATING SLAM EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_sternumGratingSlamDirKey, rVel.y, lVel.y);
+                SendKey('W', true);
+                SendKey(s_sternumGratingSlamDirKey, true);
+                SendKey('C', true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, false);
+                SendKey('C', false);
+                SendKey(s_sternumGratingSlamDirKey, false);
+                SendKey('W', false);
+                vrState.rightHapticPulse = 0.98f; // Thoracic cage fracture shockwave (360 Hz)
+                vrState.leftHapticPulse = 0.92f;  // Whizzer collar tie drag (250 Hz)
+            } else if (plasmaCleaveWavePlunge && (now - s_lastPlasmaCleaveWaveTime > 2000)) {
                 s_lastPlasmaCleaveWaveTime = now;
                 s_lastPunchTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA CLEAVE WAVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
@@ -5569,6 +5628,42 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 vrState.rightHapticPulse = 0.55f; // Potentiometer detent wiper micro-clicks (200 Hz)
                 vrState.leftHapticPulse = 0.95f;  // Signal gain lock chime (330 Hz)
+            }
+
+            // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode Heat Sink Clamp Spring (ADR 0267)
+            static DWORD s_lastDiodeClampSpringTime = 0;
+            bool handAtDiodeHousing = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
+                                       vrState.leftController.grip > 0.55f);
+            bool handOnDiodeSpring = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
+                                      vrState.rightController.trigger > 0.50f);
+            bool diodeSpringStroke = (rVel.y < -0.65f);
+            if (handAtDiodeHousing && handOnDiodeSpring && diodeSpringStroke && (now - s_lastDiodeClampSpringTime > 1800)) {
+                s_lastDiodeClampSpringTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA SOLAR BYPASS DIODE CLAMP SPRING SEATED (Ry: %.2f)", rVel.y);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap(VK_TAB);
+                SendKeyTap('Q');
+                vrState.rightHapticPulse = 0.95f; // Tempered spring-steel snap (280 Hz)
+                vrState.leftHapticPulse = 0.55f;  // Heat sink pad compression (140 Hz)
+            }
+
+            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Signal Cable Magnetic Shield Wrap (ADR 0268)
+            static DWORD s_lastTachShieldWrapTime = 0;
+            bool handAtMotorPedestalCable = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
+                                             vrState.leftController.grip > 0.55f);
+            bool handOnShieldFoil = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
+                                     vrState.rightController.trigger < 0.40f);
+            bool tachShieldWrapTorque = (fabsf(rVel.x) > 0.65f);
+            if (handAtMotorPedestalCable && handOnShieldFoil && tachShieldWrapTorque && (now - s_lastTachShieldWrapTime > 1800)) {
+                s_lastTachShieldWrapTime = now;
+                VR_LOG_INFO("Environmental Gesture: DRAFT FAN TACHOMETER SHIELD FOIL WRAPPED (Rx: %.2f)", rVel.x);
+                SendKeyTap('E');
+                SendKeyTap('Q');
+                SendKeyTap(VK_TAB);
+                SendKeyTap(VK_RETURN);
+                vrState.rightHapticPulse = 0.95f; // Metallic shielding wrap click (260 Hz)
+                vrState.leftHapticPulse = 0.55f;  // Silicone cable strain (150 Hz)
             }
         }
     }
