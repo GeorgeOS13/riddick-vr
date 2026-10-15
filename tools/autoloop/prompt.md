@@ -61,6 +61,8 @@ work this wake, then stop. Keep total effort bounded (<= 4 concurrent subagents)
    deploy binaries. Update `tools/autoloop/STATE.md`
    with: timestamp, what you did, evidence, blocker, next step. Append one line
    to `tools/autoloop/logs/STATE.log`. Comment concise progress on the issue.
+   Then **push to the remote**: `git push origin main` (normal push only — NEVER
+   `--force`). Keeping `origin/main` current is a hard requirement.
 7. If blocked with nothing doable, document the blocker, create/refine an issue,
    and stop. Do not spin.
 
