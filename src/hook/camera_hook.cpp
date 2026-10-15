@@ -1987,6 +1987,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                         rVel.y < -2.30f && lVel.y < -2.05f &&
                                         fabsf(rVel.x - lVel.x) > 1.65f);
 
+            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Hyperextension Cranial Post Double-Strike Execution (ADR 0321)
+            static DWORD s_lastCranialDoubleStrikeTime = 0;
+            static char s_cranialDoubleStrikeDirKey = 'A';
+            bool cranialDoubleStrikeStance = (handsDistSledge < 0.26f &&
+                                              leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                              vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
+            bool cranialDoubleStrikePlunge = (cranialDoubleStrikeStance && rVel.y < -2.30f &&
+                                              lVel.y < -2.05f && fabsf(lVel.x) > 0.95f);
+            if (cranialDoubleStrikePlunge && (now - s_lastCranialDoubleStrikeTime > 2000)) {
+                s_cranialDoubleStrikeDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+            }
+
+            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Cosmic Dawn Overdrive (ADR 0322)
+            static DWORD s_lastPlasmaCosmicDawnTime = 0;
+            bool plasmaCosmicDawnStance = (handsDistSledge < 0.28f &&
+                                           vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
+                                           vrState.rightController.trigger > 0.65f);
+            bool plasmaCosmicDawnPlunge = (plasmaCosmicDawnStance && isJumpingStance &&
+                                           rVel.y < -2.35f && lVel.y < -2.10f &&
+                                           fabsf(rVel.x - lVel.x) > 1.70f);
+
             // Inmate Pit Brawl Outside Leg Hook Sweep & Ground Knee Drop (ADR 0209)
             static DWORD s_lastOutsideLegSweepTime = 0;
             static DWORD s_outsideLegSweepHookTime = 0;
@@ -2033,6 +2054,88 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_crossBlockHoldStart = 0;
             }
 
+            if (plasmaCosmicDawnPlunge && (now - s_lastPlasmaCosmicDawnTime > 2000)) {
+                s_lastPlasmaCosmicDawnTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM COSMIC DAWN OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
+                SendKey(VK_SPACE, true);
+                SendKey('W', true);
+                SendKey('Q', true);
+                SendKey(VK_TAB, true);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                SendKey('C', true);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                SendKey(VK_TAB, true);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                SendKey('Q', true);
+                SendKey(VK_TAB, true);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                SendKey(VK_TAB, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_TAB, false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_TAB, false);
+                SendKey('Q', false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_TAB, false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey('C', false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_TAB, false);
+                SendKey('Q', false);
+                SendKey('W', false);
+                SendKey(VK_SPACE, false);
+                vrState.rightHapticPulse = 0.98f; // Resonant cataclysm Cosmic Dawn overdrive shockwave (440 Hz)
+                vrState.leftHapticPulse = 0.98f;  // Structural deck Cosmic Dawn recoil (340 Hz)
+                goto combat_gesture_done;
+            }
+            if (cranialDoubleStrikePlunge && (now - s_lastCranialDoubleStrikeTime > 2000)) {
+                s_lastCranialDoubleStrikeTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST DOUBLE STRIKE EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialDoubleStrikeDirKey, rVel.y, lVel.y);
+                SendKey('W', true);
+                SendKey(s_cranialDoubleStrikeDirKey, true);
+                SendKey('C', true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_SPACE, false);
+                SendKey('C', false);
+                SendKey(s_cranialDoubleStrikeDirKey, false);
+                SendKey('W', false);
+                vrState.rightHapticPulse = 0.98f; // Dual cranial structural impact shockwave (440 Hz)
+                vrState.leftHapticPulse = 0.95f;  // Whizzer collar tie drag (360 Hz)
+                goto combat_gesture_done;
+            }
             if (plasmaBigBangPlunge && (now - s_lastPlasmaBigBangTime > 2000)) {
                 s_lastPlasmaBigBangTime = now;
                 s_lastPunchTime = now;
@@ -7233,6 +7336,42 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 vrState.rightHapticPulse = 0.95f; // Rocker switch toggle detent snap (350 Hz)
                 vrState.leftHapticPulse = 0.50f;  // Chassis grounding vibration (130 Hz)
+            }
+
+            // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode Circuit Continuity & Resistance Multimeter Probe Test (ADR 0319)
+            static DWORD s_lastDiodeMultimeterProbeTime = 0;
+            bool handAtGroundLug = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
+                                    vrState.leftController.grip > 0.55f);
+            bool handOnCathodeProbe = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
+                                       vrState.rightController.trigger < 0.40f);
+            bool diodeProbeStroke = (rVel.z < -0.75f);
+            if (handAtGroundLug && handOnCathodeProbe && diodeProbeStroke && (now - s_lastDiodeMultimeterProbeTime > 1800)) {
+                s_lastDiodeMultimeterProbeTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA SOLAR DIODE CONTINUITY MULTIMETER PROBE TESTED (Rz: %.2f)", rVel.z);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap(VK_TAB);
+                SendKeyTap('Q');
+                vrState.rightHapticPulse = 0.95f; // Gold-plated probe tip contact snap (310 Hz)
+                vrState.leftHapticPulse = 0.50f;  // Ground clip reaction (150 Hz)
+            }
+
+            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Correction Trial Weight Clip Installation (ADR 0320)
+            static DWORD s_lastTachTrialWeightTime = 0;
+            bool handAtImpellerRim = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
+                                      vrState.leftController.grip > 0.55f);
+            bool handOnTrialWeightClip = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
+                                          vrState.rightController.trigger > 0.50f);
+            bool tachTrialWeightStroke = (rVel.z < -0.80f);
+            if (handAtImpellerRim && handOnTrialWeightClip && tachTrialWeightStroke && (now - s_lastTachTrialWeightTime > 1800)) {
+                s_lastTachTrialWeightTime = now;
+                VR_LOG_INFO("Environmental Gesture: DRAFT FAN DYNAMIC BALANCE TRIAL WEIGHT CLIP INSTALLED (Rz: %.2f)", rVel.z);
+                SendKeyTap('E');
+                SendKeyTap('Q');
+                SendKeyTap(VK_TAB);
+                SendKeyTap(VK_RETURN);
+                vrState.rightHapticPulse = 0.95f; // Spring-steel balance clip seating thud (360 Hz)
+                vrState.leftHapticPulse = 0.50f;  // Impeller acoustic resonance (140 Hz)
             }
         }
     }
