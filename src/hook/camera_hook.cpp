@@ -1369,6 +1369,32 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             bool firemansWhipThrow = (s_firemansLoadTime > 0 && (now - s_firemansLoadTime < 500) &&
                                       (fabsf(lVel.x) > 1.25f || fabsf(rVel.x) > 1.25f));
 
+            // Inmate Pit Brawl Standing Front Headlock & Guillotine Neck Crack (ADR 0205)
+            static DWORD s_lastFrontHeadlockTime = 0;
+            bool frontHeadlockWrap = (handsDistSledge < 0.25f && leftLocal.y > -0.15f &&
+                                      vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
+            bool frontHeadlockArchTorque = (lVel.y > 1.15f && rVel.y > 1.15f);
+
+            // Security Guard Stun Baton Lateral Two-Handed Cross-Chest Kinetic Parrying Riposte (ADR 0206)
+            static DWORD s_lastCrossParryTime = 0;
+            static DWORD s_crossParryDeflectTime = 0;
+            static char s_crossParryDirKey = 'A';
+            bool crossParryStance = (handsDistSledge > 0.18f && handsDistSledge < 0.35f &&
+                                     fabsf(rightLocal.x - leftLocal.x) > 0.20f &&
+                                     vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
+                                     vrState.rightController.trigger > 0.65f);
+            bool crossParryDeflect = (crossParryStance && (fabsf(rVel.x) > 0.85f || fabsf(lVel.x) > 0.85f));
+            if (crossParryDeflect && (now - s_lastCrossParryTime > 2000)) {
+                if (s_crossParryDeflectTime == 0) {
+                    s_crossParryDeflectTime = now;
+                    s_crossParryDirKey = (rVel.x > 0.0f || lVel.x > 0.0f) ? 'D' : 'A';
+                    VR_LOG_INFO("Tactical Melee: STUN BATON CROSS-CHEST PARRY DEFLECTED (Dir: %c, Vx: %.2f)", s_crossParryDirKey, rVel.x);
+                    vrState.leftHapticPulse = 0.85f;  // Parry deflection shockwave (300 Hz)
+                    vrState.rightHapticPulse = 0.85f;
+                }
+            }
+            bool crossParryRiposte = (s_crossParryDeflectTime > 0 && (now - s_crossParryDeflectTime < 500) && rVel.z < -1.25f);
+
             // Inmate Pit Brawl Suloev Stretch Hamstring Submission Lock (ADR 0201)
             static DWORD s_lastSuloevTime = 0;
             bool suloevLowCrouch = (s_isPhysicallyCrouched || s_isDeepProne || leftLocal.y < -0.30f);
@@ -1407,7 +1433,40 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_crossBlockHoldStart = 0;
             }
 
-            if (isLookingDownward && batonOverheadVault && batonVaultPlunge && (now - s_lastVaultDropTime > 2000)) {
+            if (crossParryRiposte && (now - s_lastCrossParryTime > 2000)) {
+                s_lastCrossParryTime = now;
+                s_crossParryDeflectTime = 0;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Tactical Melee: STUN BATON CROSS-PARRY RIPOSTE DISCHARGED (Dir: %c, Rz: %.2f)", s_crossParryDirKey, rVel.z);
+                mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
+                SendKey(s_crossParryDirKey, true);
+                SendKey('W', true);
+                SendKey('Q', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('Q', false);
+                SendKey('W', false);
+                SendKey(s_crossParryDirKey, false);
+                mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
+                vrState.rightHapticPulse = 0.98f; // Electro-kinetic counter-detonation blast (350 Hz)
+                vrState.leftHapticPulse = 0.70f;
+            } else if (frontHeadlockWrap && frontHeadlockArchTorque && (now - s_lastFrontHeadlockTime > 2000)) {
+                s_lastFrontHeadlockTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL FRONT HEADLOCK GUILLOTINE CRACK (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
+                SendKey('W', true);
+                SendKey('S', true);
+                SendKey('C', true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, false);
+                SendKey('C', false);
+                SendKey('S', false);
+                SendKey('W', false);
+                vrState.leftHapticPulse = 0.98f;  // Cervical compression strain & bone snap (340 Hz)
+                vrState.rightHapticPulse = 0.98f;
+            } else if (isLookingDownward && batonOverheadVault && batonVaultPlunge && (now - s_lastVaultDropTime > 2000)) {
                 s_lastVaultDropTime = now;
                 s_lastPunchTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON HIGH-ARC OVERHEAD VAULT DROP STRIKE EXECUTED (Ry: %.2f)", rVel.y);
@@ -4111,6 +4170,41 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_TAB);
                 vrState.rightHapticPulse = 0.98f; // Rapping anvil impact shockwave (270 Hz)
                 vrState.leftHapticPulse = 0.70f;  // Precipitator plate vibration rumble (85 Hz)
+            }
+
+            // Dark Athena EVA Solar Collector Photovoltaic Array Tension Guy-Wire Rigging Turnbuckle Locking Nut Strike (ADR 0203)
+            static DWORD s_lastGuyWireNutTime = 0;
+            bool handAtTurnbuckleBody = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > -0.20f && leftLocal.y < 0.20f &&
+                                         vrState.leftController.grip > 0.55f);
+            bool handHoldingMalletTool = (twoHandDist < 0.22f && vrState.rightController.grip > 0.60f);
+            bool guyWireNutImpact = (rVel.y < -1.10f);
+            if (handAtTurnbuckleBody && handHoldingMalletTool && guyWireNutImpact && (now - s_lastGuyWireNutTime > 1800)) {
+                s_lastGuyWireNutTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA GUY-WIRE TURNBUCKLE LOCK NUT STAKED (Ry: %.2f)", rVel.y);
+                SendKeyTap('E');
+                SendKeyTap('W');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap(VK_TAB);
+                vrState.rightHapticPulse = 0.98f; // Locking nut impact detent snap (260 Hz)
+                vrState.leftHapticPulse = 0.60f;  // High-tension wire resonance chime (140 Hz)
+            }
+
+            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Ash Quenching Trough Agitator Rake Sweep (ADR 0204)
+            static DWORD s_lastAshRakeTime = 0;
+            bool bothAtAshRake = (twoHandDist > 0.22f && twoHandDist < 0.45f &&
+                                  leftLocal.z > -0.42f && leftLocal.z < -0.16f && rightLocal.z > -0.42f && rightLocal.z < -0.16f &&
+                                  leftLocal.y > -0.45f && leftLocal.y < -0.15f && rightLocal.y > -0.45f && rightLocal.y < -0.15f &&
+                                  vrState.leftController.grip > 0.55f && vrState.rightController.grip > 0.55f);
+            bool ashRakeSweep = (fabsf(lVel.x) > 0.70f && fabsf(rVel.x) > 0.70f);
+            if (bothAtAshRake && ashRakeSweep && (now - s_lastAshRakeTime > 2000)) {
+                s_lastAshRakeTime = now;
+                VR_LOG_INFO("Environmental Gesture: HYDROPONICS ASH QUENCHING TROUGH RAKED (Lx: %.2f, Rx: %.2f)", lVel.x, rVel.x);
+                SendKeyTap('E');
+                SendKeyTap('Q');
+                SendKeyTap(VK_TAB);
+                SendKeyTap(VK_SPACE);
+                vrState.rightHapticPulse = 0.95f; // Clinker fracture crunch (280 Hz)
+                vrState.leftHapticPulse = 0.65f;  // Gritty slurry grating friction (180 Hz)
             }
         }
     }
