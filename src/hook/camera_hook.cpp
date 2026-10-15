@@ -1293,7 +1293,58 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                      ((rVel.x > 0.0f && lVel.x > 0.0f) || (rVel.x < 0.0f && lVel.x < 0.0f)));
             bool isBatonRadialSweep = batonRadialGrip && batonRadialSweep;
 
-            if (isBatonDiagonalParry && (now - s_lastDiagonalParryTime > 1800)) {
+            // Inmate Pit Brawl Single-Leg Takedown & Ankle Pick Slam (ADR 0189)
+            static DWORD s_lastSingleLegTakedownTime = 0;
+            bool singleLegLowStance = (s_isPhysicallyCrouched || s_isDeepProne || leftLocal.y < -0.30f);
+            bool anklePickGrip = (leftLocal.y < -0.40f && vrState.leftController.grip > 0.60f && lVel.y > 0.85f);
+            bool shoulderDriveThrough = (rVel.z < -1.10f);
+            bool isSingleLegTakedown = singleLegLowStance && anklePickGrip && shoulderDriveThrough;
+
+            // Security Guard Stun Baton Forward High-Voltage Discharge Jab & Taser Trip (ADR 0190)
+            static DWORD s_lastBatonJabTripTime = 0;
+            static DWORD s_batonJabTime = 0;
+            bool batonJabArmed = (vrState.rightController.grip > 0.60f && vrState.rightController.trigger > 0.65f);
+            bool batonLinearJab = (rVel.z < -1.25f);
+            if (batonJabArmed && batonLinearJab && (now - s_lastBatonJabTripTime > 1800)) {
+                if (s_batonJabTime == 0) {
+                    s_batonJabTime = now;
+                    VR_LOG_INFO("Tactical Melee: STUN BATON HIGH-VOLTAGE DISCHARGE JAB CONNECTED (Rz: %.2f)", rVel.z);
+                    vrState.rightHapticPulse = 0.98f; // Direct contact discharge (310 Hz)
+                }
+            }
+            bool batonTripSweep = (s_batonJabTime > 0 && (now - s_batonJabTime < 500) &&
+                                   rVel.y < -1.10f && fabsf(rVel.x) > 0.80f);
+
+            if (batonTripSweep && (now - s_lastBatonJabTripTime > 1800)) {
+                s_lastBatonJabTripTime = now;
+                s_batonJabTime = 0;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Tactical Melee: STUN BATON JAB-TO-TASER-TRIP TAKEDOWN EXECUTED (Ry: %.2f, Rx: %.2f)", rVel.y, rVel.x);
+                SendKey('W', true);
+                SendKey('S', true);
+                SendKey('C', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('C', false);
+                SendKey('S', false);
+                SendKey('W', false);
+                vrState.rightHapticPulse = 0.90f; // Low sweep trip impact (180 Hz)
+                vrState.leftHapticPulse = 0.60f;
+            } else if (isSingleLegTakedown && (now - s_lastSingleLegTakedownTime > 1800)) {
+                s_lastSingleLegTakedownTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL SINGLE-LEG ANKLE PICK TAKEDOWN EXECUTED (Ly: %.2f, Rz: %.2f)", lVel.y, rVel.z);
+                SendKey('C', true);
+                SendKey('W', true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, false);
+                SendKey('W', false);
+                SendKey('C', false);
+                vrState.leftHapticPulse = 0.80f;  // Ankle pick scoop (160 Hz)
+                vrState.rightHapticPulse = 0.98f; // Deck takedown slam (260 Hz)
+            } else if (isBatonDiagonalParry && (now - s_lastDiagonalParryTime > 1800)) {
                 s_lastDiagonalParryTime = now;
                 s_lastPunchTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON UPWARD DIAGONAL CROSS-PARRY & DISCHARGE EXECUTED (Ry: %.2f, Rx: %.2f)", rVel.y, rVel.x);
@@ -3712,6 +3763,50 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 vrState.leftHapticPulse = 0.95f;  // Bypass seat detent thud (250 Hz)
                 vrState.rightHapticPulse = 0.95f;
+            }
+
+            // Dark Athena EVA Solar Collector Articulation Hinge Wedge Removal Slide-Hammer (ADR 0187)
+            static DWORD s_lastSlideHammerTime = 0;
+            bool bothAtHingeBracket = (twoHandDist < 0.26f &&
+                                       rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > 0.10f && rightLocal.y < 0.42f &&
+                                       vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f);
+            bool slideHammerRearwardStroke = (lVel.z > 0.95f && rVel.z > 0.95f);
+            if (bothAtHingeBracket && slideHammerRearwardStroke && (now - s_lastSlideHammerTime > 2000)) {
+                s_lastSlideHammerTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA SOLAR WEDGE EXTRACTED VIA SLIDE HAMMER (Lz: %.2f, Rz: %.2f)", lVel.z, rVel.z);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap(VK_TAB);
+                SendKeyTap(VK_RETURN);
+                vrState.leftHapticPulse = 0.98f;  // Inertial collision thud (290 Hz)
+                vrState.rightHapticPulse = 0.98f;
+            }
+
+            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Soot Blower Lance Oscillation (ADR 0188)
+            static DWORD s_lastSootBlowerTime = 0;
+            static int s_sootBlowerStrokeCount = 0;
+            bool twoHandAtSootBlower = (twoHandDist < 0.28f &&
+                                        rightLocal.z > -0.42f && rightLocal.z < -0.16f && rightLocal.y > -0.20f && rightLocal.y < 0.25f &&
+                                        vrState.leftController.grip > 0.55f && vrState.rightController.grip > 0.55f &&
+                                        vrState.rightController.trigger > 0.60f);
+            bool sootBlowerAxialStroke = (fabsf(rVel.z) > 0.65f || fabsf(lVel.z) > 0.65f);
+            if (twoHandAtSootBlower && sootBlowerAxialStroke && (now - s_lastSootBlowerTime > 220)) {
+                s_lastSootBlowerTime = now;
+                s_sootBlowerStrokeCount++;
+                VR_LOG_INFO("Environmental Gesture: HYDROPONICS SOOT BLOWER LANCE STROKE #%d (Rz: %.2f, Lz: %.2f)", s_sootBlowerStrokeCount, rVel.z, lVel.z);
+                vrState.rightHapticPulse = 0.55f; // Tube scraping rasp (220 Hz)
+                vrState.leftHapticPulse = 0.40f;
+                if (s_sootBlowerStrokeCount >= 3) {
+                    s_sootBlowerStrokeCount = 0;
+                    VR_LOG_INFO("Environmental Gesture: ECONOMIZER TUBE BANK CLEARED VIA HIGH-PRESSURE STEAM SOOT BLOW");
+                    SendKeyTap('E');
+                    SendKeyTap(VK_SPACE);
+                    SendKeyTap('Q');
+                    mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                    mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                    vrState.rightHapticPulse = 0.95f; // Steam jet acoustic blast (120 Hz)
+                    vrState.leftHapticPulse = 0.75f;
+                }
             }
         }
     }
