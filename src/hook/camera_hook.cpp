@@ -1013,6 +1013,20 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             bool parrySnapProximity = (handsDistSledge < 0.28f);
             bool isParrySnap = parrySnapOffHandDeflect && parrySnapDominantStrike && parrySnapProximity;
 
+            // Inmate Pit Brawl Dirt / Ash Eye-Rub Recovery Riposte (ADR 0136)
+            static DWORD s_eyeRubWipeTime = 0;
+            static DWORD s_lastEyeRubRiposteTime = 0;
+            bool offHandAtEyes = (fabsf(leftLocal.x) < 0.14f && leftLocal.y > -0.08f && leftLocal.y < 0.15f && leftLocal.z > -0.22f && leftLocal.z < -0.06f);
+            bool eyeWipeStroke = (fabsf(lVel.x) > 0.50f);
+            if (offHandAtEyes && eyeWipeStroke && (now - s_lastEyeRubRiposteTime > 1500)) {
+                if (s_eyeRubWipeTime == 0) {
+                    s_eyeRubWipeTime = now;
+                    VR_LOG_INFO("Physical Combat: EYES CLEARED OF DIRT/ASH WITH OFF-ARM (Lx: %.2f)", lVel.x);
+                    vrState.leftHapticPulse = 0.40f; // Corneal wipe friction rasp (190 Hz)
+                }
+            }
+            bool blindRiposteStrike = (s_eyeRubWipeTime > 0 && (now - s_eyeRubWipeTime < 600) && rVel.z < -1.15f);
+
             if (isDischargingArcWave) {
                 VR_LOG_INFO("Tactical Melee: STUN BATON OVERLOAD RADIAL ARC WAVE DISCHARGED (Lx: %.2f, Rx: %.2f)", lVel.x, rVel.x);
                 SendKey('S', true);
@@ -1023,6 +1037,18 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 vrState.leftHapticPulse = 0.98f;  // High-voltage electrostatic arc ring shockwave (300 Hz)
                 vrState.rightHapticPulse = 0.98f;
+            } else if (blindRiposteStrike && (now - s_lastEyeRubRiposteTime > 1500)) {
+                s_lastEyeRubRiposteTime = now;
+                s_eyeRubWipeTime = 0;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: DIRT/ASH BLIND RECOVERY RIPOSTE DISPATCHED (Rz: %.2f)", rVel.z);
+                SendKey(VK_SPACE, true);
+                SendKey('W', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('W', false);
+                SendKey(VK_SPACE, false);
+                vrState.rightHapticPulse = 0.98f; // Retaliatory counter-strike blast (240 Hz)
             } else if (isParrySnap && (now - s_lastParrySnapTime > 1500)) {
                 s_lastParrySnapTime = now;
                 s_lastPunchTime = now;
@@ -2268,6 +2294,22 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 vrState.leftHapticPulse = 0.70f;
             }
 
+            // Subterranean Mining Rail Pneumatic Car Tipper Lock Release (ADR 0135)
+            static DWORD s_lastCarTipperTime = 0;
+            bool bothAtTipperPedestal = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && rightLocal.z > -0.42f && rightLocal.z < -0.16f) &&
+                                        (leftLocal.y > -0.55f && leftLocal.y < -0.20f && rightLocal.y > -0.55f && rightLocal.y < -0.20f) &&
+                                        (vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f);
+            bool dualUpwardTipperHoist = (lVel.y > 0.90f && rVel.y > 0.90f);
+            if (bothAtTipperPedestal && dualUpwardTipperHoist && (now - s_lastCarTipperTime > 2000)) {
+                s_lastCarTipperTime = now;
+                VR_LOG_INFO("Environmental Gesture: MINING RAIL CAR TIPPER RELEASED & CHASSIS DUMPED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap(VK_RETURN);
+                vrState.leftHapticPulse = 0.95f;  // Pawl release snap & ore dump rumble (50 Hz)
+                vrState.rightHapticPulse = 0.95f;
+            }
+
             // Dark Athena EVA Airlock Manual Handwheel Decompression Dogging (ADR 0078)
             static DWORD s_lastAirlockCrankTime = 0;
             static int s_airlockCrankCount = 0;
@@ -2339,6 +2381,29 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_RETURN);
                 vrState.rightHapticPulse = 0.75f; // Cryo vapor jet expansion rumble (140 Hz)
                 vrState.leftHapticPulse = 0.35f;
+            }
+
+            // Cryo-Chamber Defrost Temperature Sensor Probe Insertion (ADR 0138)
+            static DWORD s_lastThermalProbeTime = 0;
+            static DWORD s_thermalProbeStartTime = 0;
+            bool handAtThermalPort = (rightLocal.z > -0.38f && rightLocal.z < -0.14f && rightLocal.y > -0.15f && rightLocal.y < 0.20f && vrState.rightController.grip > 0.55f);
+            bool probeCalibratedStill = (rSpeed < 0.12f);
+            if (handAtThermalPort && probeCalibratedStill && (now - s_lastThermalProbeTime > 2000)) {
+                if (s_thermalProbeStartTime == 0) s_thermalProbeStartTime = now;
+                DWORD dwell = now - s_thermalProbeStartTime;
+                float progress = (dwell < 400) ? (dwell / 400.0f) : 1.0f;
+                vrState.rightHapticPulse = 0.30f + 0.40f * progress; // Ascending thermal equilibrium buzz
+                if (dwell >= 400) {
+                    s_thermalProbeStartTime = 0;
+                    s_lastThermalProbeTime = now;
+                    VR_LOG_INFO("Environmental Gesture: CRYO DEFROST THERMAL CALIBRATION COMPLETE");
+                    SendKeyTap('E');
+                    SendKeyTap(VK_TAB);
+                    SendKeyTap('Q');
+                    vrState.rightHapticPulse = 0.80f; // Defrost authorization chime (280 Hz)
+                }
+            } else {
+                s_thermalProbeStartTime = 0;
             }
 
             // Security Turret Optical Sensor Spray Paint / Smear Blind (ADR 0081)
@@ -2642,6 +2707,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 }
             } else {
                 s_weldScanStartTime = 0;
+            }
+
+            // Dark Athena EVA Solar Array Cable Tension Winch Crank (ADR 0137)
+            static DWORD s_lastCableWinchTime = 0;
+            static int s_cableWinchCrankCount = 0;
+            bool handAtCableWinch = (rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > -0.25f && rightLocal.y < 0.15f && vrState.rightController.grip > 0.55f);
+            float winchCrankSpeed = sqrtf(rVel.y * rVel.y + rVel.z * rVel.z);
+            if (handAtCableWinch && winchCrankSpeed > 0.48f && (now - s_lastCableWinchTime > 240)) {
+                s_lastCableWinchTime = now;
+                s_cableWinchCrankCount++;
+                VR_LOG_INFO("Environmental Gesture: EVA CABLE TENSION WINCH REVOLUTION #%d (Speed: %.2f)", s_cableWinchCrankCount, winchCrankSpeed);
+                vrState.rightHapticPulse = 0.55f + 0.10f * s_cableWinchCrankCount; // Progressive tension ratchet
+                if (s_cableWinchCrankCount >= 3) {
+                    s_cableWinchCrankCount = 0;
+                    VR_LOG_INFO("Environmental Gesture: EVA SOLAR ARRAY CABLE TAUT & WINCH LOCKED");
+                    SendKeyTap('E');
+                    SendKeyTap('W');
+                    SendKeyTap(VK_RETURN);
+                    vrState.rightHapticPulse = 0.90f; // Mechanical dog lock snap (90 Hz)
+                    vrState.leftHapticPulse = 0.50f;
+                }
             }
         }
     }
