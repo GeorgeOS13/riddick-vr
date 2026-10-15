@@ -1,0 +1,24 @@
+# Riddick VR autonomous worker - every 15 minutes, 24/7
+# Picks oldest open issue, builds, semi-plays, logs. If no tasks, proposes next REA VR gap.
+name: vr-worker
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+jobs:
+  vr-work:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show oldest open issues
+        run: gh issue list --state open --limit 10 --json number,title --jq ".[] | \"#\\(.number) \\(.title)\""
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build (host proxy)
+        run: powershell -ExecutionPolicy Bypass -File ./tools/build-all.ps1 -Config Release
+      - name: Semi-play test (mock gestures)
+        run: python tools/semi_play.py --frames 120 --interval 15 --timeout 90
+      - name: Worker summary
+        run: echo "worker tick done - see artifacts + riddick_vr.log markers"

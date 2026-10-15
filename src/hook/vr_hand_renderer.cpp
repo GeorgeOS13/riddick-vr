@@ -124,6 +124,38 @@ struct GLDispatch {
     }
 };
 
+static RiddickVRVector3 HandWorldToHmdLocal(const RiddickVRVector3& worldPos, const RiddickVRTrackedPose& hmdPose) {
+    float dx = worldPos.x;
+    float dy = worldPos.y;
+    float dz = worldPos.z;
+    if (hmdPose.isValid && (fabsf(hmdPose.position.x) > 0.001f || fabsf(hmdPose.position.y) > 0.5f || fabsf(hmdPose.position.z) > 0.001f)) {
+        dx -= hmdPose.position.x;
+        dy -= hmdPose.position.y;
+        dz -= hmdPose.position.z;
+        float qx = -hmdPose.orientation.x;
+        float qy = -hmdPose.orientation.y;
+        float qz = -hmdPose.orientation.z;
+        float qw = hmdPose.orientation.w;
+        float norm = sqrtf(qx * qx + qy * qy + qz * qz + qw * qw);
+        if (norm > 0.0001f) {
+            qx /= norm; qy /= norm; qz /= norm; qw /= norm;
+            float tx = 2.0f * (qy * dz - qz * dy);
+            float ty = 2.0f * (qz * dx - qx * dz);
+            float tz = 2.0f * (qx * dy - qy * dx);
+            float rx = dx + qw * tx + (qy * tz - qz * ty);
+            float ry = dy + qw * ty + (qz * tx - qx * tz);
+            float rz = dz + qw * tz + (qx * ty - qy * tx);
+            return { rx, ry, rz };
+        }
+    }
+    return { dx, dy, dz };
+}
+
+static float HandDist(const RiddickVRVector3& a, const RiddickVRVector3& b) {
+    float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+    return sqrtf(dx * dx + dy * dy + dz * dz);
+}
+
 static GLDispatch s_gl;
 
 VRHandRenderer& VRHandRenderer::Instance() {
@@ -132,10 +164,6 @@ VRHandRenderer& VRHandRenderer::Instance() {
 }
 
 void VRHandRenderer::RenderHands(const RiddickVRSharedState& state, bool isLeftEye, uint32_t eyeWidth, uint32_t eyeHeight) {
-    if (state.cinemaMode) {
-        return; // Hands are hidden during 2D letterboxed cinema/menu scenes
-    }
-
     const auto& leftCtrl = state.leftController;
     const auto& rightCtrl = state.rightController;
 
@@ -263,11 +291,33 @@ void VRHandRenderer::RenderHands(const RiddickVRSharedState& state, bool isLeftE
         s_gl.glMultMatrixf(m);
     };
 
-    // 6. Render Left 3D Tactical Glove
+    // 6. Render Left 3D Tactical Glove (with reload / NanoMED / heal interaction visuals)
+    // HMD-local interaction volumes mirror camera_hook gesture zones so visuals match actions.
+    RiddickVRVector3 leftLocal = HandWorldToHmdLocal(leftCtrl.gripPose.position, state.hmdPose);
+    RiddickVRVector3 rightLocal = HandWorldToHmdLocal(rightCtrl.gripPose.position, state.hmdPose);
+    float reloadDist = HandDist(leftLocal, rightLocal);
+    bool nearReceiver = (reloadDist < 0.20f);
+    auto InScanner = [](const RiddickVRVector3& p) {
+        return (p.z >= -0.65f && p.z <= -0.20f) && (p.y >= -0.25f && p.y <= 0.42f) && (fabsf(p.x) < 0.30f);
+    };
+    auto PalmOpen = [](const RiddickVRControllerInput& c) {
+        return (c.trigger < 0.20f && c.grip < 0.25f);
+    };
+    bool leftWaist = (leftLocal.y < -0.38f);
+    bool rightWaist = (rightLocal.y < -0.38f);
+    // Visual latches (renderer-local, no protocol change): waist grip implies cartridge in hand.
+    bool leftHolding = leftWaist && (leftCtrl.grip > 0.60f);
+    bool rightHolding = rightWaist && (rightCtrl.grip > 0.60f);
+    bool leftHeal = PalmOpen(leftCtrl) && InScanner(leftLocal);
+    bool rightHeal = PalmOpen(rightCtrl) && InScanner(rightLocal);
+    float pulse = 0.5f + 0.5f * sinf(static_cast<float>(GetTickCount()) * 0.008f);
+    float leftGlow = nearReceiver ? (0.4f + 0.6f * pulse) : 0.0f;
+    float rightGlow = nearReceiver ? (0.4f + 0.6f * pulse) : 0.0f;
     if (leftCtrl.gripPose.isValid) {
         s_gl.glPushMatrix();
         ApplyControllerPose(leftCtrl.gripPose);
-        DrawTacticalHand(HandSide::Left, leftCtrl.grip, leftCtrl.trigger, isBoxerGuard, leftCtrl.buttons);
+        DrawTacticalHand(HandSide::Left, leftCtrl.grip, leftCtrl.trigger, isBoxerGuard, leftCtrl.buttons,
+                         leftGlow, leftHolding, leftHeal);
         s_gl.glPopMatrix();
     }
 
@@ -275,7 +325,8 @@ void VRHandRenderer::RenderHands(const RiddickVRSharedState& state, bool isLeftE
     if (rightCtrl.gripPose.isValid) {
         s_gl.glPushMatrix();
         ApplyControllerPose(rightCtrl.gripPose);
-        DrawTacticalHand(HandSide::Right, rightCtrl.grip, rightCtrl.trigger, isBoxerGuard, rightCtrl.buttons);
+        DrawTacticalHand(HandSide::Right, rightCtrl.grip, rightCtrl.trigger, isBoxerGuard, rightCtrl.buttons,
+                         rightGlow, rightHolding, rightHeal);
         s_gl.glPopMatrix();
     }
 
@@ -293,7 +344,8 @@ void VRHandRenderer::RenderHands(const RiddickVRSharedState& state, bool isLeftE
     s_gl.glPopAttrib();
 }
 
-void VRHandRenderer::DrawTacticalHand(HandSide side, float grip, float trigger, bool isBoxerGuard, uint32_t buttons) {
+void VRHandRenderer::DrawTacticalHand(HandSide side, float grip, float trigger, bool isBoxerGuard, uint32_t buttons,
+                                      float interactionGlow, bool holdingCartridge, bool palmHeal) {
     s_gl.glPushMatrix();
 
     // Squeeze factor: grip trigger curls middle, ring, pinky
@@ -350,6 +402,27 @@ void VRHandRenderer::DrawTacticalHand(HandSide side, float grip, float trigger, 
 
     // 4. Articulated Thumb
     DrawArticulatedThumb(side, thumbCurl);
+
+    // 5. Interaction visuals: reload proximity glow, NanoMED cartridge, heal glow.
+    // Fixed-function only, no new state leaks (restored via PopAttrib in RenderHands).
+    if (interactionGlow > 0.01f) {
+        float g = interactionGlow;
+        // Amber receiver-proximity highlight above knuckles.
+        DrawBeveledBox(-0.030f, 0.032f, -0.052f, 0.030f, 0.040f, -0.028f,
+                       0.25f + 0.65f * g, 0.26f + 0.45f * g, 0.28f);
+    }
+    if (holdingCartridge) {
+        // Orange NanoMED cartridge block held in palm (waist draw visual).
+        DrawBeveledBox(-0.018f, -0.012f, -0.030f, 0.018f, 0.012f, 0.010f,
+                       0.85f, 0.45f, 0.10f);
+        DrawBeveledBox(-0.018f, 0.012f, -0.030f, 0.018f, 0.018f, 0.010f,
+                       0.95f, 0.70f, 0.20f);
+    }
+    if (palmHeal) {
+        // Soft green scanner glow under palm.
+        DrawBeveledBox(-0.028f, -0.022f, -0.036f, 0.028f, -0.014f, 0.028f,
+                       0.15f, 0.75f, 0.35f);
+    }
 
     s_gl.glPopMatrix();
 }

@@ -1505,6 +1505,35 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                 state.rightController.thumbstickX = 0.4f; // Turn slightly right
             }
 
+            // 4. Semi-play gesture scripting for hands interaction tests (reload / waist / NanoMED).
+            // Phases loop every 360 frames so self-test exercises visible-hands paths without a headset.
+            uint32_t phase = totalFrames % 360;
+            if (phase >= 120 && phase < 180) {
+                // Reload: off-hand to weapon receiver (<0.18m) with grip + upward seating.
+                state.leftController.gripPose.position = { 0.12f, 1.25f, -0.32f };
+                state.rightController.gripPose.position = { 0.20f, 1.20f, -0.30f };
+                state.leftController.grip = 0.80f;
+                state.leftController.trigger = 0.10f;
+                state.rightController.grip = 0.70f;
+            } else if (phase >= 180 && phase < 240) {
+                // Waist ammo pouch / NanoMED cartridge draw: left hand down to waist.
+                state.leftController.gripPose.position = { -0.25f, 1.05f, -0.25f };
+                state.leftController.grip = 0.85f;
+                state.leftController.trigger = 0.10f;
+            } else if (phase >= 240 && phase < 300) {
+                // NanoMED palm heal: open flat palm forward into scanner volume.
+                state.leftController.gripPose.position = { -0.10f, 1.60f, -0.45f };
+                state.leftController.grip = 0.05f;
+                state.leftController.trigger = 0.05f;
+                state.rightController.gripPose.position = { 0.10f, 1.60f, -0.45f };
+                state.rightController.grip = 0.05f;
+                state.rightController.trigger = 0.05f;
+            } else if (phase >= 300) {
+                // Grab / interact reach: right hand forward to object/person volume.
+                state.rightController.gripPose.position = { 0.15f, 1.45f, -0.55f };
+                state.rightController.grip = 0.90f;
+            }
+
             ipcHost.WriteState(state);
 
             bool frameReady = ipcHost.WaitForFrameReady(20);

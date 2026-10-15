@@ -292,14 +292,6 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         VR_LOG_INFO("Button Y: RIDDICK EYESHINE NIGHT VISION TOGGLED ('Q')");
     }
 
-    // 2. Pause Menu via Left Controller Menu Button (Escape)
-    bool btnMenu = (btns & RIDDICK_VR_BTN_MENU) != 0;
-    bool prevBtnMenu = (s_prevButtons & RIDDICK_VR_BTN_MENU) != 0;
-    if (btnMenu && !prevBtnMenu) {
-        SendKeyTap(VK_ESCAPE);
-        VR_LOG_INFO("Menu Button tapped (VK_ESCAPE)");
-    }
-
     // Unified Mode Discipline & Invariant Projection (ADR 0405, ADR 0409):
     // Disable cinemaMode switching permanently: vrState.cinemaMode = false.
     // Menus are rendered in native 16:9 directly into the eye buffer with zero POV switching, quad switching, or flashing.
@@ -321,7 +313,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     static float s_lastHmdDeltaYaw = 0.0f;
     static float s_recoilKickPitch = 0.0f;
 
-    if (vrState.hmdPose.isValid && !vrState.cinemaMode) {
+    if (vrState.hmdPose.isValid) {
         float qx = vrState.hmdPose.orientation.x;
         float qy = vrState.hmdPose.orientation.y;
         float qz = vrState.hmdPose.orientation.z;
@@ -887,7 +879,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     bool wantA = false;
     bool wantD = false;
 
-    if (!vrState.cinemaMode && moveMag >= RADIAL_DEADZONE) {
+    if (moveMag >= RADIAL_DEADZONE) {
         float dirX = stickLX / moveMag;
         float dirY = stickLY / moveMag;
 
@@ -978,42 +970,40 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     }
     s_prevStickClickToggle = (stickRightClick && leftGripHeld);
 
-    if (!vrState.cinemaMode) {
-        float stickX = vrState.rightController.thumbstickX;
+    float stickX = vrState.rightController.thumbstickX;
 
-        if (s_turnMode == VR_TURN_SNAP) {
-            // Pure Snap Turn: require deflection > 0.70f, trigger clean single 45° mouse delta
-            // CRITICAL: Absolutely no smooth mouse move during ramp-up or return to center!
-            constexpr float SNAP_THRESHOLD = 0.70f;
-            constexpr float RESET_THRESHOLD = 0.30f;
+    if (s_turnMode == VR_TURN_SNAP) {
+        // Pure Snap Turn: require deflection > 0.70f, trigger clean single 45° mouse delta
+        // CRITICAL: Absolutely no smooth mouse move during ramp-up or return to center!
+        constexpr float SNAP_THRESHOLD = 0.70f;
+        constexpr float RESET_THRESHOLD = 0.30f;
 
-            if (fabsf(stickX) > SNAP_THRESHOLD) {
-                if (s_snapTurnArmed) {
-                    s_snapTurnArmed = false;
-                    int snapDelta = (stickX > 0.0f) ? 350 : -350;
-                    mouse_event(MOUSEEVENTF_MOVE, snapDelta, 0, 0, 0);
-                    vrState.rightHapticPulse = 0.25f; // Crisp tactile click on snap
-                }
-            } else if (fabsf(stickX) < RESET_THRESHOLD) {
-                s_snapTurnArmed = true;
+        if (fabsf(stickX) > SNAP_THRESHOLD) {
+            if (s_snapTurnArmed) {
+                s_snapTurnArmed = false;
+                int snapDelta = (stickX > 0.0f) ? 350 : -350;
+                mouse_event(MOUSEEVENTF_MOVE, snapDelta, 0, 0, 0);
+                vrState.rightHapticPulse = 0.25f; // Crisp tactile click on snap
+            }
+        } else if (fabsf(stickX) < RESET_THRESHOLD) {
+            s_snapTurnArmed = true;
+        }
+    } else {
+        // Pure Smooth Turn: continuous rotation with progressive cubic curve and sub-pixel accumulation
+        // Zero truncation stutter or sudden snaps at stick limits
+        constexpr float SMOOTH_DEADZONE = 0.20f;
+        static float s_accumulatedSmoothTurnX = 0.0f;
+        if (fabsf(stickX) > SMOOTH_DEADZONE) {
+            float norm = (fabsf(stickX) - SMOOTH_DEADZONE) / (1.0f - SMOOTH_DEADZONE);
+            float curvedSpeed = norm * norm * 20.0f; // Smooth progressive velocity
+            s_accumulatedSmoothTurnX += std::copysign(curvedSpeed, stickX);
+            int deltaX = static_cast<int>(s_accumulatedSmoothTurnX);
+            if (deltaX != 0) {
+                s_accumulatedSmoothTurnX -= deltaX;
+                mouse_event(MOUSEEVENTF_MOVE, deltaX, 0, 0, 0);
             }
         } else {
-            // Pure Smooth Turn: continuous rotation with progressive cubic curve and sub-pixel accumulation
-            // Zero truncation stutter or sudden snaps at stick limits
-            constexpr float SMOOTH_DEADZONE = 0.20f;
-            static float s_accumulatedSmoothTurnX = 0.0f;
-            if (fabsf(stickX) > SMOOTH_DEADZONE) {
-                float norm = (fabsf(stickX) - SMOOTH_DEADZONE) / (1.0f - SMOOTH_DEADZONE);
-                float curvedSpeed = norm * norm * 20.0f; // Smooth progressive velocity
-                s_accumulatedSmoothTurnX += std::copysign(curvedSpeed, stickX);
-                int deltaX = static_cast<int>(s_accumulatedSmoothTurnX);
-                if (deltaX != 0) {
-                    s_accumulatedSmoothTurnX -= deltaX;
-                    mouse_event(MOUSEEVENTF_MOVE, deltaX, 0, 0, 0);
-                }
-            } else {
-                s_accumulatedSmoothTurnX = 0.0f;
-            }
+            s_accumulatedSmoothTurnX = 0.0f;
         }
     }
 
@@ -10430,9 +10420,12 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     }
 
     // Left Controller Menu Button -> Clean Pause / Resume Menu Toggle (Escape)
+    bool btnMenu = (btns & RIDDICK_VR_BTN_MENU) != 0;
+    bool prevBtnMenu = (s_prevButtons & RIDDICK_VR_BTN_MENU) != 0;
     if (btnMenu && !prevBtnMenu) {
         SendKeyTap(VK_ESCAPE);
         vrState.leftHapticPulse = 0.40f;
+        VR_LOG_INFO("Menu Button tapped (VK_ESCAPE)");
     }
 
     s_prevButtons = btns;

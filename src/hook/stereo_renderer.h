@@ -43,7 +43,6 @@ public:
 
     uint32_t GetEyeWidth() const { return m_eyeWidth; }
     uint32_t GetEyeHeight() const { return m_eyeHeight; }
-    bool IsCinemaMode() const { return m_sharedState.cinemaMode; }
 
 private:
     StereoRenderer() = default;
