@@ -1819,6 +1819,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                                rVel.y < -1.90f && lVel.y < -1.65f &&
                                                fabsf(rVel.x - lVel.x) > 1.25f);
 
+            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Hyperextension Ground Pin Lock (ADR 0289)
+            static DWORD s_lastThoracicPinLockTime = 0;
+            static char s_thoracicPinLockDirKey = 'A';
+            bool thoracicPinLockStance = (handsDistSledge < 0.26f &&
+                                          leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                          vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
+            bool thoracicPinLockThrow = (thoracicPinLockStance && rVel.y < -1.90f &&
+                                         lVel.y < -1.65f && fabsf(lVel.x) > 0.85f);
+            if (thoracicPinLockThrow && (now - s_lastThoracicPinLockTime > 2000)) {
+                s_thoracicPinLockDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+            }
+
+            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Shockwave (ADR 0290)
+            static DWORD s_lastPlasmaCataclysmTime = 0;
+            bool plasmaCataclysmStance = (handsDistSledge < 0.28f &&
+                                          vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
+                                          vrState.rightController.trigger > 0.65f);
+            bool plasmaCataclysmPlunge = (plasmaCataclysmStance && isJumpingStance &&
+                                          rVel.y < -1.95f && lVel.y < -1.70f &&
+                                          fabsf(rVel.x - lVel.x) > 1.30f);
+
             // Inmate Pit Brawl Outside Leg Hook Sweep & Ground Knee Drop (ADR 0209)
             static DWORD s_lastOutsideLegSweepTime = 0;
             static DWORD s_outsideLegSweepHookTime = 0;
@@ -1865,7 +1886,55 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_crossBlockHoldStart = 0;
             }
 
-            if (plasmaSeismOverdrivePlunge && (now - s_lastPlasmaSeismOverdriveTime > 2000)) {
+            if (plasmaCataclysmPlunge && (now - s_lastPlasmaCataclysmTime > 2000)) {
+                s_lastPlasmaCataclysmTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
+                SendKey(VK_SPACE, true);
+                SendKey('W', true);
+                SendKey('Q', true);
+                SendKey(VK_TAB, true);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                SendKey('C', true);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                SendKey(VK_TAB, true);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_TAB, false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey('C', false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_TAB, false);
+                SendKey('Q', false);
+                SendKey('W', false);
+                SendKey(VK_SPACE, false);
+                vrState.rightHapticPulse = 0.98f; // Resonant cataclysm shockwave (360 Hz)
+                vrState.leftHapticPulse = 0.98f;  // Structural girder recoil (160 Hz)
+            } else if (thoracicPinLockThrow && (now - s_lastThoracicPinLockTime > 2000)) {
+                s_lastThoracicPinLockTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER THORACIC PIN LOCK EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_thoracicPinLockDirKey, rVel.y, lVel.y);
+                SendKey('W', true);
+                SendKey(s_thoracicPinLockDirKey, true);
+                SendKey('C', true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, false);
+                SendKey('C', false);
+                SendKey(s_thoracicPinLockDirKey, false);
+                SendKey('W', false);
+                vrState.rightHapticPulse = 0.98f; // Shoulder joint keylock fracture shockwave (360 Hz)
+                vrState.leftHapticPulse = 0.92f;  // Whizzer collar tie drag (270 Hz)
+            } else if (plasmaSeismOverdrivePlunge && (now - s_lastPlasmaSeismOverdriveTime > 2000)) {
                 s_lastPlasmaSeismOverdriveTime = now;
                 s_lastPunchTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT SEISM OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
@@ -6064,6 +6133,42 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_RETURN);
                 vrState.rightHapticPulse = 0.95f; // P-clamp torque stop click (290 Hz)
                 vrState.leftHapticPulse = 0.55f;  // Cushioned saddle compression (150 Hz)
+            }
+
+            // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode Silicone Boot Retention Zip-Tie Tension & Flush Cut (ADR 0287)
+            static DWORD s_lastDiodeZipTieTime = 0;
+            bool handAtDiodeBootCollar = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
+                                          vrState.leftController.grip > 0.55f);
+            bool handOnZipTieTensioner = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
+                                          vrState.rightController.trigger > 0.50f);
+            bool diodeZipTieStroke = (rVel.y < -0.65f);
+            if (handAtDiodeBootCollar && handOnZipTieTensioner && diodeZipTieStroke && (now - s_lastDiodeZipTieTime > 1800)) {
+                s_lastDiodeZipTieTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA SOLAR DIODE BOOT ZIP-TIE TENSIONED (Ry: %.2f)", rVel.y);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap(VK_TAB);
+                SendKeyTap(VK_RETURN);
+                vrState.rightHapticPulse = 0.95f; // Flush-cut blade snap (310 Hz)
+                vrState.leftHapticPulse = 0.55f;  // Boot compression tension (160 Hz)
+            }
+
+            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Diagnostic Oscilloscope Probe Ground Clip Attachment (ADR 0288)
+            static DWORD s_lastTachGroundClipTime = 0;
+            bool handAtGroundStud = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
+                                     vrState.leftController.grip > 0.55f);
+            bool handOnGroundClip = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
+                                     vrState.rightController.trigger < 0.40f);
+            bool tachGroundClipStroke = (rVel.z < -0.75f);
+            if (handAtGroundStud && handOnGroundClip && tachGroundClipStroke && (now - s_lastTachGroundClipTime > 1800)) {
+                s_lastTachGroundClipTime = now;
+                VR_LOG_INFO("Environmental Gesture: DRAFT FAN TACHOMETER OSCILLOSCOPE GROUND CLIP ATTACHED (Rz: %.2f)", rVel.z);
+                SendKeyTap('E');
+                SendKeyTap('Q');
+                SendKeyTap(VK_TAB);
+                SendKeyTap(VK_SPACE);
+                vrState.rightHapticPulse = 0.95f; // Alligator clip bite snap (280 Hz)
+                vrState.leftHapticPulse = 0.55f;  // Ground stud contact (140 Hz)
             }
         }
     }
