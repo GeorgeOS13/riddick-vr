@@ -2029,6 +2029,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                              rVel.y < -2.40f && lVel.y < -2.15f &&
                                              fabsf(rVel.x - lVel.x) > 1.75f);
 
+            // Inmate Pit Brawl Double Collar Tie Whizzer Counter-Throw & Thoracic Spine Hyperextension Cranial Post Pivot-Twist Deck Slam (ADR 0329)
+            static DWORD s_lastCranialPivotSlamTime = 0;
+            static char s_cranialPivotSlamDirKey = 'A';
+            bool cranialPivotSlamStance = (handsDistSledge < 0.26f &&
+                                           leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
+                                           vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
+            bool cranialPivotSlamPlunge = (cranialPivotSlamStance && rVel.y < -2.40f &&
+                                           lVel.y < -2.15f && fabsf(lVel.x) > 1.00f);
+            if (cranialPivotSlamPlunge && (now - s_lastCranialPivotSlamTime > 2000)) {
+                s_cranialPivotSlamDirKey = (lVel.x > 0.0f) ? 'D' : 'A';
+            }
+
+            // Security Guard Stun Baton Forward High-Voltage Vault Jump Thrust & Omnidirectional Kinetic Plasma Resonant Cataclysm Omniverse Overdrive (ADR 0330)
+            static DWORD s_lastPlasmaOmniverseTime = 0;
+            bool plasmaOmniverseStance = (handsDistSledge < 0.28f &&
+                                          vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
+                                          vrState.rightController.trigger > 0.65f);
+            bool plasmaOmniversePlunge = (plasmaOmniverseStance && isJumpingStance &&
+                                          rVel.y < -2.45f && lVel.y < -2.20f &&
+                                          fabsf(rVel.x - lVel.x) > 1.80f);
+
             // Inmate Pit Brawl Outside Leg Hook Sweep & Ground Knee Drop (ADR 0209)
             static DWORD s_lastOutsideLegSweepTime = 0;
             static DWORD s_outsideLegSweepHookTime = 0;
@@ -2075,6 +2096,100 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_crossBlockHoldStart = 0;
             }
 
+            if (plasmaOmniversePlunge && (now - s_lastPlasmaOmniverseTime > 2000)) {
+                s_lastPlasmaOmniverseTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM OMNIVERSE OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
+                SendKey(VK_SPACE, true);
+                SendKey('W', true);
+                SendKey('Q', true);
+                SendKey(VK_TAB, true);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                SendKey('C', true);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                SendKey(VK_TAB, true);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                SendKey('Q', true);
+                SendKey(VK_TAB, true);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                SendKey(VK_TAB, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, true);
+                SendKey(VK_RETURN, true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_TAB, false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_TAB, false);
+                SendKey('Q', false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_TAB, false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey('C', false);
+                SendKey(VK_RETURN, false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_TAB, false);
+                SendKey('Q', false);
+                SendKey('W', false);
+                SendKey(VK_SPACE, false);
+                vrState.rightHapticPulse = 0.98f; // Resonant cataclysm Omniverse overdrive shockwave (460 Hz)
+                vrState.leftHapticPulse = 0.98f;  // Structural deck Omniverse recoil (380 Hz)
+                goto combat_gesture_done;
+            }
+            if (cranialPivotSlamPlunge && (now - s_lastCranialPivotSlamTime > 2000)) {
+                s_lastCranialPivotSlamTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL WHIZZER CRANIAL POST PIVOT SLAM EXECUTED (Dir: %c, Ry: %.2f, Ly: %.2f)", s_cranialPivotSlamDirKey, rVel.y, lVel.y);
+                SendKey('W', true);
+                SendKey(s_cranialPivotSlamDirKey, true);
+                SendKey('C', true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, true);
+                SendKey('C', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, false);
+                SendKey('C', false);
+                SendKey(VK_SPACE, false);
+                SendKey(VK_SPACE, false);
+                SendKey('C', false);
+                SendKey(s_cranialPivotSlamDirKey, false);
+                SendKey('W', false);
+                vrState.rightHapticPulse = 0.98f; // Concussive deck impact and spinal fracture shockwave (460 Hz)
+                vrState.leftHapticPulse = 0.95f;  // Whizzer collar tie drag (380 Hz)
+                goto combat_gesture_done;
+            }
             if (plasmaSuperclusterPlunge && (now - s_lastPlasmaSuperclusterTime > 2000)) {
                 s_lastPlasmaSuperclusterTime = now;
                 s_lastPunchTime = now;
@@ -7516,6 +7631,43 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_SPACE);
                 vrState.rightHapticPulse = 0.98f; // Center punch detent impact shockwave (380 Hz)
                 vrState.leftHapticPulse = 0.55f;  // Impeller acoustic chime (150 Hz)
+            }
+
+            // Dark Athena EVA Solar Collector Photovoltaic Array Primary Sun-Tracking Gimbal Pitch Actuator Manual Clasp Unlatch (ADR 0327)
+            static DWORD s_lastGimbalPitchClaspTime = 0;
+            bool handAtGimbalClevisFrame = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
+                                            vrState.leftController.grip > 0.55f);
+            bool handOnPitchClasp = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
+                                     vrState.rightController.trigger > 0.50f);
+            bool gimbalPitchUnlatchStroke = (rVel.z > 0.75f && rVel.y > 0.50f);
+            if (handAtGimbalClevisFrame && handOnPitchClasp && gimbalPitchUnlatchStroke && (now - s_lastGimbalPitchClaspTime > 1800)) {
+                s_lastGimbalPitchClaspTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA SOLAR GIMBAL PITCH CLASP UNLATCHED (Rz: %.2f, Ry: %.2f)", rVel.z, rVel.y);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap(VK_TAB);
+                SendKeyTap(VK_SPACE);
+                SendKeyTap('Q');
+                vrState.rightHapticPulse = 0.95f; // Hardened steel lock clasp release snap (350 Hz)
+                vrState.leftHapticPulse = 0.50f;  // Gimbal frame resonance (140 Hz)
+            }
+
+            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Correction Residual Vibration Sensor Zero-Calibration Verification (ADR 0328)
+            static DWORD s_lastTachVibZeroTime = 0;
+            bool handAtOscilloscopeBezelRim = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
+                                               vrState.leftController.grip > 0.55f);
+            bool handOnZeroTrimDial = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
+                                       vrState.rightController.trigger < 0.40f);
+            bool tachVibZeroStroke = (fabsf(rVel.x) > 0.65f);
+            if (handAtOscilloscopeBezelRim && handOnZeroTrimDial && tachVibZeroStroke && (now - s_lastTachVibZeroTime > 1800)) {
+                s_lastTachVibZeroTime = now;
+                VR_LOG_INFO("Environmental Gesture: DRAFT FAN VIBRATION SENSOR ZERO-CALIBRATED (Rx: %.2f)", rVel.x);
+                SendKeyTap('E');
+                SendKeyTap('Q');
+                SendKeyTap(VK_TAB);
+                SendKeyTap(VK_RETURN);
+                vrState.rightHapticPulse = 0.95f; // 10-turn precision potentiometer drag & detent click (360 Hz)
+                vrState.leftHapticPulse = 0.50f;  // Chassis grounding vibration (130 Hz)
             }
         }
     }
