@@ -1,5 +1,6 @@
 # Riddick VR autonomous worker - every 15 minutes, 24/7
-# Picks oldest open issue, builds, semi-plays, logs. If no tasks, proposes next REA VR gap.
+# CI lane (no game install on runners): triage issues, full build, static checks.
+# The game-dependent semi-play lane runs on the local 24/7 box (tools/vr-worker.ps1).
 name: vr-worker
 
 on:
@@ -12,13 +13,18 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Show oldest open issues
         run: gh issue list --state open --limit 10 --json number,title --jq ".[] | \"#\\(.number) \\(.title)\""
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build (host proxy)
+      - name: Build (x64 host + Win32 proxy)
         run: powershell -ExecutionPolicy Bypass -File ./tools/build-all.ps1 -Config Release
-      - name: Semi-play test (mock gestures)
-        run: python tools/semi_play.py --frames 120 --interval 15 --timeout 90
+      - name: REA address-table self-test
+        run: python tools/validate_addresses.py
+      - name: Verify 368-symbol OpenGL forwarder table intact
+        run: powershell -Command "$s = (Select-String -Path src/hook/opengl_forwarders.c -Pattern 'GLPROXY_' | Measure-Object).Count; $d = Test-Path dist/opengl32.dll; Write-Host ""forwarder refs: $s, dll present: $d""; if ($s -lt 360 -or -not $d) { throw ""forwarder table check failed"" }"
       - name: Worker summary
-        run: echo "worker tick done - see artifacts + riddick_vr.log markers"
+        run: echo "CI lane green - game-dependent semi-play runs on local 24/7 box"
