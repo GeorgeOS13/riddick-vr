@@ -33,3 +33,5 @@ Thumbs.db
 hook_debug.txt
 all_exports.txt
 tests/artifacts/
+
+__pycache__/
