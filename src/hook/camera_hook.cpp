@@ -839,22 +839,6 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         }
     }
 
-    // Dark Athena EVA Micro-Thruster Jetpack Burst (ADR 0098)
-    static DWORD s_lastJetpackBurstTime = 0;
-    bool handsBehindHips = (leftLocal.z > -0.06f && rightLocal.z > -0.06f) &&
-                          (fabsf(leftLocal.x) > 0.16f && fabsf(rightLocal.x) > 0.16f) &&
-                          (leftLocal.y > -0.35f && leftLocal.y < -0.05f && rightLocal.y > -0.35f && rightLocal.y < -0.05f);
-    bool bothTriggersJetpack = (vrState.leftController.trigger > 0.65f && vrState.rightController.trigger > 0.65f);
-    if (handsBehindHips && bothTriggersJetpack && !isClimbingActive && (now - s_lastJetpackBurstTime > 300)) {
-        s_lastJetpackBurstTime = now;
-        VR_LOG_INFO("EVA Spacewalk: COLD-GAS MICRO-THRUSTERS FIRED (Lz: %.2f, Rz: %.2f)", leftLocal.z, rightLocal.z);
-        SendKeyTap(VK_SPACE);
-        SendKey('W', true);
-        SendKey('W', false);
-        vrState.leftHapticPulse = 0.65f; // Pneumatic gas jet thrust rumble (130 Hz)
-        vrState.rightHapticPulse = 0.65f;
-    }
-
     // 4. Thumbstick Snap vs Smooth Turning Ergonomics & Input Hysteresis (ADR 0371)
     enum VRTurnMode {
         VR_TURN_SNAP = 0,    // Discrete 45° snap turns with zero pre-snap crawl
@@ -909,26 +893,28 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         }
     }
 
-    // 4b. Dialogue & Menu Navigation (Right Thumbstick Y -> Up / Down Arrow Keys)
-    static bool s_stickYUpArmed = true, s_stickYDownArmed = true;
-    float stickY = vrState.rightController.thumbstickY;
-    if (stickY > 0.55f) {
-        if (s_stickYUpArmed) {
-            s_stickYUpArmed = false;
-            SendKeyTap(VK_UP);
-            vrState.rightHapticPulse = 0.25f;
+    // 4b. Dialogue & Menu Navigation (Right Thumbstick Y -> Up / Down Arrow Keys in Cinema / Menus)
+    if (vrState.cinemaMode) {
+        static bool s_stickYUpArmed = true, s_stickYDownArmed = true;
+        float stickY = vrState.rightController.thumbstickY;
+        if (stickY > 0.55f) {
+            if (s_stickYUpArmed) {
+                s_stickYUpArmed = false;
+                SendKeyTap(VK_UP);
+                vrState.rightHapticPulse = 0.25f;
+            }
+        } else {
+            s_stickYUpArmed = true;
         }
-    } else {
-        s_stickYUpArmed = true;
-    }
-    if (stickY < -0.55f) {
-        if (s_stickYDownArmed) {
-            s_stickYDownArmed = false;
-            SendKeyTap(VK_DOWN);
-            vrState.rightHapticPulse = 0.25f;
+        if (stickY < -0.55f) {
+            if (s_stickYDownArmed) {
+                s_stickYDownArmed = false;
+                SendKeyTap(VK_DOWN);
+                vrState.rightHapticPulse = 0.25f;
+            }
+        } else {
+            s_stickYDownArmed = true;
         }
-    } else {
-        s_stickYDownArmed = true;
     }
 
     static DWORD s_lastPunchTime = 0;
@@ -6751,6 +6737,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 vrState.leftHapticPulse = 0.50f; // Bio-restorative soothing haptic wave
             }
 
+#if 0 // Disabled legacy procedural environmental gestures (ADR 0398) to prevent spurious key bursts
             // Cryo-Pod / Hibernation Canopy Emergency Seal Ejection (Dual Palm Push - ADR 0028)
             bool bothHandsPushing = (leftLocal.z < -0.22f && rightLocal.z < -0.22f) &&
                                     (lVel.z < -0.28f && rVel.z < -0.28f) &&
@@ -9768,6 +9755,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 vrState.rightHapticPulse = 0.95f; // Trimmer wiper micro-click (430 Hz)
                 vrState.leftHapticPulse = 0.55f;  // Starter chassis acoustic resonance (165 Hz)
             }
+#endif
         }
     }
 
