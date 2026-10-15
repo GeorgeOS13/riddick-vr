@@ -224,6 +224,7 @@ static bool s_twoHandedStabilizationActive = false;
 static bool s_physicalBlockEngaged = false;
 static DWORD s_lastReloadGestureTime = 0;
 static bool s_isAimingOrBlocking = false;
+static bool s_isPhysicalADS = false;
 static RiddickVRTrackedPose s_stabilizedAimPose{};
 static bool s_hasStabilizedPose = false;
 
@@ -352,7 +353,6 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 bool isAiming = s_isAimingOrBlocking || (vrState.leftController.trigger > 0.5f);
 
                 // ADR 0383: Physical 6DOF Aim-Down-Sights (ADS) Eye-Relief Alignment & Parallax Mitigation
-                static bool s_isPhysicalADS = false;
                 static DWORD s_adsEnterStartTime = 0;
                 static bool s_adsHapticFired = false;
 
@@ -486,12 +486,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 float mouseDeltaX = -cleanDeltaYaw * SENSITIVITY_YAW;
                 float mouseDeltaY = -cleanDeltaPitch * SENSITIVITY_PITCH;
 
-                // Two-Handed Firearm Stabilization: dampens micro-tremors during physical ADS
-                if (s_twoHandedStabilizationActive || s_isPhysicalADS) {
-                    float stabilizeDamping = s_isPhysicalADS ? 0.50f : 0.70f;
-                    mouseDeltaX *= stabilizeDamping;
-                    mouseDeltaY *= stabilizeDamping;
-                }
+                // Pure 1:1 head tracking look is uncompromised during ADS/aiming (aim stabilization is applied to controller aim pose)
 
                 s_accumulatedLookX += mouseDeltaX;
                 s_accumulatedLookY += mouseDeltaY;
@@ -6416,10 +6411,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             vrState.rightHapticPulse = isHarriesStance ? 0.35f : 0.25f;
         } else {
             VR_LOG_INFO("Two-Handed Firearm Stabilization DISENGAGED (HandDist: %.2fm)", twoHandDist);
+            s_hasStabilizedPose = false;
         }
     }
-
-
 
     // Apply exponential smoothing / spherical interpolation on weapon aim pose when two-handed
     if (vrState.rightController.aimPose.isValid) {
@@ -6479,9 +6473,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 vrState.rightController.aimPose = s_stabilizedAimPose;
             }
         } else {
-            // ADR 0373: Speed-Adaptive One-Euro Filter for One-Handed Weapon Aim Stabilization
+            // ADR 0373 & ADR 0402: Speed-Adaptive One-Euro Filter for One-Handed Weapon Aim Stabilization
             // When firing or aiming one-handed, natural physiological hand tremor (3-8 Hz) causes sight jitter.
-            // When controller speed is low (< 0.10 m/s), apply high damping (alpha ≈ 0.22) to lock sight rock-steady.
+            // When holding steady in physical ADS corridor, apply high damping (alpha ≈ 0.15) to lock sight rock-steady.
             // As movement speed increases, ramp alpha up to 0.90 for zero-latency target acquisition.
             static RiddickVRTrackedPose s_oneHandedPose{};
             static bool s_hasOneHandedPose = false;
@@ -6491,11 +6485,12 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_hasOneHandedPose = true;
             } else {
                 float rSpeed = sqrtf(rVel.x * rVel.x + rVel.y * rVel.y + rVel.z * rVel.z);
-                float alpha = 0.22f;
-                if (rSpeed > 0.10f) {
-                    float factor = (rSpeed - 0.10f) / 0.35f;
+                float baseAlpha = s_isPhysicalADS ? 0.15f : 0.22f;
+                float alpha = baseAlpha;
+                if (rSpeed > 0.08f) {
+                    float factor = (rSpeed - 0.08f) / 0.35f;
                     if (factor > 1.0f) factor = 1.0f;
-                    alpha = 0.22f + factor * 0.68f; // Ramp from 0.22 up to 0.90
+                    alpha = baseAlpha + factor * (0.90f - baseAlpha);
                 }
 
                 s_oneHandedPose.position.x += alpha * (vrState.rightController.aimPose.position.x - s_oneHandedPose.position.x);
