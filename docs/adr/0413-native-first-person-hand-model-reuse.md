@@ -44,6 +44,11 @@ procedural renderer is not mistaken for a native result.
     where `[2]=next sibling`, `[3]=first child`, `[4]=data offset`,
     `[5]=data size`, `[6]=count`, `[7]=flags`.
   - payloads tile the data region contiguously; offsets/sizes verified.
+  - **Corrected by ADR-0414** (loader decompilation): the record is
+    `name[0x18]` + `u32[6]` at `+0x18` (sibling `+0x18`, child `+0x1C`,
+    data offset `+0x20`, size `+0x24`, count `+0x28`, flags `+0x2C`), and the
+    file header *is* the root node record. The sibling/child/data indices used
+    here were already right; only the 16-vs-24-byte name split was wrong.
 - Chunk inventory per model: `SURFACES`, `BOUND`, `CLUSTERS` → per-cluster
   `VERTEXFRAMES` (positions), `TVERTEXFRAMES` (UVs, flags `0x201`),
   `BONEDEFORM` (skinning), `TRIANGLES` (`u32 count` + `u16` indices — verified:

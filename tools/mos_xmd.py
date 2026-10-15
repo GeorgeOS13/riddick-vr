@@ -2,22 +2,33 @@
 """Read-only parser for Starbreeze "MOS DATAFILE2.0" ``.xmd`` model containers.
 
 The retail Riddick (Escape from Butcher Bay) character/weapon models are
-``MOS DATAFILE2.0`` files. Format recovered by static inspection (2026-10):
+``MOS DATAFILE2.0`` files. Layout recovered two ways:
 
-  header  : 0x30 bytes
-      +0x00  char[16] magic "MOS DATAFILE2.0\\0"
-      +0x18  u32      node-table start offset (always 0x30)
-      +0x20  u32      data-region start offset (== first chunk data offset)
-  nodes   : contiguous 0x30-byte records from ``node_start`` to ``data_start``
-      +0x00  char[16] chunk name (NUL padded)
-      +0x10  u32[8]   fields; empirically:
-                          [2] next sibling node offset   (0 = end)
-                          [3] first child node offset    (0 = none)
-                          [4] data offset (absolute file offset)
-                          [5] data size in bytes
-                          [6] element/frame count
-                          [7] flags (e.g. TVERTEXFRAMES = 0x201)
-  data    : chunk payloads, laid out contiguously starting at ``data_start``.
+  * by static inspection of the on-disk bytes, and
+  * by decompiling the shipped loader ``CDataFile::Open`` (MCCDyn.dll
+    @0x10032FB0) and ``CDataFile::ReadTree_r`` (@0x10032840) with Ghidra
+    (see ``docs/adr/0414-mos-datafile2-loader-container.md``).
+
+The container *is* a node tree, and the file header is simply the **root
+node record**:
+
+  root node : 0x30-byte record at file offset 0
+      +0x00  char[0x18] name = "MOS DATAFILE2.0\\0" (NUL padded to 24)
+      +0x18  u32        next sibling node offset   (0 = none) == first node
+      +0x1C  u32        first child node offset     (0 = none)
+      +0x20  u32        data offset (absolute file offset) == data region start
+      +0x24  u32        data size in bytes
+      +0x28  u32        element/frame count
+      +0x2C  u32        flags (e.g. TVERTEXFRAMES = 0x201)
+  node      : same 0x30-byte record shape, linked by sibling (+0x18) and
+              child (+0x1C) offsets into an in-file tree.
+  data      : chunk payloads; for the shipped models they tile the region
+              ``[data_start, EOF)`` exactly (no gaps, no overlaps).
+
+Because the root name field holds the magic, the loader's 16-byte magic
+compare at file 0x00 reads the root node's first 16 name bytes. ``node_start``
+and ``data_start`` below are therefore just ``root.next_sibling`` and
+``root.data_offset``; they are not separate header fields.
 
 This parser is intentionally dependency-free and strictly read-only: it never
 writes next to the game install. It backs the native first-person hand/arm
@@ -38,7 +49,10 @@ import struct
 import sys
 
 MAGIC = b"MOS DATAFILE2.0\x00"
-NAME_RE = re.compile(rb"^[A-Za-z][A-Za-z0-9_ ]{1,15}$")
+# Node names live in a 0x18-byte field (see module docstring).
+NODE_NAME_LEN = 0x18
+NODE_RECORD_LEN = 0x30
+NAME_RE = re.compile(rb"^[A-Za-z][A-Za-z0-9_ ]{1,23}$")
 # Chunks whose payload we know how to sanity-check (first u32 == element count).
 COUNT_PREFIX_CHUNKS = {"TRIANGLES", "PRIMITIVES", "EDGES", "EDGETRIS", "TRIEDGES"}
 
@@ -55,16 +69,25 @@ class Node:
     __slots__ = ("offset", "name", "next_sibling", "first_child",
                  "data_offset", "data_size", "count", "flags", "raw")
 
-    def __init__(self, offset, name, fields):
+    def __init__(self, offset, name):
         self.offset = offset
         self.name = name
-        self.raw = fields
-        self.next_sibling = fields[2]
-        self.first_child = fields[3]
-        self.data_offset = fields[4]
-        self.data_size = fields[5]
-        self.count = fields[6]
-        self.flags = fields[7]
+        self.raw = None
+        self.next_sibling = 0
+        self.first_child = 0
+        self.data_offset = 0
+        self.data_size = 0
+        self.count = 0
+        self.flags = 0
+
+    @classmethod
+    def from_fields(cls, offset, name, fields):
+        n = cls(offset, name)
+        n.raw = fields
+        n.next_sibling, n.first_child = fields[0], fields[1]
+        n.data_offset, n.data_size = fields[2], fields[3]
+        n.count, n.flags = fields[4], fields[5]
+        return n
 
     def as_dict(self):
         return {
@@ -88,31 +111,40 @@ class Xmd:
         self._parse_header()
         self._parse_nodes()
 
+    def _read_node(self, off: int) -> Node:
+        b = self.data
+        name = b[off:off + NODE_NAME_LEN].rstrip(b"\x00")
+        fields = struct.unpack_from("<6I", b, off + NODE_NAME_LEN)
+        return Node.from_fields(off, name.decode("latin1"), fields)
+
     def _parse_header(self):
         b = self.data
-        if len(b) < 0x30 or b[:16] != MAGIC:
+        if len(b) < NODE_RECORD_LEN or b[:16] != MAGIC:
             raise XmdError(f"{self.path}: not a MOS DATAFILE2.0 file")
-        self.node_start = _u32(b, 0x18)
-        self.data_start = _u32(b, 0x20)
-        if self.node_start < 0x30 or self.data_start < self.node_start:
-            raise XmdError(f"{self.path}: implausible header offsets")
+        # The "header" is the root node record at file offset 0: its 0x18-byte
+        # name field holds the magic. node_start/data_start are just the root's
+        # sibling pointer and its payload offset (they are not extra fields).
+        self.root = self._read_node(0)
+        self.node_start = self.root.next_sibling
+        self.data_start = self.root.data_offset
+        if self.node_start < NODE_RECORD_LEN or self.data_start < self.node_start:
+            raise XmdError(f"{self.path}: implausible root node offsets")
 
     def _parse_nodes(self):
         b = self.data
         self.nodes: list[Node] = []
         self.by_offset: dict[int, Node] = {}
         off = self.node_start
-        while off + 0x30 <= self.data_start:
-            name = b[off:off + 16].rstrip(b"\x00")
+        while off + NODE_RECORD_LEN <= self.data_start:
+            name = b[off:off + NODE_NAME_LEN].rstrip(b"\x00")
             if not NAME_RE.match(name):
                 self.notes.append(
                     f"node table ended early at 0x{off:X} (name {name!r})")
                 break
-            fields = struct.unpack_from("<8I", b, off + 16)
-            node = Node(off, name.decode("ascii"), fields)
+            node = self._read_node(off)
             self.nodes.append(node)
             self.by_offset[off] = node
-            off += 0x30
+            off += NODE_RECORD_LEN
 
     # -- reporting -------------------------------------------------------
     def chunk(self, name: str):
@@ -182,6 +214,73 @@ class Xmd:
                 walk(n.offset, 0)
         return lines
 
+    def walk_linked(self) -> list[Node]:
+        """Walk the node tree the way the engine loader does: from the root
+        record, following sibling (+0x18) then descending into child (+0x1C).
+
+        Unlike the contiguous scan this makes no assumption that records are
+        packed; it is the authoritative traversal (see ``ReadTree_r``)."""
+        order: list[Node] = []
+        seen: set[int] = set()
+
+        def visit(node: Node):
+            # Mirrors CDataFile::ReadTree_r: process node, descend into the
+            # child subtree, then continue along this node's sibling chain.
+            while node is not None:
+                if node.offset in seen:
+                    return
+                seen.add(node.offset)
+                order.append(node)
+                child = node.first_child
+                if child and child in self.by_offset:
+                    visit(self.by_offset[child])
+                nxt = node.next_sibling
+                node = self.by_offset.get(nxt) if nxt else None
+
+        visit(self.root)
+        return order
+
+    def validate(self) -> list[str]:
+        """Structural self-check. Returns a list of problems (empty = consistent).
+
+        Confirms (a) root/header agreement, (b) every sibling/child pointer
+        targets a parsed node, (c) the linked walk reaches every scanned node,
+        and (d) node payload regions tile ``[data_start, EOF)``."""
+        problems: list[str] = []
+        if self.root.next_sibling != self.node_start:
+            problems.append("root.next_sibling != node_start")
+        if self.root.data_offset != self.data_start:
+            problems.append("root.data_offset != data_start")
+
+        valid = set(self.by_offset)
+        for n in self.nodes:
+            for label, ptr in (("sibling", n.next_sibling),
+                               ("child", n.first_child)):
+                if ptr and ptr not in valid:
+                    problems.append(
+                        f"{n.name}@0x{n.offset:X}: {label} 0x{ptr:X} not a node")
+
+        reached = {n.offset for n in self.walk_linked()}
+        missed = valid - reached
+        if missed:
+            problems.append(
+                "linked walk missed %d node(s): %s"
+                % (len(missed), ", ".join(f"0x{o:X}" for o in sorted(missed))))
+
+        regions = sorted((n.data_offset, n.data_size)
+                         for n in self.nodes if n.data_size > 0)
+        prev = self.data_start
+        for off, size in regions:
+            if off < prev:
+                problems.append(f"overlapping payload @0x{off:X}")
+            elif off > prev:
+                problems.append(f"gap in payloads 0x{prev:X}..0x{off:X}")
+            prev = max(prev, off + size)
+        if regions and prev != len(self.data):
+            problems.append(
+                f"payloads end at 0x{prev:X}, file is 0x{len(self.data):X}")
+        return problems
+
 
 def _printable(b: bytes, minlen: int) -> list[str]:
     out, cur = [], bytearray()
@@ -205,9 +304,11 @@ def report_file(path: str, want_json: bool, with_strings: bool,
         "size": len(x.data),
         "node_start": x.node_start,
         "data_start": x.data_start,
+        "root": x.root.as_dict(),
         "node_count": len(x.nodes),
         "chunks": [n.as_dict() for n in x.nodes],
         "geometry": x.geometry_summary(),
+        "problems": x.validate(),
         "notes": x.notes,
     }
     if with_strings:
@@ -251,16 +352,53 @@ def inventory(root: str) -> list[dict]:
     return out
 
 
+def check_files(paths: list[str]) -> int:
+    """Validate container structure for each path. Returns process exit code."""
+    rc = 0
+    for p in paths:
+        try:
+            x = Xmd(p)
+            problems = x.validate()
+        except XmdError as e:
+            print(f"FAIL {os.path.basename(p)}: {e}")
+            rc = 1
+            continue
+        if problems:
+            rc = 1
+            print(f"FAIL {os.path.basename(p)}: {'; '.join(problems)}")
+        else:
+            print(f"ok   {os.path.basename(p)}: {len(x.nodes)} nodes, "
+                  f"data 0x{x.data_start:X}..0x{len(x.data):X}")
+    return rc
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("path", nargs="?", help="a .xmd file")
     ap.add_argument("--inventory", metavar="DIR",
                     help="walk DIR for *.xmd and summarise all")
+    ap.add_argument("--check", action="store_true",
+                    help="validate container structure (exit 1 on problems); "
+                         "use with a file or --inventory DIR")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--strings", action="store_true")
     ap.add_argument("--tree", action="store_true")
     args = ap.parse_args(argv)
+
+    if args.check:
+        targets = []
+        if args.inventory:
+            for dirpath, _dirs, files in os.walk(args.inventory):
+                targets += [os.path.join(dirpath, f) for f in sorted(files)
+                            if f.lower().endswith(".xmd")]
+        elif args.path:
+            targets = [args.path]
+        else:
+            ap.error("--check needs a .xmd path or --inventory DIR")
+        if not targets:
+            ap.error("no .xmd files found")
+        return check_files(targets)
 
     if args.inventory:
         recs = inventory(args.inventory)

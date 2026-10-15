@@ -2,6 +2,38 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 3 — 2026-10-15 21:47 (scheduled loop)
+- **Unit:** GH #55 (→ #46) — recover the `MOS DATAFILE2.0` loader layout from
+  the shipped engine and reconcile the parser with it.
+- Observation (real evidence, read-only; Ghidra 12.1.4 via `rea`): the magic
+  `"MOS DATAFILE2.0\0"` is at `MCCDyn.dll` RVA `0x1005C298` / file offset
+  `0x5B698` (`.rdata`); its only xrefs are `CDataFile::Open` @`0x10032FB0` and
+  `CDataFile::Create` @`0x10033F10`. `CDataFile::ReadTree_r` @`0x10032840`
+  reads each node as a **0x18-byte name field + six `u32`s at `+0x18`**
+  (sibling `+0x18`, child `+0x1C`, data offset `+0x20`, size `+0x24`, count
+  `+0x28`, flags `+0x2C`), and the **file header is the root node record**
+  (its name field *is* the magic). ADR-0413 §A had a 16-byte name + 8 fields;
+  the sibling/child indices happened to be right, the split was not.
+- Change:
+  - `tools/mos_xmd.py`: parse `name[0x18]` + 6 fields; derive `node_start`/
+    `data_start` from the root record; add `walk_linked()` (mirrors
+    `ReadTree_r`) and `validate()` (root/header agreement, pointer integrity,
+    linked-walk coverage, exact payload tiling) + a `--check` mode.
+  - `tools/test_mos_xmd.py` (new): self-contained synthetic-container tests
+    (round-trip, corrupt pointer, bad magic) — no game install needed.
+  - `docs/adr/0414-mos-datafile2-loader-container.md` (new) + ADR-0413 §A
+    correction note; `.github/workflows/vr-worker.yml` runs the new test.
+- Evidence: `mos_xmd.py --inventory <game>\Content\Models --check` → **631/631
+  `ok`, 0 failures**; `--inventory` output byte-identical old↔new for all 18
+  `Characters/Riddick` models (regression-safe); `test_mos_xmd.py` PASS;
+  `validate_addresses.py`, `verify_reported_fixes.py`, `scenario_tests.py
+  --check` all pass; CTest 3/3 on **both** x64 and x86 (no C++ changed, so
+  `build-all.ps1` was not rerun).
+- Blocker: none. Next: decode the per-chunk payloads (`VERTEXFRAMES`/
+  `BONEDEFORM`/`NODES`/`TRIANGLES`) using the now-pinned offsets — decompile the
+  `CDF_Node` accessors + vertex/skinning decoders in `MCCDyn.dll`.
+- Branch: `docs/rea-mos-loader-layout` (not pushed; `main` untouched).
+
 ## Wake 2 — 2026-10-15 21:20 (scheduled loop)
 - **Unit:** GH #53 requirement 3.3 — dialogue-navigation flicker on diagonal.
 - Observation: the selector latched `s_dialogueDirection` (so a held direction
