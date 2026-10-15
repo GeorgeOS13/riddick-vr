@@ -1140,7 +1140,55 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_batonArcTrapStart = 0;
             }
 
-            if (isBatonArcTrapArmed) {
+            // Inmate Pit Brawl Upward Palm Chin-Strike & Cervical Snap (ADR 0161)
+            static DWORD s_lastPalmChinComboTime = 0;
+            static DWORD s_palmChinStrikeTime = 0;
+            bool upwardPalmStrike = (rVel.y > 1.25f && rVel.z < -0.80f && rightLocal.y > -0.10f && rightLocal.y < 0.25f);
+            if (upwardPalmStrike && (now - s_lastPalmChinComboTime > 1500)) {
+                if (s_palmChinStrikeTime == 0) {
+                    s_palmChinStrikeTime = now;
+                    VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL UPWARD PALM CHIN-STRIKE CONNECTED (Ry: %.2f, Rz: %.2f)", rVel.y, rVel.z);
+                    vrState.rightHapticPulse = 0.98f; // Mandibular percussion shockwave (240 Hz)
+                }
+            }
+            bool cervicalSnapWhip = (s_palmChinStrikeTime > 0 && (now - s_palmChinStrikeTime < 500) && fabsf(lVel.x) > 1.10f);
+
+            // Security Guard Stun Baton Dual-Hand Ground Discharge Kinetic Shockwave (ADR 0162)
+            static DWORD s_lastBatonGroundShockTime = 0;
+            bool batonDualGroundEnergized = (handsDistSledge < 0.22f &&
+                                             vrState.rightController.grip > 0.65f && vrState.rightController.trigger > 0.65f &&
+                                             vrState.leftController.grip > 0.60f && vrState.leftController.trigger > 0.60f);
+            bool dualGroundPlunge = (rVel.y < -1.25f && lVel.y < -1.25f && rightLocal.y < -0.40f);
+            bool isBatonGroundDischarge = batonDualGroundEnergized && dualGroundPlunge;
+
+            if (isBatonGroundDischarge && (now - s_lastBatonGroundShockTime > 2000)) {
+                s_lastBatonGroundShockTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Tactical Melee: STUN BATON DUAL-HAND GROUND DISCHARGE KINETIC SHOCKWAVE DETONATED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
+                SendKey('S', true);
+                SendKey(VK_SPACE, true);
+                SendKey('Q', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('Q', false);
+                SendKey(VK_SPACE, false);
+                SendKey('S', false);
+                vrState.leftHapticPulse = 0.98f;  // Seismic ground shock & dielectric breakdown (50 Hz & 320 Hz)
+                vrState.rightHapticPulse = 0.98f;
+            } else if (cervicalSnapWhip && (now - s_lastPalmChinComboTime > 1500)) {
+                s_lastPalmChinComboTime = now;
+                s_palmChinStrikeTime = 0;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: CERVICAL SNAP COMPLETED COMBO (Lx: %.2f)", lVel.x);
+                SendKey('W', true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, false);
+                SendKey('W', false);
+                vrState.leftHapticPulse = 0.98f; // Cervical vertebrae fracture snap (300 Hz)
+                vrState.rightHapticPulse = 0.70f;
+            } else if (isBatonArcTrapArmed) {
                 VR_LOG_INFO("Tactical Melee: STUN BATON HIGH-VOLTAGE CAPACITANCE BLEED ARC TRAP ARMED");
                 SendKeyTap('E');
                 SendKeyTap('Q');
@@ -3128,6 +3176,43 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_RETURN);
                 vrState.rightHapticPulse = 0.95f; // Flint rasp & combustion flame blast (60 Hz)
                 vrState.leftHapticPulse = 0.70f;
+            }
+
+            // Dark Athena EVA Solar Collector Truss Thermal Radiator Fin Unfolding Wrench (ADR 0159)
+            static DWORD s_lastRadiatorFinTime = 0;
+            bool handAtRadiatorFin = (rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > 0.05f && rightLocal.y < 0.38f &&
+                                      vrState.rightController.grip > 0.60f);
+            bool radiatorFinSweep = (fabsf(rVel.x) > 0.75f);
+            if (handAtRadiatorFin && radiatorFinSweep && (now - s_lastRadiatorFinTime > 1500)) {
+                s_lastRadiatorFinTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA SOLAR RADIATOR FIN UNFOLDED & LOCKED (Rx: %.2f)", rVel.x);
+                SendKeyTap('E');
+                SendKeyTap('W');
+                SendKeyTap(VK_TAB);
+                vrState.rightHapticPulse = 0.90f; // Detent latch lock pulse (280 Hz)
+                vrState.leftHapticPulse = 0.60f;
+            }
+
+            // Subterranean Hydroponics Bio-Waste Incinerator Flame Damper Handwheel Spin (ADR 0160)
+            static DWORD s_lastDamperSpinTime = 0;
+            static int s_damperSpinCount = 0;
+            bool handAtDamperWheel = (rightLocal.z > -0.42f && rightLocal.z < -0.16f && rightLocal.y > -0.25f && rightLocal.y < 0.15f &&
+                                      vrState.rightController.grip > 0.55f);
+            float damperWheelSpeed = sqrtf(rVel.x * rVel.x + rVel.y * rVel.y);
+            if (handAtDamperWheel && damperWheelSpeed > 0.48f && (now - s_lastDamperSpinTime > 220)) {
+                s_lastDamperSpinTime = now;
+                s_damperSpinCount++;
+                VR_LOG_INFO("Environmental Gesture: HYDROPONICS FLAME DAMPER HANDWHEEL REVOLUTION #%d (Speed: %.2f)", s_damperSpinCount, damperWheelSpeed);
+                vrState.rightHapticPulse = 0.55f; // Spindle rotation rumble (130 Hz)
+                if (s_damperSpinCount >= 3) {
+                    s_damperSpinCount = 0;
+                    VR_LOG_INFO("Environmental Gesture: FLAME DAMPER VANES FULLY OPENED & LOCKED");
+                    SendKeyTap('E');
+                    SendKeyTap(VK_SPACE);
+                    SendKeyTap('Q');
+                    vrState.rightHapticPulse = 0.95f; // Mechanical end-stop detent thud (210 Hz)
+                    vrState.leftHapticPulse = 0.50f;
+                }
             }
         }
     }
