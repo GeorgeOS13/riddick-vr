@@ -30,9 +30,10 @@ jobs:
       - name: Verify 368-symbol OpenGL forwarder table intact
         shell: powershell
         run: |
-          $s = (Select-String -Path src/hook/opengl_forwarders.c -Pattern 'GLPROXY_' | Measure-Object).Count
-          $d = Test-Path dist/opengl32.dll
-          Write-Host "forwarder refs: $s, dll present: $d"
-          if ($s -lt 360 -or -not $d) { throw 'forwarder table check failed' }
+          $f = (Select-String -Path src/hook/opengl_forwarders.c -Pattern 'DEFINE_FORWARDER\(' | Measure-Object).Count
+          $d = (Select-String -Path src/hook/opengl32.def -Pattern '^\s+[A-Za-z]' | Measure-Object).Count
+          $dll = Test-Path dist/opengl32.dll
+          Write-Host "forwarders: $f, def exports: $d, dll present: $dll"
+          if ($f -lt 350 -or $d -ne 368 -or -not $dll) { throw 'forwarder table check failed' }
       - name: Worker summary
         run: echo "CI lane green - game-dependent semi-play runs on local 24/7 box"
