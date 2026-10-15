@@ -999,6 +999,20 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             bool clapCorridor = (handsDistSledge < 0.24f && rightLocal.y > -0.10f && rightLocal.y < 0.20f && rightLocal.z > -0.35f && rightLocal.z < -0.10f);
             bool isDoubleEarClap = bothHandsOpenForClap && lateralInwardClapAcc && clapCorridor;
 
+            // Security Guard Stun Baton Rib-Jab & Ground Takedown (ADR 0133)
+            static DWORD s_lastBatonRibJabTime = 0;
+            bool batonRibJabArmed = (vrState.rightController.grip > 0.60f && vrState.rightController.trigger > 0.60f);
+            bool batonRibJabThrust = (rVel.z < -1.10f && rVel.y < -0.85f);
+            bool batonRibJabCorridor = (rightLocal.y > -0.30f && rightLocal.y < 0.05f && rightLocal.z > -0.35f && rightLocal.z < -0.10f);
+            bool isBatonRibJab = batonRibJabArmed && batonRibJabThrust && batonRibJabCorridor;
+
+            // Inmate Shiv Forearm Defensive Parry-and-Snap (ADR 0134)
+            static DWORD s_lastParrySnapTime = 0;
+            bool parrySnapOffHandDeflect = (fabsf(lVel.x) > 0.85f);
+            bool parrySnapDominantStrike = (rVel.y < -1.15f);
+            bool parrySnapProximity = (handsDistSledge < 0.28f);
+            bool isParrySnap = parrySnapOffHandDeflect && parrySnapDominantStrike && parrySnapProximity;
+
             if (isDischargingArcWave) {
                 VR_LOG_INFO("Tactical Melee: STUN BATON OVERLOAD RADIAL ARC WAVE DISCHARGED (Lx: %.2f, Rx: %.2f)", lVel.x, rVel.x);
                 SendKey('S', true);
@@ -1009,6 +1023,29 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap('Q');
                 vrState.leftHapticPulse = 0.98f;  // High-voltage electrostatic arc ring shockwave (300 Hz)
                 vrState.rightHapticPulse = 0.98f;
+            } else if (isParrySnap && (now - s_lastParrySnapTime > 1500)) {
+                s_lastParrySnapTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE SHIV FOREARM DEFENSIVE PARRY-AND-SNAP (Lx: %.2f, Ry: %.2f)", lVel.x, rVel.y);
+                SendKey('W', true);
+                SendKey('E', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('E', false);
+                SendKey('W', false);
+                vrState.leftHapticPulse = 0.80f;  // Forearm deflection snap (220 Hz)
+                vrState.rightHapticPulse = 0.98f; // Joint-shattering bone crack (280 Hz)
+            } else if (isBatonRibJab && (now - s_lastBatonRibJabTime > 1500)) {
+                s_lastBatonRibJabTime = now;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Tactical Melee: STUN BATON RIB-JAB & GROUND TAKEDOWN (Ry: %.2f, Rz: %.2f)", rVel.y, rVel.z);
+                SendKey('S', true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, false);
+                SendKey('S', false);
+                vrState.rightHapticPulse = 0.98f; // Neuromuscular shock & ground deck impact (290 Hz)
             } else if (isDoubleEarClap && (now - s_lastDoubleEarClapTime > 1500)) {
                 s_lastDoubleEarClapTime = now;
                 s_lastPunchTime = now;
@@ -2482,6 +2519,20 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 }
             }
 
+            // Subterranean Hydroponics Root Aeration Valve Foot Pedal Treadle (ADR 0132)
+            static DWORD s_lastTreadlePlungeTime = 0;
+            bool lowStanceForTreadle = (s_isPhysicallyCrouched || s_isDeepProne) || (rightLocal.y < -0.45f);
+            bool treadleDownPlunge = (rVel.y < -0.95f && rightLocal.y < -0.48f && vrState.rightController.grip > 0.50f);
+            if (lowStanceForTreadle && treadleDownPlunge && (now - s_lastTreadlePlungeTime > 1800)) {
+                s_lastTreadlePlungeTime = now;
+                VR_LOG_INFO("Environmental Gesture: ROOT AERATION TREADLE PUMPED (Vy: %.2f m/s)", rVel.y);
+                SendKeyTap('E');
+                SendKeyTap('C');
+                SendKeyTap(VK_RETURN);
+                vrState.rightHapticPulse = 0.90f; // Pneumatic fluid aeration surge pulse (120 Hz)
+                vrState.leftHapticPulse = 0.40f;
+            }
+
             // Dark Athena Cargo Bay Magnetic Crane Remote Pendant Snatch (ADR 0106)
             static DWORD s_lastCranePendantTime = 0;
             bool handAtOverheadPendant = ((rightLocal.y > 0.18f && rightLocal.z > -0.32f && rightLocal.z < -0.05f && vrState.rightController.grip > 0.55f) ||
@@ -2570,6 +2621,27 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     vrState.rightHapticPulse = 0.80f; // Auxiliary power bus resonance chime (310 Hz)
                     vrState.leftHapticPulse = 0.40f;
                 }
+            }
+
+            // Dark Athena EVA Solar Collector Truss Structural Weld Inspection (ADR 0131)
+            static DWORD s_lastWeldScanTime = 0;
+            static DWORD s_weldScanStartTime = 0;
+            bool handAtTrussSeam = (rightLocal.z > -0.38f && rightLocal.z < -0.12f && rightLocal.y > -0.15f && rightLocal.y < 0.20f && vrState.rightController.grip > 0.50f);
+            bool steadyGlideVelocity = (fabsf(rVel.x) > 0.25f && fabsf(rVel.x) < 0.65f);
+            if (handAtTrussSeam && steadyGlideVelocity && (now - s_lastWeldScanTime > 2000)) {
+                if (s_weldScanStartTime == 0) s_weldScanStartTime = now;
+                vrState.rightHapticPulse = 0.45f; // Ultrasonic scanner diagnostic vibration (230 Hz)
+                if (now - s_weldScanStartTime >= 350) {
+                    s_weldScanStartTime = 0;
+                    s_lastWeldScanTime = now;
+                    VR_LOG_INFO("Environmental Gesture: EVA TRUSS STRUCTURAL WELD INSPECTED & CLEARED");
+                    SendKeyTap('E');
+                    SendKeyTap(VK_SPACE);
+                    SendKeyTap(VK_TAB);
+                    vrState.rightHapticPulse = 0.75f; // Structural clearance confirmation chime (180 Hz)
+                }
+            } else {
+                s_weldScanStartTime = 0;
             }
         }
     }
