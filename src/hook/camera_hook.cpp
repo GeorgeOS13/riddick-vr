@@ -1315,7 +1315,75 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             bool batonTripSweep = (s_batonJabTime > 0 && (now - s_batonJabTime < 500) &&
                                    rVel.y < -1.10f && fabsf(rVel.x) > 0.80f);
 
-            if (batonTripSweep && (now - s_lastBatonJabTripTime > 1800)) {
+            // Inmate Pit Brawl Double-Leg Takedown & High-Amplitude Mat Slam (ADR 0193)
+            static DWORD s_lastDoubleLegSlamTime = 0;
+            static DWORD s_doubleLegLiftTime = 0;
+            bool doubleLegLowStance = (s_isPhysicallyCrouched || s_isDeepProne || leftLocal.y < -0.30f);
+            bool doubleLegThighWrap = (handsDistSledge < 0.25f &&
+                                       vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
+                                       lVel.y > 1.15f && rVel.y > 1.15f);
+            if (doubleLegLowStance && doubleLegThighWrap && (now - s_lastDoubleLegSlamTime > 2000)) {
+                if (s_doubleLegLiftTime == 0) {
+                    s_doubleLegLiftTime = now;
+                    VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL DOUBLE-LEG LIFT INITIATED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
+                    vrState.leftHapticPulse = 0.90f;  // Heavy body lift strain (210 Hz)
+                    vrState.rightHapticPulse = 0.90f;
+                }
+            }
+            bool doubleLegSpikeSlam = (s_doubleLegLiftTime > 0 && (now - s_doubleLegLiftTime < 500) &&
+                                       lVel.y < -1.30f && rVel.y < -1.30f);
+
+            // Security Guard Stun Baton Forward Two-Handed Cross-Pistol Disarm & Neck Strike (ADR 0194)
+            static DWORD s_lastPistolDisarmTime = 0;
+            static DWORD s_pistolTrapTime = 0;
+            bool batonPistolDisarmGrip = (handsDistSledge < 0.24f &&
+                                          vrState.rightController.grip > 0.60f && vrState.rightController.trigger > 0.65f &&
+                                          vrState.leftController.grip > 0.50f &&
+                                          rightLocal.y > -0.20f && rightLocal.y < 0.10f);
+            bool batonDownwardPistolTrap = (rVel.y < -0.90f && lVel.y < -0.90f && rVel.z < -0.80f);
+            if (batonPistolDisarmGrip && batonDownwardPistolTrap && (now - s_lastPistolDisarmTime > 1800)) {
+                if (s_pistolTrapTime == 0) {
+                    s_pistolTrapTime = now;
+                    VR_LOG_INFO("Tactical Melee: ENEMY FIREARM TRAPPED & WEDGED WITH STUN BATON (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
+                    vrState.rightHapticPulse = 0.95f; // Electrostatic disarm arc snap (280 Hz)
+                    vrState.leftHapticPulse = 0.70f;
+                }
+            }
+            bool batonThroatThrustStrike = (s_pistolTrapTime > 0 && (now - s_pistolTrapTime < 500) && rVel.z < -1.20f);
+
+            if (batonThroatThrustStrike && (now - s_lastPistolDisarmTime > 1800)) {
+                s_lastPistolDisarmTime = now;
+                s_pistolTrapTime = 0;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Tactical Melee: STUN BATON CROSS-PISTOL DISARM & THROAT THRUST EXECUTED (Rz: %.2f)", rVel.z);
+                SendKey('W', true);
+                mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
+                SendKey('E', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('E', false);
+                mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
+                SendKey('W', false);
+                vrState.rightHapticPulse = 0.98f; // Tracheal kinetic impact (320 Hz)
+                vrState.leftHapticPulse = 0.65f;
+            } else if (doubleLegSpikeSlam && (now - s_lastDoubleLegSlamTime > 2000)) {
+                s_lastDoubleLegSlamTime = now;
+                s_doubleLegLiftTime = 0;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL DOUBLE-LEG MAT SLAM EXECUTED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
+                SendKey('C', true);
+                SendKey('W', true);
+                SendKey(VK_SPACE, true);
+                SendKey('S', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('S', false);
+                SendKey(VK_SPACE, false);
+                SendKey('W', false);
+                SendKey('C', false);
+                vrState.leftHapticPulse = 0.98f;  // Concussive mat impact blast (40 Hz)
+                vrState.rightHapticPulse = 0.98f;
+            } else if (batonTripSweep && (now - s_lastBatonJabTripTime > 1800)) {
                 s_lastBatonJabTripTime = now;
                 s_batonJabTime = 0;
                 s_lastPunchTime = now;
@@ -3807,6 +3875,53 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     vrState.rightHapticPulse = 0.95f; // Steam jet acoustic blast (120 Hz)
                     vrState.leftHapticPulse = 0.75f;
                 }
+            }
+
+            // Dark Athena EVA Solar Collector Heat Radiator Coolant Loop Bleed Petcock Valve (ADR 0191)
+            static DWORD s_lastBleedValveTime = 0;
+            bool handAtBleedValve = (rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > -0.20f && rightLocal.y < 0.20f &&
+                                     vrState.rightController.grip > 0.45f && vrState.rightController.grip < 0.85f &&
+                                     vrState.rightController.trigger < 0.40f);
+            bool bleedValveTwist = (fabsf(rVel.x) > 0.65f);
+            if (handAtBleedValve && bleedValveTwist && (now - s_lastBleedValveTime > 1800)) {
+                s_lastBleedValveTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA RADIATOR COOLANT BLEED PETCOCK TWISTED & VENTED (Rx: %.2f)", rVel.x);
+                SendKeyTap('E');
+                SendKeyTap('Q');
+                SendKeyTap(VK_TAB);
+                SendKeyTap(VK_SPACE);
+                vrState.rightHapticPulse = 0.85f; // Cryogenic vapor venting surge (90 Hz)
+                vrState.leftHapticPulse = 0.45f;
+            }
+
+            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Slag Tap Hole Oxygen Lance Burn (ADR 0192)
+            static DWORD s_lastSlagBurnTime = 0;
+            static DWORD s_slagBurnStartTime = 0;
+            bool twoHandAtSlagPort = (twoHandDist < 0.26f &&
+                                      rightLocal.z > -0.42f && rightLocal.z < -0.16f && rightLocal.y > -0.45f && rightLocal.y < -0.10f &&
+                                      vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f &&
+                                      vrState.rightController.trigger > 0.70f);
+            bool slagLanceLinearFeed = (rVel.z < -0.30f);
+            if (twoHandAtSlagPort && slagLanceLinearFeed) {
+                if (s_slagBurnStartTime == 0) s_slagBurnStartTime = now;
+                DWORD burnTime = now - s_slagBurnStartTime;
+                float burnRamp = (burnTime < 400) ? (burnTime / 400.0f) : 1.0f;
+                vrState.rightHapticPulse = 0.50f + 0.45f * burnRamp; // Sizzle to breakout rumble (260 -> 70 Hz)
+                vrState.leftHapticPulse = 0.35f + 0.40f * burnRamp;
+                if (burnTime >= 400 && (now - s_lastSlagBurnTime > 2500)) {
+                    s_lastSlagBurnTime = now;
+                    s_slagBurnStartTime = 0;
+                    VR_LOG_INFO("Environmental Gesture: HYDROPONICS SLAG TAP HOLE BREACHED VIA OXYGEN LANCE BURN");
+                    SendKeyTap('E');
+                    mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                    mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                    SendKeyTap(VK_SPACE);
+                    SendKeyTap(VK_RETURN);
+                    vrState.rightHapticPulse = 0.98f; // Molten slag breakout rumble (70 Hz)
+                    vrState.leftHapticPulse = 0.90f;
+                }
+            } else {
+                s_slagBurnStartTime = 0;
             }
         }
     }
