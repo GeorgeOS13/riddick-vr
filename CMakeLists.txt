@@ -41,6 +41,10 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4 AND RIDDICKVR_BUILD_PROXY)
         src/hook/vr_hand_renderer.h
         src/hook/camera_hook.cpp
         src/hook/camera_hook.h
+        src/hook/vr_config.cpp
+        src/hook/vr_config.h
+        src/hook/gesture_tap.cpp
+        src/hook/gesture_tap.h
         src/hook/logging.cpp
         src/hook/logging.h
         src/hook/opengl32.def

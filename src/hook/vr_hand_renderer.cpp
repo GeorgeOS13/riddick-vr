@@ -1,4 +1,5 @@
 #include "vr_hand_renderer.h"
+#include "vr_config.h" // Track C #13: world scale
 #include "opengl_proxy.h"
 #include "logging.h"
 #include <cmath>
@@ -395,10 +396,12 @@ void VRHandRenderer::DrawTacticalHand(HandSide side, float grip, float trigger, 
     float splayRing   = (side == HandSide::Left) ?  3.0f : -3.0f;
     float splayPinky  = (side == HandSide::Left) ?  6.5f : -6.5f;
 
-    DrawArticulatedFinger(side, 0, indexCurl,     splayIndex,  0.96f); // Index
-    DrawArticulatedFinger(side, 1, effectiveGrip, splayMiddle, 1.00f); // Middle
-    DrawArticulatedFinger(side, 2, effectiveGrip, splayRing,   0.93f); // Ring
-    DrawArticulatedFinger(side, 3, effectiveGrip, splayPinky,  0.80f); // Pinky
+    // Track C #13: world scale multiplier on hand render scale (INI WorldScale).
+    const float handScale = GetWorldScale();
+    DrawArticulatedFinger(side, 0, indexCurl,     splayIndex,  0.96f * handScale); // Index
+    DrawArticulatedFinger(side, 1, effectiveGrip, splayMiddle, 1.00f * handScale); // Middle
+    DrawArticulatedFinger(side, 2, effectiveGrip, splayRing,   0.93f * handScale); // Ring
+    DrawArticulatedFinger(side, 3, effectiveGrip, splayPinky,  0.80f * handScale); // Pinky
 
     // 4. Articulated Thumb
     DrawArticulatedThumb(side, thumbCurl);

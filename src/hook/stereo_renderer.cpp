@@ -514,6 +514,17 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
             GLint dstW = m_eyeWidth;
             GLint dstH = m_eyeHeight;
 
+            // Track C #9: comfort vignette proxy - vrState.comfortVignette
+            // scales the HUD convergence offset into a per-eye source shift
+            // while moving/turning (INI-gated in CameraHook). Zero at rest, so
+            // default framing is unchanged. FOLLOW-UP: true post-process
+            // peripheral vignette via shader injection (no shader changes yet).
+            GLint comfortPx = 0;
+            if (m_sharedState.comfortVignette > 0.01f) {
+                int shiftPx = static_cast<int>(srcW * m_hudConvergenceOffset * m_sharedState.comfortVignette);
+                comfortPx = (shiftPx > 1) ? shiftPx : 1;
+            }
+
 
             // Read from default backbuffer 0
             OpenGLProxy::real_glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */, 0);
@@ -527,7 +538,7 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
             // this fills the entire buffer with 100% immersion and ZERO black bars.
             OpenGLProxy::real_glBindFramebuffer(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, m_leftFbo);
             OpenGLProxy::glBlitFramebuffer(
-                srcX, srcY + srcH, srcX + srcW, srcY,
+                srcX - comfortPx, srcY + srcH, srcX + srcW - comfortPx, srcY, // Track C #9
                 dstX, dstY, dstX + dstW, dstY + dstH,
                 GL_COLOR_BUFFER_BIT, GL_LINEAR
             );
@@ -538,7 +549,7 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
             // Blit into Right Eye FBO (vertically flipped: srcY goes from srcH down to 0)
             OpenGLProxy::real_glBindFramebuffer(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, m_rightFbo);
             OpenGLProxy::glBlitFramebuffer(
-                srcX, srcY + srcH, srcX + srcW, srcY,
+                srcX + comfortPx, srcY + srcH, srcX + srcW + comfortPx, srcY, // Track C #9
                 dstX, dstY, dstX + dstW, dstY + dstH,
                 GL_COLOR_BUFFER_BIT, GL_LINEAR
             );

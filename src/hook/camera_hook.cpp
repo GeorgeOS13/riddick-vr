@@ -1,6 +1,9 @@
 #include "camera_hook.h"
 #include "logging.h"
 #include "opengl_proxy.h"
+#include "vr_config.h"
+#include "gesture_tap.h"
+#include <algorithm>
 #include <cmath>
 
 namespace RiddickVR {
@@ -10,11 +13,28 @@ CameraHook& CameraHook::Instance() {
     return s_instance;
 }
 
+// Adaptive physical crouching, two-handed stabilization, and decoupled aim state (ADR 0004, 0005, 0008)
+static float s_standingEyeHeight = 0.0f;
+static bool s_twoHandedStabilizationActive = false;
+static bool s_physicalBlockEngaged = false;
+static DWORD s_lastReloadGestureTime = 0;
+static bool s_isAimingOrBlocking = false;
+static bool s_isPhysicalADS = false;
+static RiddickVRTrackedPose s_stabilizedAimPose{};
+static bool s_hasStabilizedPose = false;
+
+
 bool CameraHook::Initialize() {
     if (m_initialized) return true;
 
     m_moduleBase = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
     VR_LOG_INFO("Initializing CameraHook. Game module base: 0x%p", (void*)m_moduleBase);
+
+    LoadVRConfig(); // Track C #10: riddick_vr.ini (snap/deadzone/comfort/seated/scale/southpaw/debounce)
+    if (g_vrConfig.standingEyeHeight > 0.2f) {
+        s_standingEyeHeight = g_vrConfig.standingEyeHeight;
+        VR_LOG_INFO("Standing eye height overridden from INI: %.2fm", s_standingEyeHeight);
+    }
 
     if (ScanForCameraSignature()) {
         VR_LOG_INFO("Camera structure identified in game memory!");
@@ -30,46 +50,7 @@ bool CameraHook::ScanForCameraSignature() {
     return false; // Dynamic matrix intercept active
 }
 
-static HWND s_gameHwnd = nullptr;
-
-static void SendKey(WORD vk, bool isDown) {
-    UINT scan = MapVirtualKeyA(vk, MAPVK_VK_TO_VSC);
-
-    // 1. DirectInput 8 Scan Code hardware event
-    INPUT inScancode = {};
-    inScancode.type = INPUT_KEYBOARD;
-    inScancode.ki.wVk = 0;
-    inScancode.ki.wScan = static_cast<WORD>(scan);
-    inScancode.ki.dwFlags = KEYEVENTF_SCANCODE | (isDown ? 0 : KEYEVENTF_KEYUP);
-    SendInput(1, &inScancode, sizeof(INPUT));
-
-    // 2. Standard Virtual Key event
-    INPUT inVk = {};
-    inVk.type = INPUT_KEYBOARD;
-    inVk.ki.wVk = vk;
-    inVk.ki.wScan = static_cast<WORD>(scan);
-    inVk.ki.dwFlags = isDown ? 0 : KEYEVENTF_KEYUP;
-    SendInput(1, &inVk, sizeof(INPUT));
-
-    // 3. Win32 legacy keybd_event fallback
-    keybd_event(static_cast<BYTE>(vk), static_cast<BYTE>(scan), isDown ? 0 : KEYEVENTF_KEYUP, 0);
-
-    // 4. Direct window message posting to game window
-    if (s_gameHwnd && IsWindow(s_gameHwnd)) {
-        LPARAM lParam = (scan << 16) | 1;
-        if (!isDown) lParam |= (1 << 30) | (1 << 31);
-        PostMessageA(s_gameHwnd, isDown ? WM_KEYDOWN : WM_KEYUP, vk, lParam);
-        if (isDown && (vk == VK_RETURN || vk == 'E' || vk == 'e' || vk == VK_ESCAPE || vk == VK_BACK || vk == VK_TAB || vk == VK_SPACE)) {
-            PostMessageA(s_gameHwnd, WM_CHAR, vk, lParam);
-        }
-    }
-}
-
-static void SendKeyTap(WORD vk) {
-    SendKey(vk, true);
-    Sleep(15);
-    SendKey(vk, false);
-}
+// Track C #15: SendKey/SendKeyTap moved to gesture_tap.{h,cpp} (central debounced choke point).
 
 // VR-First 1:1 Physical Interaction Anchor State (ADR 0406)
 // Prevents engine action cutscene cameras (usethirdperson = 1 during NanoMED healing and ladders)
@@ -242,22 +223,81 @@ static RiddickVRVector3 WorldToHmdLocal(const RiddickVRVector3& worldPos, const 
             float ry = dy + qw * ty + (qz * tx - qx * tz);
             float rz = dz + qw * tz + (qx * ty - qy * tx);
 
-            return { rx, ry, rz };
+            // Track C #13: world scale multiplier on interaction volumes.
+            float ws = GetWorldScale();
+            return { rx * ws, ry * ws, rz * ws };
         }
     }
 
-    return { dx, dy, dz };
+    float wsFallback = GetWorldScale(); // Track C #13
+    return { dx * wsFallback, dy * wsFallback, dz * wsFallback };
 }
 
-// Adaptive physical crouching, two-handed stabilization, and decoupled aim state (ADR 0004, 0005, 0008)
-static float s_standingEyeHeight = 0.0f;
-static bool s_twoHandedStabilizationActive = false;
-static bool s_physicalBlockEngaged = false;
-static DWORD s_lastReloadGestureTime = 0;
-static bool s_isAimingOrBlocking = false;
-static bool s_isPhysicalADS = false;
-static RiddickVRTrackedPose s_stabilizedAimPose{};
-static bool s_hasStabilizedPose = false;
+// ---------------------------------------------------------------------------
+// Track C #17, FIRST STEP ONLY: begin decomposing CameraHook::Update.
+// Update currently owns ~478 function statics across sections 0-10. Full
+// split plan (follow-ups, one section per change, statics -> explicit state):
+//   0 Head-look/mouse emulation -> UpdateHeadLook (head_look.cpp)
+//   1 Crouch/height/lean        -> UpdatePosture (posture.cpp)
+//   2 Ladders/mantle            -> UpdateClimbing (climbing.cpp)
+//   2b NanoMED cartridge/palm   -> UpdateNanoMED (nanomed.cpp)
+//   3 Locomotion deadzone       -> UpdateLocomotion (locomotion.cpp)
+//   4 Snap/smooth turn (+4b)    -> UpdateLocomotionTurn (locomotion.cpp)
+//   5 Melee gestures            -> UpdateMelee (melee.cpp, per-weapon tables)
+//   6 Reload/holster/grenade    -> UpdateReloadGestures (reload.cpp)
+//   7 Eyeshine/flashlight       -> UpdateTacticalGear (tactical.cpp)
+//   8 Aim/block/fire            -> UpdateAimAndFire (aim.cpp)
+//   9 Grips/throw/drag          -> UpdateGrips (grips.cpp)
+//   10 Buttons/menus            -> UpdateButtons (buttons.cpp)
+// First step (this change, same file, no behavior change): three static
+// helpers with explicit state structs for locomotion intent, reload
+// detection, and NanoMED volumes. Call sites below delegate the pure
+// detection math; side effects (keys/haptics/logs) stay in Update.
+// ---------------------------------------------------------------------------
+struct LocomotionIntent { bool fwd = false; bool back = false; bool left = false; bool right = false; };
+
+static LocomotionIntent ComputeLocomotionIntent(float stickLX, float stickLY, float deadzone) {
+    LocomotionIntent out;
+    float moveMag = sqrtf(stickLX * stickLX + stickLY * stickLY);
+    if (moveMag >= deadzone) {
+        float dirX = stickLX / moveMag;
+        float dirY = stickLY / moveMag;
+        // Angular deadband around forward/backward axis (same thresholds as inline code).
+        constexpr float FORWARD_THRESHOLD = 0.35f;
+        constexpr float STRAFE_THRESHOLD = 0.42f;
+        if (dirY > FORWARD_THRESHOLD) out.fwd = true;
+        else if (dirY < -FORWARD_THRESHOLD) out.back = true;
+        if (dirX > STRAFE_THRESHOLD) out.right = true;
+        else if (dirX < -STRAFE_THRESHOLD) out.left = true;
+    }
+    return out;
+}
+
+struct ReloadGestureRequest { bool cellEject = false; bool magInsert = false; bool waistPouch = false; };
+
+static ReloadGestureRequest DetectReloadGesture(float handDist, float offGrip, float offVelY, float offLocalY, float offLocalX) {
+    ReloadGestureRequest out;
+    out.cellEject = (handDist < 0.18f && offGrip > 0.50f && offVelY < -0.70f);
+    out.magInsert = (handDist < 0.18f && offGrip > 0.50f && offVelY > 0.35f);
+    out.waistPouch = (offLocalY < -0.38f && offLocalX > -0.35f && offLocalX < -0.05f && offGrip > 0.50f);
+    return out;
+}
+
+struct NanoMedVolumes { bool inReceiver = false; bool leftContact = false; bool rightContact = false; };
+
+static NanoMedVolumes DetectNanoMEDContact(const RiddickVRVector3& domLocal,
+                                           const RiddickVRVector3& leftLocal, const RiddickVRVector3& rightLocal,
+                                           bool leftPalmFlat, bool rightPalmFlat) {
+    NanoMedVolumes out;
+    out.inReceiver = (domLocal.z >= -0.62f && domLocal.z <= -0.20f) &&
+                     (domLocal.y >= 0.05f && domLocal.y <= 0.42f) &&
+                     (fabsf(domLocal.x) < 0.30f);
+    out.leftContact = leftPalmFlat && (leftLocal.z >= -0.65f && leftLocal.z <= -0.22f) &&
+                      (leftLocal.y >= -0.25f && leftLocal.y <= 0.25f) && (fabsf(leftLocal.x) < 0.28f);
+    out.rightContact = rightPalmFlat && (rightLocal.z >= -0.65f && rightLocal.z <= -0.22f) &&
+                       (rightLocal.y >= -0.25f && rightLocal.y <= 0.25f) && (fabsf(rightLocal.x) < 0.28f);
+    return out;
+}
 
 void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (!m_initialized || !vrState.vrActive) return;
@@ -281,6 +321,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     }
 
     uint32_t btns = vrState.rightController.buttons | vrState.leftController.buttons;
+    // Track C #14 (southpaw): dominant/off-hand aliases resolved once in the
+    // input mapping section. Default (southpaw=0): dom=right, off=left.
+    const RiddickVRControllerInput& domCtrl = g_vrConfig.southpaw ? vrState.leftController : vrState.rightController;
+    const RiddickVRControllerInput& offCtrl = g_vrConfig.southpaw ? vrState.rightController : vrState.leftController;
     static uint32_t s_prevButtons = 0;
     static bool s_wasIn3D = false;
 
@@ -379,7 +423,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 // Decoupled Motion Controller Aim Steering:
                 // Extract relative orientation between HMD and weapon aim controller: Q_rel = Q_hmd^-1 * Q_ctrl
                 const auto& ctrlPose = (s_twoHandedStabilizationActive && s_hasStabilizedPose) ?
-                    s_stabilizedAimPose : (vrState.rightController.aimPose.isValid ? vrState.rightController.aimPose : vrState.rightController.gripPose);
+                    s_stabilizedAimPose : (domCtrl.aimPose.isValid ? domCtrl.aimPose : domCtrl.gripPose); // Track C #14
 
                 float deltaCtrlYaw = 0.0f;
                 float deltaCtrlPitch = 0.0f;
@@ -390,13 +434,14 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 bool isActivelyAiming = false;
 
                 bool isReloading = (now - s_lastReloadGestureTime <= 1100);
-                bool isAiming = s_isAimingOrBlocking || (vrState.leftController.trigger > 0.5f);
+                bool isAiming = s_isAimingOrBlocking || (offCtrl.trigger > 0.5f); // Track C #14
 
                 // ADR 0383: Physical 6DOF Aim-Down-Sights (ADS) Eye-Relief Alignment & Parallax Mitigation
                 static DWORD s_adsEnterStartTime = 0;
                 static bool s_adsHapticFired = false;
 
                 RiddickVRVector3 ctrlLocal = WorldToHmdLocal(ctrlPose.position, vrState.hmdPose);
+                if (g_vrConfig.southpaw) ctrlLocal.x = -ctrlLocal.x; // Track C #14: mirror into right-eye corridor frame
                 // Dominant eye sight line corridor:
                 // Y: [-0.18m, 0.08m] (chin to eye level)
                 // Z: [-0.36m, -0.10m] (10cm to 36cm eye relief)
@@ -559,7 +604,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
     // Reset calibration on recenter request (e.g. via IPC flag)
     if (vrState.shouldRecenter && vrState.hmdPose.isValid) {
-        s_standingEyeHeight = vrState.hmdPose.position.y;
+        s_standingEyeHeight = vrState.hmdPose.position.y + (g_vrConfig.seated ? g_vrConfig.seatedEyeOffset : 0.0f); // Track C #11
         VR_LOG_INFO("Standing eye height calibrated on recenter: %.2fm", s_standingEyeHeight);
     }
 
@@ -568,7 +613,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
         // Initial calibration
         if (s_standingEyeHeight <= 0.001f && currentY > 0.1f) {
-            s_standingEyeHeight = currentY;
+            s_standingEyeHeight = currentY + (g_vrConfig.seated ? g_vrConfig.seatedEyeOffset : 0.0f); // Track C #11
             VR_LOG_INFO("Initial standing eye height calibrated: %.2fm", s_standingEyeHeight);
         }
 
@@ -600,6 +645,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             constexpr float FALLBACK_RELEASE_THRESHOLD = -0.18f;
             wantCrouch = s_isPhysicallyCrouched ? (currentY < FALLBACK_RELEASE_THRESHOLD) : (currentY < FALLBACK_CROUCH_THRESHOLD);
         }
+        if (g_vrConfig.seated) wantCrouch = false; // Track C #11: no physical auto-crouch while seated
 
         if (wantCrouch != s_isPhysicallyCrouched) {
             s_isPhysicallyCrouched = wantCrouch;
@@ -618,6 +664,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         } else {
             wantProne = (currentY < -0.45f);
         }
+        if (g_vrConfig.seated) wantProne = false; // Track C #11: seated players never auto-prone
 
         if (wantProne != s_isDeepProne) {
             s_isDeepProne = wantProne;
@@ -816,10 +863,17 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     static DWORD s_lastCartridgeDrawTime = 0;
     static DWORD s_lastCartridgeInsertTime = 0;
     static bool s_nanoMedPalmActive = false;
+    // Track C #14: dominant-hand holster path resolves via southpaw.
+    const RiddickVRVector3& domHandLocal = g_vrConfig.southpaw ? leftLocal : rightLocal;
+    float domHandVelY = g_vrConfig.southpaw ? lVel.y : rVel.y;
+    // Track C #17: palm-flat state hoisted for DetectNanoMEDContact (pure move).
+    bool leftPalmFlat = (vrState.leftController.trigger < 0.20f && vrState.leftController.grip < 0.25f);
+    bool rightPalmFlat = (vrState.rightController.trigger < 0.20f && vrState.rightController.grip < 0.25f);
+    NanoMedVolumes nanoVol = DetectNanoMEDContact(domHandLocal, leftLocal, rightLocal, leftPalmFlat, rightPalmFlat);
 
     // A. Hip Holster Cartridge Draw
     if (!s_holdingNanoMedCartridge) {
-        if (rightLocal.y < -0.38f && vrState.rightController.grip > 0.60f && (now - s_lastCartridgeDrawTime > 1200)) {
+        if (domHandLocal.y < -0.38f && domCtrl.grip > 0.60f && (now - s_lastCartridgeDrawTime > 1200)) {
             s_holdingNanoMedCartridge = true;
             s_lastCartridgeDrawTime = now;
             vrState.rightHapticPulse = 0.50f; // Firm cartridge draw snap
@@ -827,7 +881,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         }
     } else {
         // Return cartridge to holster if grip released away from station
-        if (vrState.rightController.grip < 0.30f && (rightLocal.z > -0.20f || rightLocal.y < 0.0f)) {
+        if (domCtrl.grip < 0.30f && (domHandLocal.z > -0.20f || domHandLocal.y < 0.0f)) {
             s_holdingNanoMedCartridge = false;
             vrState.rightHapticPulse = 0.20f;
             VR_LOG_INFO("Diegetic Interaction: NANOMED CARTRIDGE RETURNED TO HOLSTER");
@@ -836,32 +890,25 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
     // B. Downward Cartridge Insertion into Overhead Station Receiver Slot
     if (s_holdingNanoMedCartridge) {
-        bool inReceiverVolume = (rightLocal.z >= -0.62f && rightLocal.z <= -0.20f) &&
-                                (rightLocal.y >= 0.05f && rightLocal.y <= 0.42f) &&
-                                (fabsf(rightLocal.x) < 0.30f);
-        if (inReceiverVolume && rVel.y < -0.22f && (now - s_lastCartridgeInsertTime > 1500)) {
+        bool inReceiverVolume = nanoVol.inReceiver; // Track C #17
+        if (inReceiverVolume && domHandVelY < -0.22f && (now - s_lastCartridgeInsertTime > 1500)) {
             s_holdingNanoMedCartridge = false;
             s_lastCartridgeInsertTime = now;
-            SendKeyTap('E');
+            SendGestureTap('E', "nanomed/cartridge-insert"); // Track C #15
             vrState.rightHapticPulse = 0.85f; // Heavy mechanical locking latch impact
             VR_LOG_INFO("Diegetic Interaction: NANOMED CARTRIDGE INSERTED INTO STATION RECEIVER (MSG_TRIGGERREFILL)");
         }
     }
 
     // C. Biometric Scanner Palm Contact (Open Palm on Health Station Scanner)
-    bool leftPalmFlat = (vrState.leftController.trigger < 0.20f && vrState.leftController.grip < 0.25f);
-    bool rightPalmFlat = (vrState.rightController.trigger < 0.20f && vrState.rightController.grip < 0.25f);
-
-    bool leftScannerContact = leftPalmFlat && (leftLocal.z >= -0.65f && leftLocal.z <= -0.22f) &&
-                              (leftLocal.y >= -0.25f && leftLocal.y <= 0.25f) && (fabsf(leftLocal.x) < 0.28f);
-    bool rightScannerContact = rightPalmFlat && (rightLocal.z >= -0.65f && rightLocal.z <= -0.22f) &&
-                               (rightLocal.y >= -0.25f && rightLocal.y <= 0.25f) && (fabsf(rightLocal.x) < 0.28f);
+    bool leftScannerContact = nanoVol.leftContact; // Track C #17
+    bool rightScannerContact = nanoVol.rightContact;
 
     bool wantPalmActive = (leftScannerContact || rightScannerContact) && !s_holdingNanoMedCartridge && !s_physicalBlockEngaged;
     if (wantPalmActive) {
         if (!s_nanoMedPalmActive && (now - s_lastNanoMedTouchTime > 1200)) {
             s_lastNanoMedTouchTime = now;
-            SendKeyTap('E');
+            SendGestureTap('E', "nanomed/palm-scan"); // Track C #15
             VR_LOG_INFO("Diegetic Interaction: BIOMETRIC PALM SCANNER CONTACT ENGAGED (Left: %d, Right: %d)",
                 leftScannerContact ? 1 : 0, rightScannerContact ? 1 : 0);
         }
@@ -878,31 +925,19 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
     // 3. Radial Locomotion Deadzone & Diagonal Movement Normalization (ADR 0372)
     static bool s_wPressed = false, s_sPressed = false, s_aPressed = false, s_dPressed = false;
-    constexpr float RADIAL_DEADZONE = 0.22f;
+    // (Track C #10: RADIAL_DEADZONE superseded by g_vrConfig.moveDeadzone above.)
     float stickLX = vrState.leftController.thumbstickX;
     float stickLY = vrState.leftController.thumbstickY;
     float moveMag = sqrtf(stickLX * stickLX + stickLY * stickLY);
 
-    bool wantW = false;
-    bool wantS = false;
-    bool wantA = false;
-    bool wantD = false;
-
-    if (moveMag >= RADIAL_DEADZONE) {
-        float dirX = stickLX / moveMag;
-        float dirY = stickLY / moveMag;
-
-        // Apply angular deadband around forward/backward axis (±25 degrees, sin(25°) ≈ 0.42)
-        // This prevents unintentional sideways strafing drift when walking forward/backward
-        constexpr float FORWARD_THRESHOLD = 0.35f;
-        constexpr float STRAFE_THRESHOLD = 0.42f;
-
-        if (dirY > FORWARD_THRESHOLD) wantW = true;
-        else if (dirY < -FORWARD_THRESHOLD) wantS = true;
-
-        if (dirX > STRAFE_THRESHOLD) wantD = true;
-        else if (dirX < -STRAFE_THRESHOLD) wantA = true;
-    }
+    // Track C #17: intent detection delegated to ComputeLocomotionIntent
+    // (explicit LocomotionIntent state, same thresholds, no behavior change).
+    // Track C #10: radial deadzone from riddick_vr.ini (default 0.22).
+    LocomotionIntent locoIntent = ComputeLocomotionIntent(stickLX, stickLY, g_vrConfig.moveDeadzone);
+    bool wantW = locoIntent.fwd;
+    bool wantS = locoIntent.back;
+    bool wantA = locoIntent.left;
+    bool wantD = locoIntent.right;
 
     if (s_ladderClimbUp) wantW = true;
     if (s_ladderClimbDown) wantS = true;
@@ -990,7 +1025,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         if (fabsf(stickX) > SNAP_THRESHOLD) {
             if (s_snapTurnArmed) {
                 s_snapTurnArmed = false;
-                int snapDelta = (stickX > 0.0f) ? 350 : -350;
+                int snapDelta = static_cast<int>(350.0f * (g_vrConfig.snapAngleDeg / 45.0f)) * ((stickX > 0.0f) ? 1 : -1); // Track C #10
                 mouse_event(MOUSEEVENTF_MOVE, snapDelta, 0, 0, 0);
                 vrState.rightHapticPulse = 0.25f; // Crisp tactile click on snap
             }
@@ -1000,11 +1035,11 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     } else {
         // Pure Smooth Turn: continuous rotation with progressive cubic curve and sub-pixel accumulation
         // Zero truncation stutter or sudden snaps at stick limits
-        constexpr float SMOOTH_DEADZONE = 0.20f;
+        const float SMOOTH_DEADZONE = g_vrConfig.turnDeadzone; // Track C #10 (default 0.20)
         static float s_accumulatedSmoothTurnX = 0.0f;
         if (fabsf(stickX) > SMOOTH_DEADZONE) {
             float norm = (fabsf(stickX) - SMOOTH_DEADZONE) / (1.0f - SMOOTH_DEADZONE);
-            float curvedSpeed = norm * norm * 20.0f; // Smooth progressive velocity
+            float curvedSpeed = norm * norm * g_vrConfig.smoothTurnSpeed; // Track C #10 (default 20.0)
             s_accumulatedSmoothTurnX += std::copysign(curvedSpeed, stickX);
             int deltaX = static_cast<int>(s_accumulatedSmoothTurnX);
             if (deltaX != 0) {
@@ -1041,6 +1076,19 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             s_stickYUpArmed = true;
             s_stickYDownArmed = true;
         }
+    }
+
+    // Track C #9: comfort vignette proxy. Thumbstick move/turn activity drives
+    // vrState.comfortVignette (0..1, INI toggle + gain); StereoRenderer applies
+    // it to the HUD convergence cue as a subtle comfort proxy. FOLLOW-UP: true
+    // post-process peripheral vignette via shader injection (not implemented yet).
+    {
+        float turnMag = fabsf(stickX);
+        float moveActive = (moveMag >= g_vrConfig.moveDeadzone) ? 0.5f : 0.0f;
+        float turnActive = (turnMag >= g_vrConfig.turnDeadzone) ? 0.5f : 0.0f;
+        float comfortTarget = g_vrConfig.comfortEnabled ? (moveActive + turnActive) * g_vrConfig.comfortStrength : 0.0f;
+        if (comfortTarget > 1.0f) comfortTarget = 1.0f;
+        vrState.comfortVignette += (comfortTarget - vrState.comfortVignette) * 0.2f;
     }
 
     static DWORD s_lastPunchTime = 0;
@@ -1103,16 +1151,16 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             VR_LOG_INFO("Physical Counter: GUARD RIFLE STRIP & MAG EJECTION DISARM (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
             mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
             mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-            SendKeyTap('R'); // Drop enemy magazine
-            SendKeyTap('1'); // Equip stripped firearm
+            SendGestureTap('R', "melee/rifle-strip-eject"); // Track C #15
+            SendGestureTap('1', "melee/rifle-strip-equip");
             vrState.rightHapticPulse = 0.95f; // Receiver wrenching shockwave (280 Hz)
             vrState.leftHapticPulse = 0.95f;
         } else if (isPocketAshRiposte && (now - s_lastPocketAshRiposteTime > 1600)) {
             s_lastPocketAshRiposteTime = now;
             s_lastPunchTime = now;
             VR_LOG_INFO("Physical Counter: POCKET ASH THROW BLIND & RIPOSTE (Ry: %.2f, Rz: %.2f)", rVel.y, rVel.z);
-            SendKeyTap('E');
-            SendKeyTap(VK_TAB);
+            SendGestureTap('E', "melee/ash-riposte"); // Track C #15
+            SendGestureTap(VK_TAB, "melee/ash-riposte-tab");
             SendKey('W', true);
             mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
             mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
@@ -1121,10 +1169,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         } else if (isShieldPryDisarm) {
             s_lastPunchTime = now;
             VR_LOG_INFO("Physical Counter: RIOT SHIELD WEDGE PRY & DISARM (Lx: %.2f, Rx: %.2f)", lVel.x, rVel.x);
-            SendKeyTap('E');
+            SendGestureTap('E', "melee/shield-pry"); // Track C #15
             mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
             mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-            SendKeyTap('1'); // Seize weapon slot
+            SendGestureTap('1', "melee/shield-seize");
             vrState.leftHapticPulse = 0.95f; // Metallic shear crack (280 Hz)
             vrState.rightHapticPulse = 0.95f;
         } else if (isEyeGougeRiposte) {
@@ -2586,116 +2634,116 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastPlasmaUniversalSingularityTime = now;
                 s_lastPunchTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM UNIVERSAL SINGULARITY OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
                 SendKey('W', true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('C', true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap('Q', "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap('C', "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap('Q', "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-universal-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-universal-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey('C', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
                 SendKey('W', false);
-                SendKey(VK_SPACE, false);
+                // Track C #15: release folded into debounced tap above.
                 vrState.rightHapticPulse = 0.98f; // Resonant cataclysm universal singularity overdrive shockwave (550 Hz)
                 vrState.leftHapticPulse = 0.98f;  // Structural deck universal recoil (480 Hz)
                 goto combat_gesture_done;
@@ -2752,112 +2800,112 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastPlasmaMacrocosmSingularityTime = now;
                 s_lastPunchTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM MACROCOSM SINGULARITY OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
                 SendKey('W', true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('C', true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap('Q', "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap('C', "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap('Q', "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-macrocosm-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-macrocosm-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey('C', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
                 SendKey('W', false);
-                SendKey(VK_SPACE, false);
+                // Track C #15: release folded into debounced tap above.
                 vrState.rightHapticPulse = 0.98f; // Resonant cataclysm macrocosm singularity overdrive shockwave (540 Hz)
                 vrState.leftHapticPulse = 0.98f;  // Structural deck macrocosm recoil (470 Hz)
                 goto combat_gesture_done;
@@ -2912,108 +2960,108 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastPlasmaTransCosmicSingularityTime = now;
                 s_lastPunchTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM TRANS-COSMIC SINGULARITY OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
                 SendKey('W', true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('C', true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap('Q', "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap('C', "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap('Q', "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-trans-cosmic-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-trans-cosmic-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey('C', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
                 SendKey('W', false);
-                SendKey(VK_SPACE, false);
+                // Track C #15: release folded into debounced tap above.
                 vrState.rightHapticPulse = 0.98f; // Resonant cataclysm trans-cosmic singularity overdrive shockwave (530 Hz)
                 vrState.leftHapticPulse = 0.98f;  // Structural deck trans-cosmic recoil (460 Hz)
                 goto combat_gesture_done;
@@ -3066,102 +3114,102 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastPlasmaOmniverseSingularityTime = now;
                 s_lastPunchTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM OMNIVERSE SINGULARITY OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
                 SendKey('W', true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('C', true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap('Q', "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap('C', "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap('Q', "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-omniverse-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey('C', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-omniverse-singularity-overdrive");
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
                 SendKey('W', false);
-                SendKey(VK_SPACE, false);
+                // Track C #15: release folded into debounced tap above.
                 vrState.rightHapticPulse = 0.98f; // Resonant cataclysm omniverse singularity overdrive shockwave (520 Hz)
                 vrState.leftHapticPulse = 0.98f;  // Structural deck omniverse recoil (450 Hz)
                 goto combat_gesture_done;
@@ -3211,94 +3259,94 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastPlasmaMultiverseSingularityTime = now;
                 s_lastPunchTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM MULTIVERSE SINGULARITY OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
                 SendKey('W', true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('C', true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap('Q', "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap('C', "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap('Q', "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-multiverse-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-multiverse-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-multiverse-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey('C', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-multiverse-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
                 SendKey('W', false);
-                SendKey(VK_SPACE, false);
+                // Track C #15: release folded into debounced tap above.
                 vrState.rightHapticPulse = 0.98f; // Resonant cataclysm multiverse singularity overdrive shockwave (510 Hz)
                 vrState.leftHapticPulse = 0.98f;  // Structural deck multiverse recoil (440 Hz)
                 goto combat_gesture_done;
@@ -3346,86 +3394,86 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastPlasmaContinuumSingularityTime = now;
                 s_lastPunchTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM CONTINUUM SINGULARITY OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
                 SendKey('W', true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('C', true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap('Q', "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap('C', "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap('Q', "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-continuum-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-continuum-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-continuum-singularity-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey('C', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-continuum-singularity-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
                 SendKey('W', false);
-                SendKey(VK_SPACE, false);
+                // Track C #15: release folded into debounced tap above.
                 vrState.rightHapticPulse = 0.98f; // Resonant cataclysm continuum singularity overdrive shockwave (500 Hz)
                 vrState.leftHapticPulse = 0.98f;  // Structural deck continuum recoil (430 Hz)
                 goto combat_gesture_done;
@@ -3471,80 +3519,80 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastPlasmaInterdimensionalTime = now;
                 s_lastPunchTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM INTERDIMENSIONAL OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-interdimensional-overdrive");
                 SendKey('W', true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('C', true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap('Q', "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap('C', "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap('Q', "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-interdimensional-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-interdimensional-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-interdimensional-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-interdimensional-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey('C', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-interdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-interdimensional-overdrive");
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
                 SendKey('W', false);
-                SendKey(VK_SPACE, false);
+                // Track C #15: release folded into debounced tap above.
                 vrState.rightHapticPulse = 0.98f; // Resonant cataclysm Interdimensional overdrive shockwave (500 Hz)
                 vrState.leftHapticPulse = 0.98f;  // Structural deck Interdimensional recoil (420 Hz)
                 goto combat_gesture_done;
@@ -3590,76 +3638,76 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastPlasmaTransdimensionalTime = now;
                 s_lastPunchTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM TRANSDIMENSIONAL OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-transdimensional-overdrive");
                 SendKey('W', true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('C', true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap('Q', "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap('C', "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap('Q', "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-transdimensional-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-transdimensional-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-transdimensional-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-transdimensional-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey('C', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-transdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-transdimensional-overdrive");
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
                 SendKey('W', false);
-                SendKey(VK_SPACE, false);
+                // Track C #15: release folded into debounced tap above.
                 vrState.rightHapticPulse = 0.98f; // Resonant cataclysm Transdimensional overdrive shockwave (490 Hz)
                 vrState.leftHapticPulse = 0.98f;  // Structural deck Transdimensional recoil (410 Hz)
                 goto combat_gesture_done;
@@ -3703,72 +3751,72 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastPlasmaHyperdimensionalTime = now;
                 s_lastPunchTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM HYPERDIMENSIONAL OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-hyperdimensional-overdrive");
                 SendKey('W', true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('C', true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap('Q', "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap('C', "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap('Q', "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-hyperdimensional-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-hyperdimensional-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-hyperdimensional-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-hyperdimensional-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey('C', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-hyperdimensional-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-hyperdimensional-overdrive");
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
                 SendKey('W', false);
-                SendKey(VK_SPACE, false);
+                // Track C #15: release folded into debounced tap above.
                 vrState.rightHapticPulse = 0.98f; // Resonant cataclysm Hyperdimensional overdrive shockwave (480 Hz)
                 vrState.leftHapticPulse = 0.98f;  // Structural deck Hyperdimensional recoil (400 Hz)
                 goto combat_gesture_done;
@@ -3907,64 +3955,64 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_lastPlasmaOmniverseTime = now;
                 s_lastPunchTime = now;
                 VR_LOG_INFO("Tactical Melee: STUN BATON OMNIDIRECTIONAL PLASMA RESONANT CATACLYSM OMNIVERSE OVERDRIVE EXECUTED (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-overdrive");
                 SendKey('W', true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('C', true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey('Q', true);
-                SendKey(VK_TAB, true);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
+                SendGestureTap('Q', "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap('C', "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap('Q', "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_TAB, true);
-                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, true);
-                SendKey(VK_RETURN, true);
-                SendKey(VK_SPACE, true);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_TAB, "melee/stun-baton-omniverse-overdrive");
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey('C', false);
-                SendKey(VK_RETURN, false);
-                SendKey(VK_SPACE, false);
-                SendKey(VK_TAB, false);
-                SendKey('Q', false);
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-overdrive");
+                SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-overdrive");
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
+                // Track C #15: release folded into debounced tap above.
                 SendKey('W', false);
-                SendKey(VK_SPACE, false);
+                // Track C #15: release folded into debounced tap above.
                 vrState.rightHapticPulse = 0.98f; // Resonant cataclysm Omniverse overdrive shockwave (460 Hz)
                 vrState.leftHapticPulse = 0.98f;  // Structural deck Omniverse recoil (380 Hz)
                 goto combat_gesture_done;
@@ -6334,23 +6382,26 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // Suppress reload when already in two-handed stabilization to prevent accidental reloads while aiming.
     // Off-hand reaching to dominant weapon receiver requires upward seating motion (lVel.y > 0.35 m/s).
     // Waist pouch reach strictly tracks off-hand (leftLocal), eliminating accidental reloads when resting dominant arm.
+    // Track C #17: detection delegated to DetectReloadGesture (explicit
+    // ReloadGestureRequest state, same thresholds, no behavior change).
+    // Track C #14: off-hand (waist pouch / mag-well) resolves via southpaw.
+    // Track C #15: taps funnel through debounced SendGestureTap.
+    const RiddickVRVector3& offHandLocal = g_vrConfig.southpaw ? rightLocal : leftLocal;
+    float offHandVelY = g_vrConfig.southpaw ? rVel.y : lVel.y;
+    ReloadGestureRequest reloadReq = DetectReloadGesture(reloadHandDist, offCtrl.grip, offHandVelY,
+                                                         offHandLocal.y, offHandLocal.x);
     if (!s_physicalBlockEngaged && !isClimbingActive && !s_twoHandedStabilizationActive && (now - s_lastReloadGestureTime > 1200)) {
-        bool offHandMagInsert = (reloadHandDist < 0.18f && vrState.leftController.grip > 0.50f && lVel.y > 0.35f);
-        bool offHandWaistPouch = (leftLocal.y < -0.38f && leftLocal.x > -0.35f && leftLocal.x < -0.05f && vrState.leftController.grip > 0.50f);
-
-        // Cybernetic Drone HUD Battery Power Cell Hot-Swap Ejection (ADR 0082)
-        bool cellEjectFlick = (reloadHandDist < 0.18f && vrState.leftController.grip > 0.50f && lVel.y < -0.70f);
-        if (cellEjectFlick) {
+        if (reloadReq.cellEject) {
             s_lastReloadGestureTime = now;
-            VR_LOG_INFO("Tactical Weapon: POWER CELL HOT-SWAP EJECTED (Vy: %.2f m/s, Dist: %.2fm)", lVel.y, reloadHandDist);
-            SendKeyTap('R');
+            VR_LOG_INFO("Tactical Weapon: POWER CELL HOT-SWAP EJECTED (Vy: %.2f m/s, Dist: %.2fm)", offHandVelY, reloadHandDist);
+            SendGestureTap('R', "reload/powercell-eject");
             vrState.leftHapticPulse = 0.75f; // Magnetic cell disconnect snap (140 Hz)
             vrState.rightHapticPulse = 0.50f;
-        } else if (offHandMagInsert || offHandWaistPouch) {
+        } else if (reloadReq.magInsert || reloadReq.waistPouch) {
             s_lastReloadGestureTime = now;
             VR_LOG_INFO("Tactical Gesture: MANUAL WEAPON RELOAD triggered (%s, HandDist: %.2fm, LeftY: %.2f)",
-                offHandMagInsert ? "Weapon Receiver / Mag-Well" : "Waist Ammo Pouch", reloadHandDist, leftLocal.y);
-            SendKeyTap('R');
+                reloadReq.magInsert ? "Weapon Receiver / Mag-Well" : "Waist Ammo Pouch", reloadHandDist, offHandLocal.y);
+            SendGestureTap('R', "reload/manual");
             vrState.leftHapticPulse = 0.55f;
             vrState.rightHapticPulse = 0.75f;
         }
@@ -6719,17 +6770,24 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // - Hand at Ankle Boot (Y < -0.65m, grip > 0.50) while Crouched: Stashes / Retrieves Contraband (ADR 0038)
     static DWORD s_lastHolsterTime = 0;
     static int s_activeWeaponSlot = 1; // ADR 0376: 1: Primary, 2: Sidearm, 3: Melee/Blades, 4: Ordnance, 5: Heavy
+    // Track C #14: southpaw mirrors dom/off-hand holster zones (X-mirrored copies
+    // so physical-side predicates keep working; haptics stay on physical hands).
+    RiddickVRVector3 domHolster = g_vrConfig.southpaw ? leftLocal : rightLocal;
+    RiddickVRVector3 offHolster = g_vrConfig.southpaw ? rightLocal : leftLocal;
+    float domHolsterGrip = g_vrConfig.southpaw ? vrState.leftController.grip : vrState.rightController.grip;
+    float offHolsterGrip = g_vrConfig.southpaw ? vrState.rightController.grip : vrState.leftController.grip;
+    if (g_vrConfig.southpaw) { domHolster.x = -domHolster.x; offHolster.x = -offHolster.x; }
     bool inGuardPose = (leftLocal.z < -0.10f && rightLocal.z < -0.10f && leftLocal.y > -0.38f && rightLocal.y > -0.38f && fabsf(leftLocal.x - rightLocal.x) < 0.50f);
     if (!isClimbingActive && !s_physicalBlockEngaged && !inGuardPose && !s_twoHandedStabilizationActive && (now - s_lastHolsterTime > 900)) {
-        bool rightOverShoulder = (rightLocal.y > 0.15f && rightLocal.z > -0.05f && vrState.rightController.grip > 0.50f);
-        bool rightAtChest = (rightLocal.y >= -0.45f && rightLocal.y <= -0.22f && fabsf(rightLocal.x) < 0.14f && rightLocal.z > -0.16f && vrState.rightController.grip > 0.50f);
-        bool rightLowSpine = (rightLocal.y < -0.30f && rightLocal.z > -0.05f && fabsf(rightLocal.x) < 0.15f && vrState.rightController.grip > 0.50f);
-        bool rightAtHip = (rightLocal.y < -0.32f && rightLocal.x > 0.14f && vrState.rightController.grip > 0.50f);
-        bool leftAtHip = (leftLocal.y < -0.32f && leftLocal.x < -0.14f && vrState.leftController.grip > 0.50f);
-        bool leftAtBootSheath = (leftLocal.y < -0.60f && leftLocal.x >= -0.25f && leftLocal.x <= 0.0f && vrState.leftController.grip > 0.50f);
-        bool rightAtBootSheath = (rightLocal.y < -0.60f && rightLocal.x >= -0.25f && rightLocal.x <= 0.0f && vrState.rightController.grip > 0.50f);
-        bool rightAtAnkle = (rightLocal.y < -0.65f && vrState.rightController.grip > 0.50f);
-        bool leftAtAnkle = (leftLocal.y < -0.65f && vrState.leftController.grip > 0.50f);
+        bool rightOverShoulder = (domHolster.y > 0.15f && domHolster.z > -0.05f && domHolsterGrip > 0.50f); // Track C #14
+        bool rightAtChest = (domHolster.y >= -0.45f && domHolster.y <= -0.22f && fabsf(domHolster.x) < 0.14f && domHolster.z > -0.16f && domHolsterGrip > 0.50f); // Track C #14
+        bool rightLowSpine = (domHolster.y < -0.30f && domHolster.z > -0.05f && fabsf(domHolster.x) < 0.15f && domHolsterGrip > 0.50f); // Track C #14
+        bool rightAtHip = (domHolster.y < -0.32f && domHolster.x > 0.14f && domHolsterGrip > 0.50f); // Track C #14
+        bool leftAtHip = (offHolster.y < -0.32f && offHolster.x < -0.14f && offHolsterGrip > 0.50f); // Track C #14
+        bool leftAtBootSheath = (offHolster.y < -0.60f && offHolster.x >= -0.25f && offHolster.x <= 0.0f && offHolsterGrip > 0.50f); // Track C #14
+        bool rightAtBootSheath = (domHolster.y < -0.60f && domHolster.x >= -0.25f && domHolster.x <= 0.0f && domHolsterGrip > 0.50f); // Track C #14
+        bool rightAtAnkle = (domHolster.y < -0.65f && domHolsterGrip > 0.50f); // Track C #14
+        bool leftAtAnkle = (offHolster.y < -0.65f && offHolsterGrip > 0.50f); // Track C #14
 
         if (rightOverShoulder) {
             s_lastHolsterTime = now;
@@ -6752,13 +6810,13 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         } else if ((s_isPhysicallyCrouched || s_isDeepProne) && (leftAtBootSheath || rightAtBootSheath)) {
             s_lastHolsterTime = now;
             s_activeWeaponSlot = 3;
-            VR_LOG_INFO("Holster Gesture: CONCEALED SHIV DRAWN FROM BOOT SHEATH (Y: %.2fm)", leftAtBootSheath ? leftLocal.y : rightLocal.y);
+            VR_LOG_INFO("Holster Gesture: CONCEALED SHIV DRAWN FROM BOOT SHEATH (Y: %.2fm)", leftAtBootSheath ? offHolster.y : domHolster.y);
             SendKeyTap('3'); // Equip shiv/knife slot
             if (leftAtBootSheath) vrState.leftHapticPulse = 0.45f; // Leather boot sheath friction click (160 Hz)
             if (rightAtBootSheath) vrState.rightHapticPulse = 0.45f;
         } else if ((s_isPhysicallyCrouched || s_isDeepProne) && (rightAtAnkle || leftAtAnkle)) {
             s_lastHolsterTime = now;
-            VR_LOG_INFO("Holster Gesture: CONTRABAND ANKLE BOOT POUCH accessed (HandY: %.2fm)", rightAtAnkle ? rightLocal.y : leftLocal.y);
+            VR_LOG_INFO("Holster Gesture: CONTRABAND ANKLE BOOT POUCH accessed (HandY: %.2fm)", rightAtAnkle ? domHolster.y : offHolster.y);
             SendKeyTap(VK_TAB); // Cube PDA / contraband manifest
             if (rightAtAnkle) vrState.rightHapticPulse = 0.35f; // Subtle fabric rustle (140 Hz)
             if (leftAtAnkle) vrState.leftHapticPulse = 0.35f;
@@ -6877,3025 +6935,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 vrState.leftHapticPulse = 0.50f; // Bio-restorative soothing haptic wave
             }
 
-#if 0 // Disabled legacy procedural environmental gestures (ADR 0398) to prevent spurious key bursts
-            // Cryo-Pod / Hibernation Canopy Emergency Seal Ejection (Dual Palm Push - ADR 0028)
-            bool bothHandsPushing = (leftLocal.z < -0.22f && rightLocal.z < -0.22f) &&
-                                    (lVel.z < -0.28f && rVel.z < -0.28f) &&
-                                    (vrState.leftController.trigger < 0.30f && vrState.rightController.trigger < 0.30f);
-            if (bothHandsPushing) {
-                s_lastEnvInteractTime = now;
-                VR_LOG_INFO("Environmental Gesture: CRYO-POD / HIBERNATION CANOPY EMERGENCY EJECTION (Lz: %.2f, Rz: %.2f)", lVel.z, rVel.z);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                vrState.leftHapticPulse = 0.80f; // Pneumatic decompression surge
-                vrState.rightHapticPulse = 0.80f;
-            }
-
-            // Cryo-Chamber Defrost Thermal Cycle Override Keypad Punch (ADR 0112)
-            static DWORD s_lastDefrostTapTime = 0;
-            static int s_defrostTapCount = 0;
-            bool handAtDefrostKeypad = ((rightLocal.z > -0.38f && rightLocal.z < -0.15f && rightLocal.y > -0.15f && rightLocal.y < 0.20f && fabsf(rightLocal.x) < 0.22f && vrState.rightController.trigger < 0.20f && vrState.rightController.grip < 0.35f) ||
-                                        (leftLocal.z > -0.38f && leftLocal.z < -0.15f && leftLocal.y > -0.15f && leftLocal.y < 0.20f && fabsf(leftLocal.x) < 0.22f && vrState.leftController.trigger < 0.20f && vrState.leftController.grip < 0.35f));
-            bool defrostPoke = (rVel.z < -0.32f || lVel.z < -0.32f);
-            if (handAtDefrostKeypad && defrostPoke && (now - s_lastDefrostTapTime > 220)) {
-                s_lastDefrostTapTime = now;
-                s_defrostTapCount++;
-                VR_LOG_INFO("Environmental Gesture: CRYO-CHAMBER DEFROST KEYPAD TAP #%d", s_defrostTapCount);
-                if (rVel.z < -0.32f) vrState.rightHapticPulse = 0.45f; // Membrane click (260 Hz)
-                if (lVel.z < -0.32f) vrState.leftHapticPulse = 0.45f;
-                if (s_defrostTapCount >= 3) {
-                    s_defrostTapCount = 0;
-                    VR_LOG_INFO("Environmental Gesture: CRYO DEFROST CYCLE INITIATED / THERMAL BYPASS CONFIRMED");
-                    SendKeyTap('E');
-                    SendKeyTap(VK_RETURN);
-                    SendKeyTap('Q');
-                    vrState.rightHapticPulse = 0.70f; // Confirmation chime (180 Hz)
-                    vrState.leftHapticPulse = 0.70f;
-                }
-            }
-
-            // Ventilation Duct Screw Fastener Unthreading (ADR 0036)
-            bool rightAtVentCorner = (rightLocal.z > -0.45f && rightLocal.z < -0.20f) &&
-                                     (fabsf(rightLocal.x) > 0.12f) &&
-                                     (vrState.rightController.grip > 0.45f) &&
-                                     (fabsf(rVel.x) > 0.45f || fabsf(rVel.y) > 0.45f);
-            if (rightAtVentCorner) {
-                s_lastEnvInteractTime = now;
-                VR_LOG_INFO("Environmental Gesture: VENT FASTENER UNTHREADING RATCHET (Z: %.2fm, Vx: %.2f)", rightLocal.z, rVel.x);
-                SendKeyTap('E');
-                vrState.rightHapticPulse = 0.45f; // Mechanical ratchet tooth click (160 Hz)
-            }
-
-            // Tactical Circuit Breaker Sabotage & Power Box Lever (ADR 0043)
-            bool rightAtBreakerBox = (rightLocal.z > -0.45f && rightLocal.z < -0.20f) && (vrState.rightController.grip > 0.50f) && (rVel.y < -0.40f);
-            bool leftAtBreakerBox = (leftLocal.z > -0.45f && leftLocal.z < -0.20f) && (vrState.leftController.grip > 0.50f) && (lVel.y < -0.40f);
-            if ((rightAtBreakerBox || leftAtBreakerBox) && (now - s_lastEnvInteractTime > 800)) {
-                s_lastEnvInteractTime = now;
-                VR_LOG_INFO("Environmental Gesture: CIRCUIT BREAKER SABOTAGE / POWER CUT executed (Vy: %.2f)", rightAtBreakerBox ? rVel.y : lVel.y);
-                SendKeyTap('E');
-                if (rightAtBreakerBox) vrState.rightHapticPulse = 0.80f; // Heavy mechanical contactor snap (140 Hz)
-                if (leftAtBreakerBox) vrState.leftHapticPulse = 0.80f;
-            }
-
-            // Manual Bulkhead Handwheel Spindle Cranking (ADR 0044)
-            static DWORD s_lastWheelCrankTime = 0;
-            bool rightAtWheel = (rightLocal.z > -0.45f && rightLocal.z < -0.22f) && (vrState.rightController.grip > 0.50f);
-            float wheelTangentialSpeed = sqrtf(rVel.x * rVel.x + rVel.y * rVel.y);
-            if (rightAtWheel && wheelTangentialSpeed > 0.50f && (now - s_lastWheelCrankTime > 250)) {
-                s_lastWheelCrankTime = now;
-                VR_LOG_INFO("Environmental Gesture: BULKHEAD HANDWHEEL CRANKING (Speed: %.2f m/s)", wheelTangentialSpeed);
-                SendKeyTap('E');
-                vrState.rightHapticPulse = 0.45f; // Hydraulic dogging ratchet click (160 Hz)
-            }
-
-            // Bio-Containment Decontamination Airlock Lever (ADR 0064)
-            bool rightAtDeconLever = (rightLocal.z > -0.42f && rightLocal.z < -0.18f) &&
-                                     (rightLocal.y > 0.05f && rightLocal.y < 0.35f) &&
-                                     (vrState.rightController.grip > 0.50f) &&
-                                     (rVel.y < -0.60f);
-            if (rightAtDeconLever && (now - s_lastEnvInteractTime > 800)) {
-                s_lastEnvInteractTime = now;
-                VR_LOG_INFO("Environmental Gesture: BIO-CONTAINMENT DECONTAMINATION LEVER PULLED (Ry: %.2f)", rVel.y);
-                SendKeyTap('E');
-                vrState.rightHapticPulse = 0.80f; // Pressurized decontamination air blast whoosh (140 Hz)
-            }
-
-            // Atmospheric Decompression Blast Shield Overhead Pull (ADR 0046)
-            bool bothHandsOverhead = (leftLocal.y > 0.25f && rightLocal.y > 0.25f);
-            bool bothGrippingShield = (vrState.leftController.grip > 0.50f && vrState.rightController.grip > 0.50f);
-            bool bothPullingShieldDown = (lVel.y < -0.50f && rVel.y < -0.50f);
-            if (bothHandsOverhead && bothGrippingShield && bothPullingShieldDown && (now - s_lastEnvInteractTime > 800)) {
-                s_lastEnvInteractTime = now;
-                VR_LOG_INFO("Environmental Gesture: EMERGENCY BLAST SHIELD LOWERED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
-                SendKeyTap('E');
-                vrState.leftHapticPulse = 0.95f; // Heavy bulkhead slam impact (120 Hz)
-                vrState.rightHapticPulse = 0.95f;
-            }
-
-            // Sub-Level Mining Cart Handbrake & Throttle (ADR 0048)
-            static DWORD s_lastCartRumbleTime = 0;
-            bool rightAtCartLever = (rightLocal.z > -0.35f && rightLocal.z < -0.15f) && (vrState.rightController.grip > 0.50f);
-            if (rightAtCartLever) {
-                if (rVel.z < -0.35f) {
-                    SendKey('W', true); // Open cart throttle
-                    SendKey('S', false);
-                } else if (rVel.z > 0.35f) {
-                    SendKey('S', true); // Friction handbrake
-                    SendKey('W', false);
-                }
-                // Continuous rail shudder haptics
-                if (now - s_lastCartRumbleTime > 180) {
-                    s_lastCartRumbleTime = now;
-                    vrState.rightHapticPulse = 0.40f; // Steel wheel rail shudder (60 Hz)
-                }
-            }
-
-            // Heavy Mech Cockpit Canopy Slam (ADR 0049)
-            bool bothOverheadMech = (leftLocal.y > 0.20f && rightLocal.y > 0.20f) &&
-                                    (vrState.leftController.grip > 0.50f && vrState.rightController.grip > 0.50f) &&
-                                    (lVel.y < -0.45f && rVel.y < -0.45f);
-            if (bothOverheadMech && (now - s_lastEnvInteractTime > 800)) {
-                s_lastEnvInteractTime = now;
-                VR_LOG_INFO("Environmental Gesture: MECH COCKPIT CANOPY SLAMMED & SEALED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
-                SendKeyTap('E');
-                vrState.leftHapticPulse = 0.85f; // Pneumatic hermetic lock surge (120 Hz)
-                vrState.rightHapticPulse = 0.85f;
-            }
-
-            // Cryo-Pod Cryo-Glass Condensation Wipe & Frost Scraping (ADR 0051)
-            static DWORD s_lastGlassWipeTime = 0;
-            bool rightNearGlass = (rightLocal.z > -0.40f && rightLocal.z < -0.15f) &&
-                                  (rightLocal.y > -0.20f && rightLocal.y < 0.25f) &&
-                                  (vrState.rightController.grip < 0.60f);
-            float rightWipeSpeed = sqrtf(rVel.x * rVel.x + rVel.y * rVel.y);
-            if (rightNearGlass && rightWipeSpeed > 0.40f && (now - s_lastGlassWipeTime > 160)) {
-                s_lastGlassWipeTime = now;
-                VR_LOG_INFO("Environmental Gesture: CRYO-GLASS CONDENSATION WIPE / FROST SCRAPE (Speed: %.2f m/s)", rightWipeSpeed);
-                SendKeyTap('E');
-                vrState.rightHapticPulse = 0.35f; // Squeaking glass friction micro-haptic (240 Hz)
-            }
-
-            // Subterranean High-Pressure Steam Pipe Wheel Valve Release (ADR 0053)
-            static DWORD s_lastSteamValveTurnTime = 0;
-            static int s_steamValveRotations = 0;
-            bool rightAtSteamValve = (rightLocal.z > -0.42f && rightLocal.z < -0.18f) &&
-                                     (rightLocal.y > -0.10f && rightLocal.y < 0.30f) &&
-                                     (vrState.rightController.grip > 0.55f);
-            float steamValveSpeed = sqrtf(rVel.x * rVel.x + rVel.y * rVel.y);
-            if (rightAtSteamValve && steamValveSpeed > 0.45f && (now - s_lastSteamValveTurnTime > 220)) {
-                s_lastSteamValveTurnTime = now;
-                s_steamValveRotations++;
-                VR_LOG_INFO("Environmental Gesture: STEAM PIPE WHEEL VALVE ROTATION #%d (Speed: %.2f m/s)", s_steamValveRotations, steamValveSpeed);
-                vrState.rightHapticPulse = 0.50f; // Metal valve friction tick (160 Hz)
-                if (s_steamValveRotations >= 3) {
-                    s_steamValveRotations = 0;
-                    VR_LOG_INFO("Environmental Gesture: HIGH-PRESSURE STEAM VALVE POPPED / SCALDING DIVERSION RELEASED");
-                    SendKeyTap('E');
-                    SendKeyTap('Q'); // Thermal diversion signal
-                    vrState.rightHapticPulse = 0.70f; // Sustained pneumatic steam vibration (110 Hz)
-                }
-            }
-
-            // Inmate Pit Brawl Stool / Chair Blunt Weapon Wrench (ADR 0054)
-            static DWORD s_lastStoolWrenchTime = 0;
-            bool bothLowAtStool = (leftLocal.y > -0.70f && leftLocal.y < -0.30f) &&
-                                  (rightLocal.y > -0.70f && rightLocal.y < -0.30f) &&
-                                  (leftLocal.z > -0.45f && leftLocal.z < -0.15f) &&
-                                  (rightLocal.z > -0.45f && rightLocal.z < -0.15f) &&
-                                  (vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f);
-            bool bothYankingUp = (lVel.y > 1.05f && rVel.y > 1.05f);
-            if (bothLowAtStool && bothYankingUp && (now - s_lastStoolWrenchTime > 1000)) {
-                s_lastStoolWrenchTime = now;
-                VR_LOG_INFO("Environmental Gesture: INMATE BRAWL STOOL WRENCHED FROM FLOOR (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
-                SendKeyTap('E');
-                SendKeyTap('1'); // Equip improvised heavy melee slot
-                vrState.leftHapticPulse = 0.85f; // Shearing bolt crack (200 Hz)
-                vrState.rightHapticPulse = 0.85f;
-            }
-
-            // Heavy Automated Cargo Crane Lever Console Steering (ADR 0057)
-            static DWORD s_lastCraneRumbleTime = 0;
-            bool rightAtCraneConsole = (rightLocal.z > -0.40f && rightLocal.z < -0.15f) &&
-                                       (rightLocal.y > -0.35f && rightLocal.y < -0.05f) &&
-                                       (vrState.rightController.grip > 0.50f);
-            if (rightAtCraneConsole) {
-                if (rVel.z < -0.30f) {
-                    SendKey('W', true); // Boom forward
-                    SendKey('S', false);
-                } else if (rVel.z > 0.30f) {
-                    SendKey('S', true); // Boom backward
-                    SendKey('W', false);
-                }
-                if (rVel.x < -0.30f) {
-                    SendKey('A', true); // Trolley left
-                    SendKey('D', false);
-                } else if (rVel.x > 0.30f) {
-                    SendKey('D', true); // Trolley right
-                    SendKey('A', false);
-                }
-                if (now - s_lastCraneRumbleTime > 200) {
-                    s_lastCraneRumbleTime = now;
-                    vrState.rightHapticPulse = 0.35f; // Heavy hydraulic motor rumble (50 Hz)
-                }
-            }
-
-            // Inmate Mess Hall Tray Equip (ADR 0060)
-            static DWORD s_lastTrayEquipTime = 0;
-            bool leftNearMessTable = (leftLocal.y > -0.55f && leftLocal.y < -0.25f) &&
-                                     (leftLocal.z > -0.40f && leftLocal.z < -0.15f) &&
-                                     (vrState.leftController.grip > 0.50f);
-            if (leftNearMessTable && (now - s_lastTrayEquipTime > 1000)) {
-                s_lastTrayEquipTime = now;
-                VR_LOG_INFO("Environmental Gesture: INMATE MESS TRAY EQUIPPED FROM TABLE (Y: %.2fm)", leftLocal.y);
-                SendKeyTap('E');
-                SendKeyTap('1'); // Equip improvised defensive slot
-                vrState.leftHapticPulse = 0.40f; // Stamped sheet metal clang (180 Hz)
-            }
-
-            // Hydraulic Pressure Blast Valve Steam Jet Venting (ADR 0061)
-            static DWORD s_lastSteamJetTime = 0;
-            bool rightAtBlastValve = (rightLocal.z > -0.40f && rightLocal.z < -0.18f) &&
-                                     (rightLocal.y > -0.20f && rightLocal.y < 0.20f);
-            bool blastStrike = (rVel.z < -1.10f || rVel.y < -0.80f);
-            if (rightAtBlastValve && blastStrike && (now - s_lastSteamJetTime > 1200)) {
-                s_lastSteamJetTime = now;
-                VR_LOG_INFO("Environmental Gesture: HYDRAULIC PRESSURE BLAST VALVE POPPED / STEAM JET RELEASED");
-                SendKeyTap('E');
-                SendKeyTap('Q'); // Thermal diversion signal
-                vrState.rightHapticPulse = 0.75f; // Pressurized jet stream vibration (130 Hz)
-            }
-
-            // Overhead Vent Hatch Dual-Palm Upward Shove (ADR 0067)
-            bool hmdLookingUp = (s_lastHmdPitch > 0.45f);
-            bool bothOverheadHatch = (leftLocal.y > 0.25f && rightLocal.y > 0.25f) &&
-                                     (leftLocal.z > -0.25f && leftLocal.z < 0.10f && rightLocal.z > -0.25f && rightLocal.z < 0.10f);
-            bool bothPalmsUp = (vrState.leftController.grip < 0.60f && vrState.rightController.grip < 0.60f);
-            bool bothShovingUp = (lVel.y > 0.85f && rVel.y > 0.85f);
-            if (hmdLookingUp && bothOverheadHatch && bothPalmsUp && bothShovingUp && (now - s_lastEnvInteractTime > 800)) {
-                s_lastEnvInteractTime = now;
-                VR_LOG_INFO("Environmental Gesture: OVERHEAD VENT HATCH SHOVED OPEN (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                vrState.leftHapticPulse = 0.80f; // Spring-loaded latch pop & metal resonance (160 Hz)
-                vrState.rightHapticPulse = 0.80f;
-            }
-
-            // Cryo-Chamber Emergency Oxygen Mask Quick-Don Stance (ADR 0069)
-            static DWORD s_maskHoldStartTime = 0;
-            static DWORD s_lastMaskEquipTime = 0;
-            bool handAtMouth = (leftLocal.z > -0.20f && leftLocal.z < -0.05f) &&
-                               (leftLocal.y > -0.18f && leftLocal.y < 0.06f) &&
-                               (fabsf(leftLocal.x) < 0.12f);
-            bool grippingMask = (vrState.leftController.grip > 0.50f);
-            if (handAtMouth && grippingMask) {
-                if (s_maskHoldStartTime == 0) {
-                    s_maskHoldStartTime = now;
-                } else if ((now - s_maskHoldStartTime >= 150) && (now - s_lastMaskEquipTime > 1500)) {
-                    s_lastMaskEquipTime = now;
-                    VR_LOG_INFO("Environmental Gear: EMERGENCY REBREATHER / OXYGEN MASK CLAMPED TO FACE (Y: %.2fm)", leftLocal.y);
-                    SendKeyTap('E'); // Seal environmental rebreather
-                    vrState.leftHapticPulse = 0.65f; // Pneumatic seal whoosh & inhalation pulse (110 Hz)
-                }
-            } else {
-                s_maskHoldStartTime = 0;
-            }
-
-            // Automated Turret Manual Traversal Handwheel Slew (ADR 0070)
-            static DWORD s_lastTurretGearRumble = 0;
-            static bool s_turretSteeringActive = false;
-            bool bothAtTurretStation = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && rightLocal.z > -0.42f && rightLocal.z < -0.16f) &&
-                                       (leftLocal.y > -0.30f && leftLocal.y < 0.10f && rightLocal.y > -0.30f && rightLocal.y < 0.10f);
-            bool dualGrippingTurret = (vrState.leftController.grip > 0.55f && vrState.rightController.grip > 0.55f);
-            float spadeGripDist = fabsf(leftLocal.x - rightLocal.x);
-            bool validSpadeWidth = (spadeGripDist >= 0.25f && spadeGripDist <= 0.48f);
-
-            if (bothAtTurretStation && dualGrippingTurret && validSpadeWidth) {
-                s_turretSteeringActive = true;
-                float dZ = leftLocal.z - rightLocal.z;
-                float avgY = 0.5f * (leftLocal.y + rightLocal.y);
-
-                // Azimuth / Yaw Slew (Left/Right)
-                if (dZ > 0.08f) {
-                    SendKey('D', true);
-                    SendKey('A', false);
-                } else if (dZ < -0.08f) {
-                    SendKey('A', true);
-                    SendKey('D', false);
-                } else {
-                    SendKey('A', false);
-                    SendKey('D', false);
-                }
-
-                // Elevation / Pitch Slew (Up/Down)
-                if (avgY > 0.05f) {
-                    SendKey(VK_UP, true);
-                    SendKey(VK_DOWN, false);
-                } else if (avgY < -0.18f) {
-                    SendKey(VK_DOWN, true);
-                    SendKey(VK_UP, false);
-                } else {
-                    SendKey(VK_UP, false);
-                    SendKey(VK_DOWN, false);
-                }
-
-                // Turret Hydraulic Gear Train Haptics
-                bool isMovingTurret = (fabsf(dZ) > 0.08f) || (avgY > 0.05f || avgY < -0.18f);
-                if (isMovingTurret && (now - s_lastTurretGearRumble > 160)) {
-                    s_lastTurretGearRumble = now;
-                    vrState.leftHapticPulse = 0.45f; // Deep gear train meshing rumble (55 Hz)
-                    vrState.rightHapticPulse = 0.45f;
-                }
-            } else if (s_turretSteeringActive) {
-                s_turretSteeringActive = false;
-                SendKey('A', false);
-                SendKey('D', false);
-                SendKey(VK_UP, false);
-                SendKey(VK_DOWN, false);
-            }
-
-            // Cargo Bay Container Hydraulic Lock Latch Lever (ADR 0072)
-            static DWORD s_lastContainerLatchTime = 0;
-            bool rightAtContainer = (rightLocal.z > -0.42f && rightLocal.z < -0.16f) &&
-                                    (rightLocal.y > -0.25f && rightLocal.y < 0.15f) &&
-                                    (vrState.rightController.grip > 0.50f);
-            bool containerLeverThrow = (rVel.y > 0.70f || fabsf(rVel.x) > 0.70f);
-            if (rightAtContainer && containerLeverThrow && (now - s_lastContainerLatchTime > 900)) {
-                s_lastContainerLatchTime = now;
-                VR_LOG_INFO("Environmental Gesture: CARGO CONTAINER HYDRAULIC LOCK UNLATCHED (Vy: %.2f, Vx: %.2f)", rVel.y, rVel.x);
-                SendKeyTap('E');
-                vrState.rightHapticPulse = 0.85f; // Heavy hydraulic seal snap & mechanical clunk (100 Hz)
-            }
-
-            // Subterranean Cryo-Nitrogen Coolant Valve Venting Diversion (ADR 0074)
-            static DWORD s_lastCryoCoolantVentTime = 0;
-            bool rightAtCryoValve = (rightLocal.z > -0.42f && rightLocal.z < -0.16f) &&
-                                    (rightLocal.y > -0.20f && rightLocal.y < 0.25f) &&
-                                    (vrState.rightController.grip > 0.50f);
-            bool cryoStrike = (rSpeed > 1.05f || fabsf(rVel.x) > 0.80f);
-            if (rightAtCryoValve && cryoStrike && (now - s_lastCryoCoolantVentTime > 1200)) {
-                s_lastCryoCoolantVentTime = now;
-                VR_LOG_INFO("Environmental Gesture: CRYO-NITROGEN COOLANT VALVE POPPED / SUB-ZERO PLUME RELEASED");
-                SendKeyTap('E');
-                SendKeyTap('Q'); // Thermal diversion signal
-                vrState.rightHapticPulse = 0.85f; // Crystalline ice fracture crack (260 Hz)
-            }
-
-            // Subterranean Mining Cart Rail Track Switch Wrench Pull (ADR 0076)
-            static DWORD s_lastTrackSwitchTime = 0;
-            bool rightAtTrackSwitch = (rightLocal.z > -0.42f && rightLocal.z < -0.16f) &&
-                                      (rightLocal.y > -0.55f && rightLocal.y < -0.15f) &&
-                                      (vrState.rightController.grip > 0.50f);
-            bool trackSwitchThrow = (fabsf(rVel.x) > 0.70f);
-            if (rightAtTrackSwitch && trackSwitchThrow && (now - s_lastTrackSwitchTime > 850)) {
-                s_lastTrackSwitchTime = now;
-                VR_LOG_INFO("Environmental Gesture: MINING RAIL TRACK SWITCH WRENCH THROWN (Vx: %.2f)", rVel.x);
-                SendKeyTap('E');
-                vrState.rightHapticPulse = 0.85f; // Heavy iron rail clank & ground shudder (70 Hz)
-            }
-
-            // Subterranean Mining Rail Turntable Manual Push Lever (ADR 0108)
-            static DWORD s_lastTurntablePushTime = 0;
-            static int s_turntablePushCount = 0;
-            bool handAtTurntableLever = (rightLocal.z > -0.45f && rightLocal.z < -0.16f) &&
-                                        (rightLocal.y > -0.40f && rightLocal.y < -0.05f) &&
-                                        (vrState.rightController.grip > 0.55f);
-            bool turntableTangentialPush = (fabsf(rVel.x) > 0.50f || fabsf(rVel.z) > 0.50f);
-            if (handAtTurntableLever && turntableTangentialPush && (now - s_lastTurntablePushTime > 250)) {
-                s_lastTurntablePushTime = now;
-                s_turntablePushCount++;
-                VR_LOG_INFO("Environmental Gesture: MINING RAIL TURNTABLE ROTATION STRIDE #%d (Speed: %.2f m/s)", s_turntablePushCount, rSpeed);
-                vrState.rightHapticPulse = 0.65f; // Heavy ball-bearing grinding rumble (55 Hz)
-                if (s_turntablePushCount >= 3) {
-                    s_turntablePushCount = 0;
-                    VR_LOG_INFO("Environmental Gesture: MINING RAIL TURNTABLE LOCKED INTO QUADRANT DETENT");
-                    SendKeyTap('E');
-                    SendKeyTap(VK_SPACE);
-                    SendKeyTap(VK_TAB);
-                    vrState.rightHapticPulse = 0.90f; // Concussive mechanical detent lock (80 Hz)
-                }
-            }
-
-            // Subterranean Mining Rail Track Derailer Wedge Strike (ADR 0120)
-            static DWORD s_lastDerailerStrikeTime = 0;
-            bool leftAtRailWedge = (s_isPhysicallyCrouched || s_isDeepProne) &&
-                                   (leftLocal.z > -0.45f && leftLocal.z < -0.16f && leftLocal.y < -0.45f) &&
-                                   (vrState.leftController.grip > 0.55f);
-            bool rightHammerStrikeDown = (rVel.y < -1.10f);
-            if (leftAtRailWedge && rightHammerStrikeDown && (now - s_lastDerailerStrikeTime > 1800)) {
-                s_lastDerailerStrikeTime = now;
-                VR_LOG_INFO("Environmental Gesture: MINING RAIL DERAILER WEDGE STRUCK & SET (Ry: %.2f m/s)", rVel.y);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                vrState.rightHapticPulse = 0.95f; // Anvil crack shockwave (260 Hz)
-                vrState.leftHapticPulse = 0.60f;  // Rail acoustic ring (85 Hz)
-            }
-
-            // Mining Core Pneumatic Rock Bolter Sinking & Anchor Driver (ADR 0123)
-            static DWORD s_lastRockBolterTime = 0;
-            bool leftHoldingGuideSleeve = (leftLocal.z > -0.45f && leftLocal.z < -0.16f && leftLocal.y > -0.20f && leftLocal.y < 0.25f) &&
-                                          (vrState.leftController.grip > 0.60f);
-            bool rightBolterRamming = (twoHandDist > 0.18f && twoHandDist < 0.40f) &&
-                                      (vrState.rightController.grip > 0.60f && vrState.rightController.trigger > 0.65f) &&
-                                      (rVel.z < -1.05f);
-            if (leftHoldingGuideSleeve && rightBolterRamming && (now - s_lastRockBolterTime > 2000)) {
-                s_lastRockBolterTime = now;
-                VR_LOG_INFO("Environmental Gesture: MINING CORE PNEUMATIC ROCK BOLTER SUNK & LOCKED (Rz: %.2f m/s)", rVel.z);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                vrState.leftHapticPulse = 0.65f;  // High-frequency sleeve rattle (210 Hz)
-                vrState.rightHapticPulse = 0.98f; // Heavy pneumatic percussion impact (55 Hz)
-            }
-
-            // Subterranean Mining Core Pneumatic Breaker Chisel Point Swap (ADR 0130)
-            static DWORD s_lastChiselSwapTime = 0;
-            static DWORD s_collarReleasedTime = 0;
-            bool twoHandAtChiselChuck = (twoHandDist < 0.18f) && (vrState.leftController.grip > 0.60f);
-            bool collarYankBack = (lVel.z > 0.65f);
-            if (twoHandAtChiselChuck && collarYankBack && (now - s_lastChiselSwapTime > 2000)) {
-                if (s_collarReleasedTime == 0) {
-                    s_collarReleasedTime = now;
-                    VR_LOG_INFO("Environmental Gesture: PNEUMATIC CHISEL CHUCK COLLAR RELEASED (Lz: %.2f)", lVel.z);
-                    vrState.leftHapticPulse = 0.60f; // Spring ball-detent release click (180 Hz)
-                }
-            }
-            bool diamondChiselSeatRam = (s_collarReleasedTime > 0 && (now - s_collarReleasedTime < 600) && rVel.z < -0.80f);
-            if (diamondChiselSeatRam && (now - s_lastChiselSwapTime > 2000)) {
-                s_lastChiselSwapTime = now;
-                s_collarReleasedTime = 0;
-                VR_LOG_INFO("Environmental Gesture: HARDENED DIAMOND CHISEL POINT SEATED & LOCKED (Rz: %.2f)", rVel.z);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap('3');
-                vrState.rightHapticPulse = 0.90f; // Hardened alloy chuck lock snap (90 Hz)
-                vrState.leftHapticPulse = 0.70f;
-            }
-
-            // Subterranean Mining Rail Pneumatic Car Tipper Lock Release (ADR 0135)
-            static DWORD s_lastCarTipperTime = 0;
-            bool bothAtTipperPedestal = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && rightLocal.z > -0.42f && rightLocal.z < -0.16f) &&
-                                        (leftLocal.y > -0.55f && leftLocal.y < -0.20f && rightLocal.y > -0.55f && rightLocal.y < -0.20f) &&
-                                        (vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f);
-            bool dualUpwardTipperHoist = (lVel.y > 0.90f && rVel.y > 0.90f);
-            if (bothAtTipperPedestal && dualUpwardTipperHoist && (now - s_lastCarTipperTime > 2000)) {
-                s_lastCarTipperTime = now;
-                VR_LOG_INFO("Environmental Gesture: MINING RAIL CAR TIPPER RELEASED & CHASSIS DUMPED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_RETURN);
-                vrState.leftHapticPulse = 0.95f;  // Pawl release snap & ore dump rumble (50 Hz)
-                vrState.rightHapticPulse = 0.95f;
-            }
-
-            // Dark Athena EVA Airlock Manual Handwheel Decompression Dogging (ADR 0078)
-            static DWORD s_lastAirlockCrankTime = 0;
-            static int s_airlockCrankCount = 0;
-            bool bothAtAirlockWheel = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && rightLocal.z > -0.42f && rightLocal.z < -0.16f) &&
-                                      (leftLocal.y > -0.20f && leftLocal.y < 0.25f && rightLocal.y > -0.20f && rightLocal.y < 0.25f) &&
-                                      (vrState.leftController.grip > 0.50f && vrState.rightController.grip > 0.50f);
-            float dualWheelSpeed = sqrtf(rVel.x * rVel.x + rVel.y * rVel.y);
-            if (bothAtAirlockWheel && dualWheelSpeed > 0.55f && (now - s_lastAirlockCrankTime > 220)) {
-                s_lastAirlockCrankTime = now;
-                s_airlockCrankCount++;
-                VR_LOG_INFO("Environmental Gesture: EVA AIRLOCK HANDWHEEL DOGGING REVOLUTION #%d (Speed: %.2f m/s)", s_airlockCrankCount, dualWheelSpeed);
-                vrState.leftHapticPulse = 0.50f;
-                vrState.rightHapticPulse = 0.50f; // Ratchet tooth click (160 Hz)
-                if (s_airlockCrankCount >= 3) {
-                    s_airlockCrankCount = 0;
-                    VR_LOG_INFO("Environmental Gesture: EVA AIRLOCK BULKHEAD DOGGED SHUT / HERMETIC REPRESSURIZATION TRIGGERED");
-                    SendKeyTap('E');
-                    vrState.leftHapticPulse = 0.85f; // Hermetic clamp thud & seal hiss (100 Hz)
-                    vrState.rightHapticPulse = 0.85f;
-                }
-            }
-
-            // Dark Athena EVA Solar Array Orientation Manual Hand Crank (ADR 0114)
-            static DWORD s_lastSolarArrayCrankTime = 0;
-            static int s_solarArrayCrankCount = 0;
-            bool bothAtSolarTruss = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && rightLocal.z > -0.42f && rightLocal.z < -0.16f) &&
-                                    (leftLocal.y > -0.15f && leftLocal.y < 0.25f && rightLocal.y > -0.15f && rightLocal.y < 0.25f) &&
-                                    (vrState.leftController.grip > 0.50f && vrState.rightController.grip > 0.50f);
-            float solarCrankSpeed = sqrtf(rVel.x * rVel.x + rVel.y * rVel.y);
-            if (bothAtSolarTruss && solarCrankSpeed > 0.50f && (now - s_lastSolarArrayCrankTime > 240)) {
-                s_lastSolarArrayCrankTime = now;
-                s_solarArrayCrankCount++;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR ARRAY SPINDLE REVOLUTION #%d (Speed: %.2f m/s)", s_solarArrayCrankCount, solarCrankSpeed);
-                vrState.leftHapticPulse = 0.50f;
-                vrState.rightHapticPulse = 0.50f; // Planetary gear teeth click (150 Hz)
-                if (s_solarArrayCrankCount >= 3) {
-                    s_solarArrayCrankCount = 0;
-                    VR_LOG_INFO("Environmental Gesture: SOLAR ARRAY ORIENTATION ACHIEVED / AUXILIARY POWER RESTORED");
-                    SendKeyTap('E');
-                    SendKeyTap(VK_RETURN);
-                    SendKeyTap('W');
-                    vrState.leftHapticPulse = 0.85f;  // Electromagnetic solar collector lock hum (90 Hz)
-                    vrState.rightHapticPulse = 0.85f;
-                }
-            }
-
-            // Atmospheric Pressure Equalization Hatch Bleed Petcock Valve (ADR 0079)
-            static DWORD s_lastPetcockTwistTime = 0;
-            bool rightAtPetcock = (rightLocal.z > -0.40f && rightLocal.z < -0.15f) &&
-                                  (rightLocal.y > -0.10f && rightLocal.y < 0.20f) &&
-                                  (vrState.rightController.grip > 0.50f);
-            bool petcockTwist = (fabsf(rVel.x) > 0.45f || fabsf(rVel.y) > 0.45f);
-            if (rightAtPetcock && petcockTwist && (now - s_lastPetcockTwistTime > 900)) {
-                s_lastPetcockTwistTime = now;
-                VR_LOG_INFO("Environmental Gesture: ATMOSPHERIC BLEED PETCOCK VALVE TWISTED (Vx: %.2f)", rVel.x);
-                SendKeyTap('E');
-                vrState.rightHapticPulse = 0.55f; // Piercing pressure hiss & needle valve rattle (220 Hz)
-            }
-
-            // Cryo-Stasis Chamber Manual Coolant Bleed Petcock Turn (ADR 0127)
-            static DWORD s_lastCryoBleedTime = 0;
-            bool handAtCryoBleedPetcock = (rightLocal.z > -0.40f && rightLocal.z < -0.15f && rightLocal.y > -0.30f && rightLocal.y < 0.10f && vrState.rightController.grip > 0.55f);
-            bool cryoBleedTurn = (fabsf(rVel.x) > 0.55f || fabsf(rVel.y) > 0.55f);
-            if (handAtCryoBleedPetcock && cryoBleedTurn && (now - s_lastCryoBleedTime > 1500)) {
-                s_lastCryoBleedTime = now;
-                VR_LOG_INFO("Environmental Gesture: CRYO-STASIS COOLANT BLEED PETCOCK OPENED (Vx: %.2f)", rVel.x);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.75f; // Cryo vapor jet expansion rumble (140 Hz)
-                vrState.leftHapticPulse = 0.35f;
-            }
-
-            // Cryo-Chamber Defrost Temperature Sensor Probe Insertion (ADR 0138)
-            static DWORD s_lastThermalProbeTime = 0;
-            static DWORD s_thermalProbeStartTime = 0;
-            bool handAtThermalPort = (rightLocal.z > -0.38f && rightLocal.z < -0.14f && rightLocal.y > -0.15f && rightLocal.y < 0.20f && vrState.rightController.grip > 0.55f);
-            bool probeCalibratedStill = (rSpeed < 0.12f);
-            if (handAtThermalPort && probeCalibratedStill && (now - s_lastThermalProbeTime > 2000)) {
-                if (s_thermalProbeStartTime == 0) s_thermalProbeStartTime = now;
-                DWORD dwell = now - s_thermalProbeStartTime;
-                float progress = (dwell < 400) ? (dwell / 400.0f) : 1.0f;
-                vrState.rightHapticPulse = 0.30f + 0.40f * progress; // Ascending thermal equilibrium buzz
-                if (dwell >= 400) {
-                    s_thermalProbeStartTime = 0;
-                    s_lastThermalProbeTime = now;
-                    VR_LOG_INFO("Environmental Gesture: CRYO DEFROST THERMAL CALIBRATION COMPLETE");
-                    SendKeyTap('E');
-                    SendKeyTap(VK_TAB);
-                    SendKeyTap('Q');
-                    vrState.rightHapticPulse = 0.80f; // Defrost authorization chime (280 Hz)
-                }
-            } else {
-                s_thermalProbeStartTime = 0;
-            }
-
-            // Security Turret Optical Sensor Spray Paint / Smear Blind (ADR 0081)
-            static DWORD s_lastTurretBlindTime = 0;
-            bool handAtTurretSensor = ((rightLocal.z > -0.35f && rightLocal.z < -0.15f && rightLocal.y > 0.10f && rightLocal.y < 0.40f && vrState.rightController.grip > 0.50f) ||
-                                       (leftLocal.z > -0.35f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f && vrState.leftController.grip > 0.50f));
-            bool sensorSmearSweep = (fabsf(rVel.x) > 0.50f || fabsf(lVel.x) > 0.50f);
-            if (handAtTurretSensor && sensorSmearSweep && (now - s_lastTurretBlindTime > 1200)) {
-                s_lastTurretBlindTime = now;
-                VR_LOG_INFO("Environmental Stealth: TURRET OPTICAL SENSOR DOME SPRAY-PAINTED / COATED");
-                SendKeyTap('E');
-                SendKeyTap('Q'); // Optical suppression signal
-                if (vrState.rightController.grip > 0.50f) vrState.rightHapticPulse = 0.50f; // Aerosol propellant hiss (160 Hz)
-                if (vrState.leftController.grip > 0.50f) vrState.leftHapticPulse = 0.50f;
-            }
-
-            // Subterranean Ventilation Axial Fan Blade Jamming Bar (ADR 0084)
-            static DWORD s_lastFanJamTime = 0;
-            bool bothAtFanRotor = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && rightLocal.z > -0.42f && rightLocal.z < -0.16f) &&
-                                  (leftLocal.y > -0.15f && leftLocal.y < 0.25f && rightLocal.y > -0.15f && rightLocal.y < 0.25f) &&
-                                  (vrState.leftController.grip > 0.50f && vrState.rightController.grip > 0.50f);
-            bool fanJamThrust = (lVel.z < -1.10f || rVel.z < -1.10f);
-            if (bothAtFanRotor && fanJamThrust && (now - s_lastFanJamTime > 1200)) {
-                s_lastFanJamTime = now;
-                VR_LOG_INFO("Environmental Gesture: VENTILATION AXIAL FAN BLADES JAMMED (Lz: %.2f, Rz: %.2f)", lVel.z, rVel.z);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                vrState.leftHapticPulse = 0.95f; // Shearing metal turbine arrest impact (120 Hz)
-                vrState.rightHapticPulse = 0.95f;
-            }
-
-            // Atmospheric Hull Rupture Emergency Foam Canister Deployment (ADR 0088)
-            static DWORD s_lastFoamCanisterDeployTime = 0;
-            bool bothAtBreach = (leftLocal.z > -0.44f && leftLocal.z < -0.16f && rightLocal.z > -0.44f && rightLocal.z < -0.16f) &&
-                                (leftLocal.y > -0.30f && leftLocal.y < 0.20f && rightLocal.y > -0.30f && rightLocal.y < 0.20f);
-            bool bothTriggersFoam = (vrState.leftController.trigger > 0.60f && vrState.rightController.trigger > 0.60f);
-            bool foamSeamSweep = (fabsf(lVel.x) > 0.30f || fabsf(rVel.x) > 0.30f || fabsf(lVel.y) > 0.30f || fabsf(rVel.y) > 0.30f);
-            if (bothAtBreach && bothTriggersFoam && foamSeamSweep && (now - s_lastFoamCanisterDeployTime > 2000)) {
-                s_lastFoamCanisterDeployTime = now;
-                VR_LOG_INFO("Environmental Gesture: HULL RUPTURE EMERGENCY FOAM CANISTER EXTRUDED (Vx: %.2f)", rVel.x);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                vrState.leftHapticPulse = 0.60f; // Acoustic foam jet extrusion (120 Hz)
-                vrState.rightHapticPulse = 0.75f; // Rapid cure polymerization pop (200 Hz)
-            }
-
-            // Subterranean Hydroponics Plant Specimen Harvesting (ADR 0093)
-            static DWORD s_lastHarvestTime = 0;
-            bool handAtHydroponicTray = ((rightLocal.z > -0.42f && rightLocal.z < -0.14f && rightLocal.y > -0.55f && rightLocal.y < -0.15f && vrState.rightController.grip > 0.45f && vrState.rightController.grip < 0.80f) ||
-                                         (leftLocal.z > -0.42f && leftLocal.z < -0.14f && leftLocal.y > -0.55f && leftLocal.y < -0.15f && vrState.leftController.grip > 0.45f && vrState.leftController.grip < 0.80f));
-            bool upwardPluck = (rVel.y > 0.40f || lVel.y > 0.40f);
-            if (handAtHydroponicTray && upwardPluck && (now - s_lastHarvestTime > 850)) {
-                s_lastHarvestTime = now;
-                VR_LOG_INFO("Environmental Gesture: HYDROPONIC SPECIMEN HARVESTED (Vy: %.2f)", (rVel.y > lVel.y) ? rVel.y : lVel.y);
-                SendKeyTap('E');
-                if (rVel.y > 0.40f) vrState.rightHapticPulse = 0.45f; // Botanical snap click (160 Hz)
-                if (lVel.y > 0.40f) vrState.leftHapticPulse = 0.45f;
-            }
-
-            // Dark Athena Drone Charging Bay Station Disconnect Jerk (ADR 0094)
-            static DWORD s_lastDroneBayJerkTime = 0;
-            bool handInDroneAlcove = ((rightLocal.z > -0.44f && rightLocal.z < -0.16f && rightLocal.y > 0.05f && rightLocal.y < 0.38f && vrState.rightController.grip > 0.60f) ||
-                                      (leftLocal.z > -0.44f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.38f && vrState.leftController.grip > 0.60f));
-            bool rearwardCableYank = (rVel.z > 0.85f || lVel.z > 0.85f);
-            if (handInDroneAlcove && rearwardCableYank && (now - s_lastDroneBayJerkTime > 1500)) {
-                s_lastDroneBayJerkTime = now;
-                VR_LOG_INFO("Environmental Gesture: DRONE RECHARGE UMBILICAL SEVERED (Vz: %.2f)", (rVel.z > lVel.z) ? rVel.z : lVel.z);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                if (rVel.z > 0.85f) vrState.rightHapticPulse = 0.90f; // Inductive arc shudder (240 Hz)
-                if (lVel.z > 0.85f) vrState.leftHapticPulse = 0.90f;
-            }
-
-            // Cybernetic Drone Power Shunt Manual Lever Yank (ADR 0121)
-            static DWORD s_lastDroneShuntTime = 0;
-            bool handAtDroneShunt = ((rightLocal.z > -0.42f && rightLocal.z < -0.14f && rightLocal.y > -0.15f && rightLocal.y < 0.20f && vrState.rightController.grip > 0.50f) ||
-                                     (leftLocal.z > -0.42f && leftLocal.z < -0.14f && leftLocal.y > -0.15f && leftLocal.y < 0.20f && vrState.leftController.grip > 0.50f));
-            bool shuntYankDown = (rVel.y < -0.60f || lVel.y < -0.60f);
-            if (handAtDroneShunt && shuntYankDown && (now - s_lastDroneShuntTime > 2000)) {
-                s_lastDroneShuntTime = now;
-                VR_LOG_INFO("Environmental Gesture: DRONE POWER SHUNT BREAKER YANKED DOWNWARD (Vy: %.2f)", (rVel.y < lVel.y) ? rVel.y : lVel.y);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap('Q');
-                if (rVel.y < -0.60f) vrState.rightHapticPulse = 0.90f; // Inductive shunt discharge shudder (280 Hz)
-                if (lVel.y < -0.60f) vrState.leftHapticPulse = 0.90f;
-            }
-
-            // Subterranean Cryo-Stasis Chamber Biometric Bypass Override (ADR 0097)
-            static DWORD s_lastCryoOverrideTime = 0;
-            bool leftAtUpperTerminal = (leftLocal.y > 0.08f && leftLocal.y < 0.32f) &&
-                                       (leftLocal.z > -0.38f && leftLocal.z < -0.14f) &&
-                                       (vrState.leftController.grip > 0.50f);
-            bool rightAtLowerBreaker = (rightLocal.y > -0.28f && rightLocal.y < 0.04f) &&
-                                       (rightLocal.z > -0.38f && rightLocal.z < -0.14f) &&
-                                       (vrState.rightController.grip > 0.50f);
-            bool breakerYankDown = (rVel.y < -0.50f) && (lSpeed < 0.25f);
-            if (leftAtUpperTerminal && rightAtLowerBreaker && breakerYankDown && (now - s_lastCryoOverrideTime > 2000)) {
-                s_lastCryoOverrideTime = now;
-                VR_LOG_INFO("Environmental Gesture: CRYO-STASIS BIOMETRIC BYPASS OVERRIDE (Ry: %.2f, Ly: %.2f)", rVel.y, leftLocal.y);
-                SendKeyTap('E');
-                SendKeyTap(VK_RETURN);
-                vrState.leftHapticPulse = 0.50f; // Electronic card read chirp (220 Hz)
-                vrState.rightHapticPulse = 0.80f; // Heavy magnetic breaker disconnect thud (120 Hz)
-            }
-
-            // Dark Athena Fusion Reactor Core Rod Manual Insertion (ADR 0100 - Century Milestone!)
-            static DWORD s_lastReactorRodInsertTime = 0;
-            bool bothGrippingRod = (twoHandDist < 0.32f) && (vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f);
-            bool rodElevated = (leftLocal.y > 0.15f && rightLocal.y > 0.15f);
-            bool rodPlunge = (rVel.z < -1.15f && lVel.z < -1.15f && rVel.y < -0.80f && lVel.y < -0.80f);
-            if (bothGrippingRod && rodElevated && rodPlunge && (now - s_lastReactorRodInsertTime > 3000)) {
-                s_lastReactorRodInsertTime = now;
-                VR_LOG_INFO("Environmental Gesture: FUSION REACTOR CORE ROD MANUAL INSERTION (Lz: %.2f, Rz: %.2f, Ly: %.2f, Ry: %.2f)", lVel.z, rVel.z, lVel.y, rVel.y);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_RETURN);
-                vrState.leftHapticPulse = 0.98f; // Catastrophic magnetic confinement shockwave (45 Hz)
-                vrState.rightHapticPulse = 0.98f;
-            }
-
-            // Subterranean Hydroponics Nutrient Dispenser Pressure Plunger (ADR 0105)
-            static DWORD s_lastPlungerStrokeTime = 0;
-            static int s_plungerStrokeCount = 0;
-            bool handAtPlungerPump = ((rightLocal.z > -0.38f && rightLocal.z < -0.14f && rightLocal.y > -0.15f && rightLocal.y < 0.25f && vrState.rightController.grip > 0.50f) ||
-                                      (leftLocal.z > -0.38f && leftLocal.z < -0.14f && leftLocal.y > -0.15f && leftLocal.y < 0.25f && vrState.leftController.grip > 0.50f));
-            bool plungerPlunge = (rVel.y < -0.45f || lVel.y < -0.45f);
-            if (handAtPlungerPump && plungerPlunge && (now - s_lastPlungerStrokeTime > 220)) {
-                s_lastPlungerStrokeTime = now;
-                s_plungerStrokeCount++;
-                VR_LOG_INFO("Environmental Gesture: HYDROPONIC NUTRIENT PLUNGER STROKE #%d (Vy: %.2f)", s_plungerStrokeCount, (rVel.y < lVel.y) ? rVel.y : lVel.y);
-                if (rVel.y < -0.45f) vrState.rightHapticPulse = 0.60f; // Hydraulic displacement slosh (110 Hz)
-                if (lVel.y < -0.45f) vrState.leftHapticPulse = 0.60f;
-                if (s_plungerStrokeCount >= 3) {
-                    s_plungerStrokeCount = 0;
-                    VR_LOG_INFO("Environmental Gesture: NUTRIENT ACCUMULATOR RELIEF VALVE CLEARED / IRRIGATION RESTORED");
-                    SendKeyTap('E');
-                    SendKeyTap('Q');
-                    vrState.leftHapticPulse = 0.75f; // Relief valve clack (220 Hz)
-                    vrState.rightHapticPulse = 0.75f;
-                }
-            }
-
-            // Subterranean Hydroponics Nutrient Dosing Solenoid Lever (ADR 0116)
-            static DWORD s_lastSolenoidLeverTime = 0;
-            bool handAtSolenoidLever = ((rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > -0.25f && rightLocal.y < 0.15f && vrState.rightController.grip > 0.50f) ||
-                                        (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > -0.25f && leftLocal.y < 0.15f && vrState.leftController.grip > 0.50f));
-            bool solenoidLeverUp = (rVel.y > 0.65f || lVel.y > 0.65f);
-            if (handAtSolenoidLever && solenoidLeverUp && (now - s_lastSolenoidLeverTime > 1500)) {
-                s_lastSolenoidLeverTime = now;
-                VR_LOG_INFO("Environmental Gesture: HYDROPONIC NUTRIENT SOLENOID LEVER THROWN UPWARD (Vy: %.2f)", (rVel.y > lVel.y) ? rVel.y : lVel.y);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap('Q');
-                if (rVel.y > 0.65f) vrState.rightHapticPulse = 0.80f; // Armature clack & pipe surge (110 Hz)
-                if (lVel.y > 0.65f) vrState.leftHapticPulse = 0.80f;
-            }
-
-            // Subterranean Hydroponics Misting Manifold Handwheel Siphon (ADR 0124)
-            static DWORD s_lastMistingSiphonTime = 0;
-            static int s_mistingSiphonCrankCount = 0;
-            bool handAtMistingWheel = (rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > -0.22f && rightLocal.y < 0.16f) &&
-                                      (vrState.rightController.grip > 0.55f);
-            float mistingWheelSpeed = sqrtf(rVel.x * rVel.x + rVel.z * rVel.z);
-            if (handAtMistingWheel && mistingWheelSpeed > 0.48f && (now - s_lastMistingSiphonTime > 220)) {
-                s_lastMistingSiphonTime = now;
-                s_mistingSiphonCrankCount++;
-                VR_LOG_INFO("Environmental Gesture: HYDROPONICS MISTING SIPHON HANDWHEEL REVOLUTION #%d (Speed: %.2f m/s)", s_mistingSiphonCrankCount, mistingWheelSpeed);
-                vrState.rightHapticPulse = 0.55f; // Brass thread friction detent (120 Hz)
-                if (s_mistingSiphonCrankCount >= 3) {
-                    s_mistingSiphonCrankCount = 0;
-                    VR_LOG_INFO("Environmental Gesture: MISTING MANIFOLD PRESSURE SIPHON VENTED & FLUSHED");
-                    SendKeyTap('E');
-                    SendKeyTap('Q');
-                    SendKeyTap(VK_RETURN);
-                    vrState.rightHapticPulse = 0.85f; // Pressurized aerosol purge blast (190 Hz)
-                    vrState.leftHapticPulse = 0.40f;
-                }
-            }
-
-            // Subterranean Hydroponics Root Aeration Valve Foot Pedal Treadle (ADR 0132)
-            static DWORD s_lastTreadlePlungeTime = 0;
-            bool lowStanceForTreadle = (s_isPhysicallyCrouched || s_isDeepProne) || (rightLocal.y < -0.45f);
-            bool treadleDownPlunge = (rVel.y < -0.95f && rightLocal.y < -0.48f && vrState.rightController.grip > 0.50f);
-            if (lowStanceForTreadle && treadleDownPlunge && (now - s_lastTreadlePlungeTime > 1800)) {
-                s_lastTreadlePlungeTime = now;
-                VR_LOG_INFO("Environmental Gesture: ROOT AERATION TREADLE PUMPED (Vy: %.2f m/s)", rVel.y);
-                SendKeyTap('E');
-                SendKeyTap('C');
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.90f; // Pneumatic fluid aeration surge pulse (120 Hz)
-                vrState.leftHapticPulse = 0.40f;
-            }
-
-            // Dark Athena Cargo Bay Magnetic Crane Remote Pendant Snatch (ADR 0106)
-            static DWORD s_lastCranePendantTime = 0;
-            bool handAtOverheadPendant = ((rightLocal.y > 0.18f && rightLocal.z > -0.32f && rightLocal.z < -0.05f && vrState.rightController.grip > 0.55f) ||
-                                          (leftLocal.y > 0.18f && leftLocal.z > -0.32f && leftLocal.z < -0.05f && vrState.leftController.grip > 0.55f));
-            bool pendantDownwardHaul = (rVel.y < -0.45f || lVel.y < -0.45f);
-            if (handAtOverheadPendant && pendantDownwardHaul && (now - s_lastCranePendantTime > 2000)) {
-                s_lastCranePendantTime = now;
-                VR_LOG_INFO("Environmental Gesture: CARGO GANTRY CRANE PENDANT SNATCHED & HAULED (Vy: %.2f)", (rVel.y < lVel.y) ? rVel.y : lVel.y);
-                SendKeyTap('E');
-                SendKeyTap('W'); // Engage gantry remote bridge
-                if (rVel.y < -0.45f) vrState.rightHapticPulse = 0.70f; // Steel cable tension & relay click (160 Hz)
-                if (lVel.y < -0.45f) vrState.leftHapticPulse = 0.70f;
-            }
-
-            // Dark Athena EVA Solar Flare Radiation Shelter Bulkhead Seal (ADR 0109)
-            static DWORD s_lastSolarBulkheadTime = 0;
-            bool bothOverheadRadiationBulkhead = (leftLocal.y > 0.22f && rightLocal.y > 0.22f) &&
-                                                 (leftLocal.z > -0.30f && leftLocal.z < 0.05f && rightLocal.z > -0.30f && rightLocal.z < 0.05f) &&
-                                                 (vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f);
-            bool violentDownwardBulkheadSlam = (lVel.y < -1.10f && rVel.y < -1.10f);
-            if (bothOverheadRadiationBulkhead && violentDownwardBulkheadSlam && (now - s_lastSolarBulkheadTime > 2500)) {
-                s_lastSolarBulkheadTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR FLARE RADIATION SHELTER BULKHEAD SLAMMED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
-                SendKeyTap('E');
-                SendKeyTap('C');
-                SendKeyTap(VK_SPACE);
-                vrState.leftHapticPulse = 0.98f;  // Deep lead door structural impact shockwave (40 Hz)
-                vrState.rightHapticPulse = 0.98f;
-            }
-
-            // Dark Athena EVA Solar Collector Debris Shield Ejection (ADR 0117)
-            static DWORD s_lastShieldEjectTime = 0;
-            bool bothAtTrussMount = (leftLocal.z > -0.40f && leftLocal.z < -0.14f && rightLocal.z > -0.40f && rightLocal.z < -0.14f) &&
-                                    (leftLocal.y > 0.10f && leftLocal.y < 0.35f && rightLocal.y > 0.10f && rightLocal.y < 0.35f) &&
-                                    (vrState.leftController.grip > 0.55f && vrState.rightController.grip > 0.55f);
-            bool dualRearwardYank = (lVel.z > 0.85f && rVel.z > 0.85f);
-            if (bothAtTrussMount && dualRearwardYank && (now - s_lastShieldEjectTime > 2500)) {
-                s_lastShieldEjectTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR DEBRIS SHIELD JETTISONED (Lz: %.2f, Rz: %.2f)", lVel.z, rVel.z);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_RETURN);
-                vrState.leftHapticPulse = 0.95f;  // Pyrotechnic explosive pin severance shockwave (240 Hz)
-                vrState.rightHapticPulse = 0.95f;
-            }
-
-            // Dark Athena EVA Antenna Array Dipole Polarization Alignment (ADR 0125)
-            static DWORD s_lastAntennaAlignTime = 0;
-            static int s_antennaAlignStep = 0;
-            bool bothAtAntennaGimbal = (leftLocal.y > 0.16f && rightLocal.y > 0.16f && leftLocal.z > -0.36f && leftLocal.z < -0.06f && rightLocal.z > -0.36f && rightLocal.z < -0.06f) &&
-                                       (vrState.leftController.grip > 0.55f && vrState.rightController.grip > 0.55f);
-            float antennaSweepSpeed = sqrtf((rVel.x - lVel.x) * (rVel.x - lVel.x) + (rVel.y - lVel.y) * (rVel.y - lVel.y));
-            if (bothAtAntennaGimbal && antennaSweepSpeed > 0.45f && (now - s_lastAntennaAlignTime > 300)) {
-                s_lastAntennaAlignTime = now;
-                s_antennaAlignStep++;
-                VR_LOG_INFO("Environmental Gesture: EVA ANTENNA GIMBAL POLARIZATION SWEEP STEP #%d (Speed: %.2f)", s_antennaAlignStep, antennaSweepSpeed);
-                vrState.leftHapticPulse = 0.45f + 0.15f * s_antennaAlignStep;  // Ascending harmonic hum
-                vrState.rightHapticPulse = 0.45f + 0.15f * s_antennaAlignStep;
-                if (s_antennaAlignStep >= 3) {
-                    s_antennaAlignStep = 0;
-                    VR_LOG_INFO("Environmental Gesture: EVA ANTENNA ARRAY CARRIER WAVE POLARIZATION LOCKED");
-                    SendKeyTap('E');
-                    SendKeyTap('W');
-                    SendKeyTap(VK_TAB);
-                    vrState.leftHapticPulse = 0.85f;  // Magnetic phase lock detent (90 Hz)
-                    vrState.rightHapticPulse = 0.85f;
-                }
-            }
-
-            // Dark Athena EVA Solar Panel Photovoltaic Cell Scrape & De-icing (ADR 0129)
-            static DWORD s_lastSolarScrapeTime = 0;
-            static int s_solarScrapeCount = 0;
-            bool handAtSolarPane = (rightLocal.z > -0.42f && rightLocal.z < -0.14f && rightLocal.y > -0.20f && rightLocal.y < 0.25f && vrState.rightController.grip > 0.55f);
-            bool scrapeStroke = (fabsf(rVel.x) > 0.60f || fabsf(rVel.y) > 0.60f);
-            if (handAtSolarPane && scrapeStroke && (now - s_lastSolarScrapeTime > 240)) {
-                s_lastSolarScrapeTime = now;
-                s_solarScrapeCount++;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR PANEL DE-ICING SCRAPE STROKE #%d (Speed: %.2f)", s_solarScrapeCount, rSpeed);
-                vrState.rightHapticPulse = 0.50f; // Crystalline glass scraping rasp (240 Hz)
-                if (s_solarScrapeCount >= 4) {
-                    s_solarScrapeCount = 0;
-                    VR_LOG_INFO("Environmental Gesture: EVA SOLAR PANEL DE-ICED & AUXILIARY POWER BUS RESTORED");
-                    SendKeyTap('E');
-                    SendKeyTap(VK_TAB);
-                    SendKeyTap(VK_RETURN);
-                    vrState.rightHapticPulse = 0.80f; // Auxiliary power bus resonance chime (310 Hz)
-                    vrState.leftHapticPulse = 0.40f;
-                }
-            }
-
-            // Dark Athena EVA Solar Collector Truss Structural Weld Inspection (ADR 0131)
-            static DWORD s_lastWeldScanTime = 0;
-            static DWORD s_weldScanStartTime = 0;
-            bool handAtTrussSeam = (rightLocal.z > -0.38f && rightLocal.z < -0.12f && rightLocal.y > -0.15f && rightLocal.y < 0.20f && vrState.rightController.grip > 0.50f);
-            bool steadyGlideVelocity = (fabsf(rVel.x) > 0.25f && fabsf(rVel.x) < 0.65f);
-            if (handAtTrussSeam && steadyGlideVelocity && (now - s_lastWeldScanTime > 2000)) {
-                if (s_weldScanStartTime == 0) s_weldScanStartTime = now;
-                vrState.rightHapticPulse = 0.45f; // Ultrasonic scanner diagnostic vibration (230 Hz)
-                if (now - s_weldScanStartTime >= 350) {
-                    s_weldScanStartTime = 0;
-                    s_lastWeldScanTime = now;
-                    VR_LOG_INFO("Environmental Gesture: EVA TRUSS STRUCTURAL WELD INSPECTED & CLEARED");
-                    SendKeyTap('E');
-                    SendKeyTap(VK_SPACE);
-                    SendKeyTap(VK_TAB);
-                    vrState.rightHapticPulse = 0.75f; // Structural clearance confirmation chime (180 Hz)
-                }
-            } else {
-                s_weldScanStartTime = 0;
-            }
-
-            // Dark Athena EVA Solar Array Cable Tension Winch Crank (ADR 0137)
-            static DWORD s_lastCableWinchTime = 0;
-            static int s_cableWinchCrankCount = 0;
-            bool handAtCableWinch = (rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > -0.25f && rightLocal.y < 0.15f && vrState.rightController.grip > 0.55f);
-            float winchCrankSpeed = sqrtf(rVel.y * rVel.y + rVel.z * rVel.z);
-            if (handAtCableWinch && winchCrankSpeed > 0.48f && (now - s_lastCableWinchTime > 240)) {
-                s_lastCableWinchTime = now;
-                s_cableWinchCrankCount++;
-                VR_LOG_INFO("Environmental Gesture: EVA CABLE TENSION WINCH REVOLUTION #%d (Speed: %.2f)", s_cableWinchCrankCount, winchCrankSpeed);
-                vrState.rightHapticPulse = 0.55f + 0.10f * s_cableWinchCrankCount; // Progressive tension ratchet
-                if (s_cableWinchCrankCount >= 3) {
-                    s_cableWinchCrankCount = 0;
-                    VR_LOG_INFO("Environmental Gesture: EVA SOLAR ARRAY CABLE TAUT & WINCH LOCKED");
-                    SendKeyTap('E');
-                    SendKeyTap('W');
-                    SendKeyTap(VK_RETURN);
-                    vrState.rightHapticPulse = 0.90f; // Mechanical dog lock snap (90 Hz)
-                    vrState.leftHapticPulse = 0.50f;
-                }
-            }
-
-            // Dark Athena EVA Solar Collector Truss Angular Lock Pin Shear & Drop (ADR 0139)
-            static DWORD s_lastTrussPinShearTime = 0;
-            bool handAtTrussShearPin = (rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > 0.10f && rightLocal.y < 0.45f && vrState.rightController.grip > 0.60f);
-            bool downwardPinShearStrike = (rVel.y < -0.85f);
-            if (handAtTrussShearPin && downwardPinShearStrike && (now - s_lastTrussPinShearTime > 1500)) {
-                s_lastTrussPinShearTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR COLLECTOR TRUSS LOCK PIN SHEARED & DROPPED (Ry: %.2f)", rVel.y);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                vrState.rightHapticPulse = 0.95f; // Metallurgical shear crack shockwave (260 Hz)
-                vrState.leftHapticPulse = 0.60f;
-            }
-
-            // Subterranean Hydroponics Bio-Filter Carbon Mesh Cartridge Extraction (ADR 0140)
-            static DWORD s_lastBioFilterExtractTime = 0;
-            bool bothAtBioFilterHousing = (twoHandDist < 0.28f &&
-                                           leftLocal.z > -0.38f && leftLocal.z < -0.14f && leftLocal.y > -0.20f && leftLocal.y < 0.20f &&
-                                           rightLocal.z > -0.38f && rightLocal.z < -0.14f && rightLocal.y > -0.20f && rightLocal.y < 0.20f &&
-                                           vrState.leftController.grip > 0.55f && vrState.rightController.grip > 0.55f);
-            bool dualFilterRearwardPull = (lVel.z > 0.65f && rVel.z > 0.65f);
-            if (bothAtBioFilterHousing && dualFilterRearwardPull && (now - s_lastBioFilterExtractTime > 1500)) {
-                s_lastBioFilterExtractTime = now;
-                VR_LOG_INFO("Environmental Gesture: HYDROPONICS BIO-FILTER CARBON CARTRIDGE EXTRACTED (Lz: %.2f, Rz: %.2f)", lVel.z, rVel.z);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                vrState.leftHapticPulse = 0.85f;  // Filter canal sliding release clunk (180 Hz)
-                vrState.rightHapticPulse = 0.85f;
-            }
-
-            // Dark Athena EVA Solar Collector Photovoltaic Cell Thermal Decoupling Fuse Pull (ADR 0143)
-            static DWORD s_lastThermalFusePullTime = 0;
-            bool handAtThermalFuseSocket = (rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > -0.20f && rightLocal.y < 0.25f &&
-                                            vrState.rightController.grip > 0.45f && vrState.rightController.grip < 0.85f && vrState.rightController.trigger < 0.35f);
-            float fuseWrenchSpeed = sqrtf(rVel.x * rVel.x + rVel.y * rVel.y + rVel.z * rVel.z);
-            if (handAtThermalFuseSocket && fuseWrenchSpeed > 0.65f && (now - s_lastThermalFusePullTime > 1500)) {
-                s_lastThermalFusePullTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR ARRAY THERMAL DECOUPLING FUSE EXTRACTED (Speed: %.2f)", fuseWrenchSpeed);
-                SendKeyTap('E');
-                SendKeyTap(VK_RETURN);
-                SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.85f; // Spring retention detent release snap (160 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Sludge Siphon Pump T-Handle Reciprocating Stroke (ADR 0144)
-            static DWORD s_lastSludgeStrokeTime = 0;
-            static int s_sludgePumpStrokeCount = 0;
-            bool bothAtSludgePumpTBar = (twoHandDist < 0.26f &&
-                                         leftLocal.z > -0.38f && leftLocal.z < -0.14f && leftLocal.y > -0.35f && leftLocal.y < 0.15f &&
-                                         rightLocal.z > -0.38f && rightLocal.z < -0.14f && rightLocal.y > -0.35f && rightLocal.y < 0.15f &&
-                                         vrState.leftController.grip > 0.55f && vrState.rightController.grip > 0.55f);
-            bool dualDownwardPumpStroke = (lVel.y < -0.70f && rVel.y < -0.70f);
-            if (bothAtSludgePumpTBar && dualDownwardPumpStroke && (now - s_lastSludgeStrokeTime > 240)) {
-                s_lastSludgeStrokeTime = now;
-                s_sludgePumpStrokeCount++;
-                VR_LOG_INFO("Environmental Gesture: HYDROPONICS SLUDGE SIPHON STROKE #%d (Ly: %.2f, Ry: %.2f)", s_sludgePumpStrokeCount, lVel.y, rVel.y);
-                vrState.leftHapticPulse = 0.65f;  // Heavy viscous hydraulic drag (70 Hz)
-                vrState.rightHapticPulse = 0.65f;
-                if (s_sludgePumpStrokeCount >= 3) {
-                    s_sludgePumpStrokeCount = 0;
-                    VR_LOG_INFO("Environmental Gesture: SLUDGE SIPHON CLEARED & SUMP DRAIN OPENED");
-                    SendKeyTap('E');
-                    SendKeyTap(VK_SPACE);
-                    SendKeyTap('W');
-                    vrState.leftHapticPulse = 0.95f;  // Siphon surge pop & drainage rumble (120 Hz)
-                    vrState.rightHapticPulse = 0.95f;
-                }
-            }
-
-            // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Grease Gun Injection (ADR 0147)
-            static DWORD s_lastGreaseInjectTime = 0;
-            static DWORD s_greaseInjectStart = 0;
-            bool handAtTrussHingeNipple = (rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > 0.10f && rightLocal.y < 0.40f &&
-                                           vrState.rightController.grip > 0.60f && vrState.rightController.trigger > 0.70f &&
-                                           twoHandDist < 0.24f);
-            if (handAtTrussHingeNipple) {
-                if (s_greaseInjectStart == 0) s_greaseInjectStart = now;
-                DWORD injectDuration = now - s_greaseInjectStart;
-                vrState.rightHapticPulse = 0.50f; // Continuous fluid displacement buzz (160 Hz)
-                vrState.leftHapticPulse = 0.35f;
-                if (injectDuration >= 400 && (now - s_lastGreaseInjectTime > 1500)) {
-                    s_lastGreaseInjectTime = now;
-                    s_greaseInjectStart = 0;
-                    VR_LOG_INFO("Environmental Gesture: EVA TRUSS HINGE GREASE INJECTION COMPLETE & UNSEIZED");
-                    SendKeyTap('E');
-                    SendKeyTap(VK_RETURN);
-                    SendKeyTap(VK_TAB);
-                    vrState.rightHapticPulse = 0.85f; // Hydraulic unseize pop (90 Hz)
-                    vrState.leftHapticPulse = 0.60f;
-                }
-            } else {
-                s_greaseInjectStart = 0;
-            }
-
-            // Subterranean Hydroponics Algae Scraping Spatula Reciprocating Blade Stroke (ADR 0148)
-            static DWORD s_lastAlgaeScrapeTime = 0;
-            static int s_algaeScrapeCount = 0;
-            bool bladeAtAlgaeTube = (rightLocal.z > -0.40f && rightLocal.z < -0.16f && rightLocal.y > -0.25f && rightLocal.y < 0.20f &&
-                                     vrState.rightController.grip > 0.55f);
-            float algaeScrapeSpeed = sqrtf(rVel.x * rVel.x + rVel.y * rVel.y);
-            if (bladeAtAlgaeTube && algaeScrapeSpeed > 0.55f && (now - s_lastAlgaeScrapeTime > 200)) {
-                s_lastAlgaeScrapeTime = now;
-                s_algaeScrapeCount++;
-                VR_LOG_INFO("Environmental Gesture: HYDROPONICS ALGAE TUBE SCRAPING STROKE #%d (Speed: %.2f)", s_algaeScrapeCount, algaeScrapeSpeed);
-                vrState.rightHapticPulse = 0.48f; // Gritty quartz blade friction rasp (210 Hz)
-                if (s_algaeScrapeCount >= 4) {
-                    s_algaeScrapeCount = 0;
-                    VR_LOG_INFO("Environmental Gesture: ALGAE BIOMASS CLEARED FROM QUARTZ TUBE");
-                    SendKeyTap('E');
-                    SendKeyTap(VK_TAB);
-                    SendKeyTap(VK_SPACE);
-                    vrState.rightHapticPulse = 0.75f; // Quartz resonance clean chime (290 Hz)
-                }
-            }
-
-            // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Cotter Pin Insertion (ADR 0151)
-            static DWORD s_lastCotterPinTime = 0;
-            bool handAtTrussCotterBore = (rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > 0.10f && rightLocal.y < 0.40f &&
-                                          vrState.rightController.grip > 0.60f);
-            bool cotterPinSeatingThrust = (rVel.z < -0.85f);
-            if (handAtTrussCotterBore && cotterPinSeatingThrust && (now - s_lastCotterPinTime > 1500)) {
-                s_lastCotterPinTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA TRUSS HINGE COTTER PIN SEATED & LOCKED (Rz: %.2f)", rVel.z);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Hardened alloy detent lock snap (280 Hz)
-                vrState.leftHapticPulse = 0.60f;
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator Blast Door Dual Lever Pull (ADR 0152)
-            static DWORD s_lastIncineratorLeverTime = 0;
-            bool bothAtIncineratorLevers = (twoHandDist > 0.22f && twoHandDist < 0.45f &&
-                                            leftLocal.z > -0.42f && leftLocal.z < -0.16f && rightLocal.z > -0.42f && rightLocal.z < -0.16f &&
-                                            leftLocal.y > 0.05f && leftLocal.y < 0.35f && rightLocal.y > 0.05f && rightLocal.y < 0.35f &&
-                                            vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f);
-            bool dualIncineratorLeverPull = (lVel.y < -0.80f && rVel.y < -0.80f);
-            if (bothAtIncineratorLevers && dualIncineratorLeverPull && (now - s_lastIncineratorLeverTime > 1500)) {
-                s_lastIncineratorLeverTime = now;
-                VR_LOG_INFO("Environmental Gesture: HYDROPONICS INCINERATOR DUAL BLAST LEVERS TRIPPED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
-                SendKeyTap('E');
-                SendKeyTap(VK_RETURN);
-                SendKeyTap('Q');
-                vrState.leftHapticPulse = 0.95f;  // Lever trip clack & combustion blast rumble (50 Hz)
-                vrState.rightHapticPulse = 0.95f;
-            }
-
-            // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Cotter Pin Extraction (ADR 0155)
-            static DWORD s_lastCotterExtractTime = 0;
-            bool handAtTrussCotterHead = (rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > 0.10f && rightLocal.y < 0.40f &&
-                                          vrState.rightController.grip > 0.60f);
-            bool cotterPinExtractPull = (rVel.z > 0.85f);
-            if (handAtTrussCotterHead && cotterPinExtractPull && (now - s_lastCotterExtractTime > 1500)) {
-                s_lastCotterExtractTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA TRUSS HINGE COTTER PIN EXTRACTED & SALVAGED (Rz: %.2f)", rVel.z);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                vrState.rightHapticPulse = 0.95f; // Mechanical release detent clunk (180 Hz)
-                vrState.leftHapticPulse = 0.60f;
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator Burner Ignition Spark Wheel Strike (ADR 0156)
-            static DWORD s_lastSparkWheelTime = 0;
-            bool handAtSparkWheel = (rightLocal.z > -0.40f && rightLocal.z < -0.16f && rightLocal.y > -0.15f && rightLocal.y < 0.20f &&
-                                     vrState.rightController.grip > 0.55f);
-            bool sparkWheelStrike = (rVel.y < -0.90f);
-            if (handAtSparkWheel && sparkWheelStrike && (now - s_lastSparkWheelTime > 1500)) {
-                s_lastSparkWheelTime = now;
-                VR_LOG_INFO("Environmental Gesture: HYDROPONICS INCINERATOR SPARK WHEEL STRUCK & IGNITED (Ry: %.2f)", rVel.y);
-                SendKeyTap('E');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Flint rasp & combustion flame blast (60 Hz)
-                vrState.leftHapticPulse = 0.70f;
-            }
-
-            // Dark Athena EVA Solar Collector Truss Thermal Radiator Fin Unfolding Wrench (ADR 0159)
-            static DWORD s_lastRadiatorFinTime = 0;
-            bool handAtRadiatorFin = (rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > 0.05f && rightLocal.y < 0.38f &&
-                                      vrState.rightController.grip > 0.60f);
-            bool radiatorFinSweep = (fabsf(rVel.x) > 0.75f);
-            if (handAtRadiatorFin && radiatorFinSweep && (now - s_lastRadiatorFinTime > 1500)) {
-                s_lastRadiatorFinTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR RADIATOR FIN UNFOLDED & LOCKED (Rx: %.2f)", rVel.x);
-                SendKeyTap('E');
-                SendKeyTap('W');
-                SendKeyTap(VK_TAB);
-                vrState.rightHapticPulse = 0.90f; // Detent latch lock pulse (280 Hz)
-                vrState.leftHapticPulse = 0.60f;
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator Flame Damper Handwheel Spin (ADR 0160)
-            static DWORD s_lastDamperSpinTime = 0;
-            static int s_damperSpinCount = 0;
-            bool handAtDamperWheel = (rightLocal.z > -0.42f && rightLocal.z < -0.16f && rightLocal.y > -0.25f && rightLocal.y < 0.15f &&
-                                      vrState.rightController.grip > 0.55f);
-            float damperWheelSpeed = sqrtf(rVel.x * rVel.x + rVel.y * rVel.y);
-            if (handAtDamperWheel && damperWheelSpeed > 0.48f && (now - s_lastDamperSpinTime > 220)) {
-                s_lastDamperSpinTime = now;
-                s_damperSpinCount++;
-                VR_LOG_INFO("Environmental Gesture: HYDROPONICS FLAME DAMPER HANDWHEEL REVOLUTION #%d (Speed: %.2f)", s_damperSpinCount, damperWheelSpeed);
-                vrState.rightHapticPulse = 0.55f; // Spindle rotation rumble (130 Hz)
-                if (s_damperSpinCount >= 3) {
-                    s_damperSpinCount = 0;
-                    VR_LOG_INFO("Environmental Gesture: FLAME DAMPER VANES FULLY OPENED & LOCKED");
-                    SendKeyTap('E');
-                    SendKeyTap(VK_SPACE);
-                    SendKeyTap('Q');
-                    vrState.rightHapticPulse = 0.95f; // Mechanical end-stop detent thud (210 Hz)
-                    vrState.leftHapticPulse = 0.50f;
-                }
-            }
-
-            // Dark Athena EVA Solar Collector Photovoltaic Array Tension Guy-Wire Turnbuckle Wrench (ADR 0163)
-            static DWORD s_lastTurnbuckleTime = 0;
-            bool handAtTurnbuckle = (rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > -0.20f && rightLocal.y < 0.20f &&
-                                     vrState.rightController.grip > 0.60f);
-            bool turnbuckleTorqueWrench = (fabsf(rVel.x) > 0.65f);
-            if (handAtTurnbuckle && turnbuckleTorqueWrench && (now - s_lastTurnbuckleTime > 1500)) {
-                s_lastTurnbuckleTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR GUY-WIRE TURNBUCKLE TENSIONED & LOCKED (Rx: %.2f)", rVel.x);
-                SendKeyTap('E');
-                SendKeyTap('W');
-                SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Mechanical turnbuckle detent snap (290 Hz)
-                vrState.leftHapticPulse = 0.50f;
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator Flame Arrestor Mesh Screen Slide-In (ADR 0164)
-            static DWORD s_lastFlameArrestorTime = 0;
-            bool twoHandAtFlameArrestor = (twoHandDist < 0.26f &&
-                                           rightLocal.z > -0.40f && rightLocal.z < -0.16f && rightLocal.y > -0.15f && rightLocal.y < 0.25f &&
-                                           vrState.leftController.grip > 0.55f && vrState.rightController.grip > 0.55f);
-            bool flameArrestorSlideIn = (rVel.z < -0.80f || lVel.z < -0.80f);
-            if (twoHandAtFlameArrestor && flameArrestorSlideIn && (now - s_lastFlameArrestorTime > 1500)) {
-                s_lastFlameArrestorTime = now;
-                VR_LOG_INFO("Environmental Gesture: HYDROPONICS FLAME ARRESTOR MESH SCREEN SLID & SEATED (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
-                SendKeyTap('E');
-                SendKeyTap(VK_RETURN);
-                SendKeyTap(VK_TAB);
-                vrState.rightHapticPulse = 0.90f; // Mechanical seating latch snap (260 Hz)
-                vrState.leftHapticPulse = 0.90f;
-            }
-
-            // Dark Athena EVA Solar Array Debris Deflection Grid Pitch Tilt Pivot (ADR 0167)
-            static DWORD s_lastDebrisGridTime = 0;
-            bool bothAtDebrisGridYoke = (twoHandDist > 0.20f && twoHandDist < 0.40f &&
-                                         leftLocal.z > -0.42f && leftLocal.z < -0.15f && rightLocal.z > -0.42f && rightLocal.z < -0.15f &&
-                                         leftLocal.y > 0.10f && leftLocal.y < 0.40f && rightLocal.y > 0.10f && rightLocal.y < 0.40f &&
-                                         vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f);
-            float gridPitchSpeed = sqrtf(rVel.y * rVel.y + rVel.z * rVel.z);
-            if (bothAtDebrisGridYoke && gridPitchSpeed > 0.60f && (now - s_lastDebrisGridTime > 1500)) {
-                s_lastDebrisGridTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA DEBRIS DEFLECTION GRID TILTED & LOCKED (PitchSpeed: %.2f)", gridPitchSpeed);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                vrState.leftHapticPulse = 0.95f;  // Gimbal quadrant detent thud (270 Hz)
-                vrState.rightHapticPulse = 0.95f;
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator Slag Poking Spud Bar Thrust (ADR 0168)
-            static DWORD s_lastSpudBarTime = 0;
-            bool twoHandAtSpudBar = (twoHandDist < 0.28f &&
-                                     rightLocal.z > -0.42f && rightLocal.z < -0.16f && rightLocal.y > -0.25f && rightLocal.y < 0.15f &&
-                                     vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f);
-            bool spudBarLinearThrust = (rVel.z < -1.15f || lVel.z < -1.15f);
-            if (twoHandAtSpudBar && spudBarLinearThrust && (now - s_lastSpudBarTime > 1500)) {
-                s_lastSpudBarTime = now;
-                VR_LOG_INFO("Environmental Gesture: INCINERATOR SLAG DISLODGED VIA SPUD BAR THRUST (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
-                SendKeyTap('E');
-                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.98f; // Slag percussion fracture blast (260 Hz)
-                vrState.leftHapticPulse = 0.85f;
-            }
-
-            // Dark Athena EVA Solar Collector Heat Radiator Shutter Louver Multi-Slit Slide (ADR 0171)
-            static DWORD s_lastLouverSlideTime = 0;
-            bool handAtLouverSlider = (rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > -0.15f && rightLocal.y < 0.25f &&
-                                       vrState.rightController.grip > 0.60f);
-            bool louverSlideStroke = (fabsf(rVel.y) > 0.70f || fabsf(rVel.x) > 0.70f);
-            if (handAtLouverSlider && louverSlideStroke && (now - s_lastLouverSlideTime > 1500)) {
-                s_lastLouverSlideTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA RADIATOR LOUVER SHUTTERS SLID & SEALED (Vy: %.2f, Vx: %.2f)", rVel.y, rVel.x);
-                SendKeyTap('E');
-                SendKeyTap('C');
-                SendKeyTap(VK_TAB);
-                vrState.rightHapticPulse = 0.90f; // Detent latch lock pulse (280 Hz)
-                vrState.leftHapticPulse = 0.50f;
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator Flame Sensor Quartz Sight-Glass Scrape (ADR 0172)
-            static DWORD s_lastSightGlassTime = 0;
-            static int s_sightGlassCount = 0;
-            bool handAtSightGlass = (rightLocal.z > -0.40f && rightLocal.z < -0.16f && rightLocal.y > -0.10f && rightLocal.y < 0.25f &&
-                                     vrState.rightController.grip > 0.55f);
-            float sightGlassSpeed = sqrtf(rVel.x * rVel.x + rVel.y * rVel.y);
-            if (handAtSightGlass && sightGlassSpeed > 0.52f && (now - s_lastSightGlassTime > 200)) {
-                s_lastSightGlassTime = now;
-                s_sightGlassCount++;
-                VR_LOG_INFO("Environmental Gesture: HYDROPONICS SIGHT-GLASS SCRAPE STROKE #%d (Speed: %.2f)", s_sightGlassCount, sightGlassSpeed);
-                vrState.rightHapticPulse = 0.45f; // Quartz rasp friction (220 Hz)
-                if (s_sightGlassCount >= 4) {
-                    s_sightGlassCount = 0;
-                    VR_LOG_INFO("Environmental Gesture: SIGHT-GLASS WINDOW CLEARED / BURNER OPTICS RESTORED");
-                    SendKeyTap('E');
-                    SendKeyTap(VK_TAB);
-                    SendKeyTap(VK_RETURN);
-                    vrState.rightHapticPulse = 0.85f; // Optical sync resonant confirmation chime (320 Hz)
-                    vrState.leftHapticPulse = 0.50f;
-                }
-            }
-
-            // Dark Athena EVA Solar Collector Truss Articulation Lock Ring Spanner Wrench (ADR 0175)
-            static DWORD s_lastLockRingTime = 0;
-            bool bothAtLockRingSpanner = (twoHandDist < 0.25f &&
-                                          rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > 0.10f && rightLocal.y < 0.40f &&
-                                          vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f);
-            bool lockRingDownwardPull = (lVel.y < -0.90f && rVel.y < -0.90f);
-            if (bothAtLockRingSpanner && lockRingDownwardPull && (now - s_lastLockRingTime > 1500)) {
-                s_lastLockRingTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR TRUSS LOCK RING UNSEATED & UNCLAMPED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_RETURN);
-                vrState.leftHapticPulse = 0.95f;  // Mechanical ring release detent thud (290 Hz)
-                vrState.rightHapticPulse = 0.95f;
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Steam Scrubber Siphon Drain (ADR 0176)
-            static DWORD s_lastScrubberDrainTime = 0;
-            bool handAtScrubberLever = (rightLocal.z > -0.42f && rightLocal.z < -0.16f && rightLocal.y > -0.50f && rightLocal.y < -0.15f &&
-                                        vrState.rightController.grip > 0.55f);
-            bool scrubberDrainPull = (rVel.y > 0.75f);
-            if (handAtScrubberLever && scrubberDrainPull && (now - s_lastScrubberDrainTime > 1500)) {
-                s_lastScrubberDrainTime = now;
-                VR_LOG_INFO("Environmental Gesture: HYDROPONICS SCRUBBER SIPHON DRAIN PURGED (Ry: %.2f)", rVel.y);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.90f; // Turbulent hydraulic drain surge rumble (90 Hz)
-                vrState.leftHapticPulse = 0.50f;
-            }
-
-            // Dark Athena EVA Solar Array Wing Jettison Explosive Bolt Shear (ADR 0179)
-            static DWORD s_lastWingJettisonTime = 0;
-            bool bothAtWingJettison = (twoHandDist < 0.25f &&
-                                       rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > 0.10f && rightLocal.y < 0.42f &&
-                                       vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f);
-            bool wingJettisonDownwardShear = (lVel.y < -0.85f && rVel.y < -0.85f);
-            if (bothAtWingJettison && wingJettisonDownwardShear && (now - s_lastWingJettisonTime > 2500)) {
-                s_lastWingJettisonTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR WING JETTISON BOLTS DETONATED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                vrState.leftHapticPulse = 0.98f;  // Explosive bolt severance shockwave (280 Hz)
-                vrState.rightHapticPulse = 0.98f;
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Purge Steam Lance (ADR 0180)
-            static DWORD s_lastPurgeLanceTime = 0;
-            bool twoHandAtPurgeLance = (twoHandDist < 0.28f &&
-                                        rightLocal.z > -0.42f && rightLocal.z < -0.16f && rightLocal.y > -0.25f && rightLocal.y < 0.20f &&
-                                        vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f &&
-                                        vrState.rightController.trigger > 0.65f);
-            bool purgeLanceThrust = (rVel.z < -0.90f || lVel.z < -0.90f);
-            if (twoHandAtPurgeLance && purgeLanceThrust && (now - s_lastPurgeLanceTime > 1800)) {
-                s_lastPurgeLanceTime = now;
-                VR_LOG_INFO("Environmental Gesture: HYDROPONICS PURGE STEAM LANCE BLASTED (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Steam manifold purge blast (240 Hz)
-                vrState.leftHapticPulse = 0.70f;  // Foregrip steam vibration (110 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Truss Articulation Lock Wedge Mallet Strike (ADR 0183)
-            static DWORD s_lastWedgeStrikeTime = 0;
-            bool handAtTrussWedge = (rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > 0.10f && rightLocal.y < 0.42f &&
-                                     vrState.rightController.grip > 0.60f);
-            bool wedgeDownwardHammer = (rVel.y < -1.20f);
-            if (handAtTrussWedge && wedgeDownwardHammer && (now - s_lastWedgeStrikeTime > 1500)) {
-                s_lastWedgeStrikeTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR TRUSS LOCK WEDGE STRUCK & SEATED (Ry: %.2f)", rVel.y);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.98f; // Wedge percussion impact shockwave (270 Hz)
-                vrState.leftHapticPulse = 0.65f;  // Truss resonant chime (110 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator Secondary Air Preheater Bypass Flap (ADR 0184)
-            static DWORD s_lastPreheaterBypassTime = 0;
-            bool bothAtPreheaterBypass = (twoHandDist > 0.22f && twoHandDist < 0.45f &&
-                                          leftLocal.z > -0.40f && leftLocal.z < -0.16f && rightLocal.z > -0.40f && rightLocal.z < -0.16f &&
-                                          leftLocal.y > -0.20f && leftLocal.y < 0.20f && rightLocal.y > -0.20f && rightLocal.y < 0.20f &&
-                                          vrState.leftController.grip > 0.55f && vrState.rightController.grip > 0.55f);
-            bool preheaterBypassRearwardHaul = (lVel.z > 0.75f && rVel.z > 0.75f);
-            if (bothAtPreheaterBypass && preheaterBypassRearwardHaul && (now - s_lastPreheaterBypassTime > 1800)) {
-                s_lastPreheaterBypassTime = now;
-                VR_LOG_INFO("Environmental Gesture: HYDROPONICS PREHEATER BYPASS FLAP TRIPPED (Lz: %.2f, Rz: %.2f)", lVel.z, rVel.z);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_SPACE);
-                vrState.leftHapticPulse = 0.95f;  // Bypass seat detent thud (250 Hz)
-                vrState.rightHapticPulse = 0.95f;
-            }
-
-            // Dark Athena EVA Solar Collector Articulation Hinge Wedge Removal Slide-Hammer (ADR 0187)
-            static DWORD s_lastSlideHammerTime = 0;
-            bool bothAtHingeBracket = (twoHandDist < 0.26f &&
-                                       rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > 0.10f && rightLocal.y < 0.42f &&
-                                       vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f);
-            bool slideHammerRearwardStroke = (lVel.z > 0.95f && rVel.z > 0.95f);
-            if (bothAtHingeBracket && slideHammerRearwardStroke && (now - s_lastSlideHammerTime > 2000)) {
-                s_lastSlideHammerTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR WEDGE EXTRACTED VIA SLIDE HAMMER (Lz: %.2f, Rz: %.2f)", lVel.z, rVel.z);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                vrState.leftHapticPulse = 0.98f;  // Inertial collision thud (290 Hz)
-                vrState.rightHapticPulse = 0.98f;
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Soot Blower Lance Oscillation (ADR 0188)
-            static DWORD s_lastSootBlowerTime = 0;
-            static int s_sootBlowerStrokeCount = 0;
-            bool twoHandAtSootBlower = (twoHandDist < 0.28f &&
-                                        rightLocal.z > -0.42f && rightLocal.z < -0.16f && rightLocal.y > -0.20f && rightLocal.y < 0.25f &&
-                                        vrState.leftController.grip > 0.55f && vrState.rightController.grip > 0.55f &&
-                                        vrState.rightController.trigger > 0.60f);
-            bool sootBlowerAxialStroke = (fabsf(rVel.z) > 0.65f || fabsf(lVel.z) > 0.65f);
-            if (twoHandAtSootBlower && sootBlowerAxialStroke && (now - s_lastSootBlowerTime > 220)) {
-                s_lastSootBlowerTime = now;
-                s_sootBlowerStrokeCount++;
-                VR_LOG_INFO("Environmental Gesture: HYDROPONICS SOOT BLOWER LANCE STROKE #%d (Rz: %.2f, Lz: %.2f)", s_sootBlowerStrokeCount, rVel.z, lVel.z);
-                vrState.rightHapticPulse = 0.55f; // Tube scraping rasp (220 Hz)
-                vrState.leftHapticPulse = 0.40f;
-                if (s_sootBlowerStrokeCount >= 3) {
-                    s_sootBlowerStrokeCount = 0;
-                    VR_LOG_INFO("Environmental Gesture: ECONOMIZER TUBE BANK CLEARED VIA HIGH-PRESSURE STEAM SOOT BLOW");
-                    SendKeyTap('E');
-                    SendKeyTap(VK_SPACE);
-                    SendKeyTap('Q');
-                    mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                    mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                    vrState.rightHapticPulse = 0.95f; // Steam jet acoustic blast (120 Hz)
-                    vrState.leftHapticPulse = 0.75f;
-                }
-            }
-
-            // Dark Athena EVA Solar Collector Heat Radiator Coolant Loop Bleed Petcock Valve (ADR 0191)
-            static DWORD s_lastBleedValveTime = 0;
-            bool handAtBleedValve = (rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > -0.20f && rightLocal.y < 0.20f &&
-                                     vrState.rightController.grip > 0.45f && vrState.rightController.grip < 0.85f &&
-                                     vrState.rightController.trigger < 0.40f);
-            bool bleedValveTwist = (fabsf(rVel.x) > 0.65f);
-            if (handAtBleedValve && bleedValveTwist && (now - s_lastBleedValveTime > 1800)) {
-                s_lastBleedValveTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA RADIATOR COOLANT BLEED PETCOCK TWISTED & VENTED (Rx: %.2f)", rVel.x);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.85f; // Cryogenic vapor venting surge (90 Hz)
-                vrState.leftHapticPulse = 0.45f;
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Slag Tap Hole Oxygen Lance Burn (ADR 0192)
-            static DWORD s_lastSlagBurnTime = 0;
-            static DWORD s_slagBurnStartTime = 0;
-            bool twoHandAtSlagPort = (twoHandDist < 0.26f &&
-                                      rightLocal.z > -0.42f && rightLocal.z < -0.16f && rightLocal.y > -0.45f && rightLocal.y < -0.10f &&
-                                      vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f &&
-                                      vrState.rightController.trigger > 0.70f);
-            bool slagLanceLinearFeed = (rVel.z < -0.30f);
-            if (twoHandAtSlagPort && slagLanceLinearFeed) {
-                if (s_slagBurnStartTime == 0) s_slagBurnStartTime = now;
-                DWORD burnTime = now - s_slagBurnStartTime;
-                float burnRamp = (burnTime < 400) ? (burnTime / 400.0f) : 1.0f;
-                vrState.rightHapticPulse = 0.50f + 0.45f * burnRamp; // Sizzle to breakout rumble (260 -> 70 Hz)
-                vrState.leftHapticPulse = 0.35f + 0.40f * burnRamp;
-                if (burnTime >= 400 && (now - s_lastSlagBurnTime > 2500)) {
-                    s_lastSlagBurnTime = now;
-                    s_slagBurnStartTime = 0;
-                    VR_LOG_INFO("Environmental Gesture: HYDROPONICS SLAG TAP HOLE BREACHED VIA OXYGEN LANCE BURN");
-                    SendKeyTap('E');
-                    mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                    mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                    SendKeyTap(VK_SPACE);
-                    SendKeyTap(VK_RETURN);
-                    vrState.rightHapticPulse = 0.98f; // Molten slag breakout rumble (70 Hz)
-                    vrState.leftHapticPulse = 0.90f;
-                }
-            } else {
-                s_slagBurnStartTime = 0;
-            }
-
-            // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Alignment Drift Pin Punch (ADR 0195)
-            static DWORD s_lastDriftPinTime = 0;
-            bool handAtCollar = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                 vrState.leftController.grip > 0.55f);
-            bool handAtPinPunch = (twoHandDist < 0.24f && vrState.rightController.grip > 0.60f);
-            bool driftPinDownwardStrike = (rVel.y < -1.15f);
-            if (handAtCollar && handAtPinPunch && driftPinDownwardStrike && (now - s_lastDriftPinTime > 1800)) {
-                s_lastDriftPinTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA TRUSS HINGE ALIGNED VIA DRIFT PIN MALLET PUNCH (Ry: %.2f)", rVel.y);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.98f; // Alloy pin punch shockwave (260 Hz)
-                vrState.leftHapticPulse = 0.65f;  // Mechanical lug alignment detent pop (140 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Primary Air Swirl Vane Lever (ADR 0196)
-            static DWORD s_lastSwirlVaneTime = 0;
-            bool bothAtSwirlVanes = (twoHandDist > 0.20f && twoHandDist < 0.40f &&
-                                     leftLocal.z > -0.42f && leftLocal.z < -0.16f && rightLocal.z > -0.42f && rightLocal.z < -0.16f &&
-                                     leftLocal.y > -0.15f && leftLocal.y < 0.25f && rightLocal.y > -0.15f && rightLocal.y < 0.25f &&
-                                     vrState.leftController.grip > 0.55f && vrState.rightController.grip > 0.55f);
-            bool swirlVaneSweep = (fabsf(lVel.x) > 0.70f && fabsf(rVel.x) > 0.70f);
-            if (bothAtSwirlVanes && swirlVaneSweep && (now - s_lastSwirlVaneTime > 2000)) {
-                s_lastSwirlVaneTime = now;
-                VR_LOG_INFO("Environmental Gesture: HYDROPONICS INCINERATOR AIR SWIRL VANES ADJUSTED (Lx: %.2f, Rx: %.2f)", lVel.x, rVel.x);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.90f; // Detent notch engagement click (240 Hz)
-                vrState.leftHapticPulse = 0.65f;  // Quadrant ratchet friction (150 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Truss Articulation Lock Ring Pinch Pin Insertion (ADR 0199)
-            static DWORD s_lastPinchPinTime = 0;
-            bool handAtPinchGuide = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                     vrState.leftController.grip > 0.55f);
-            bool handHoldingPinchPin = (twoHandDist < 0.22f && vrState.rightController.grip > 0.60f);
-            bool pinchPinForwardThrust = (rVel.z < -0.90f);
-            if (handAtPinchGuide && handHoldingPinchPin && pinchPinForwardThrust && (now - s_lastPinchPinTime > 1800)) {
-                s_lastPinchPinTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA TRUSS PINCH PIN DRIVEN & DETENT SEATED (Rz: %.2f)", rVel.z);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.98f; // Spring-loaded detent lock click (290 Hz)
-                vrState.leftHapticPulse = 0.65f;  // Guide sleeve friction (190 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Electrostatic Precipitator Rapping Rod Impact (ADR 0200)
-            static DWORD s_lastRappingRodTime = 0;
-            bool bothAtRappingRod = (twoHandDist < 0.28f &&
-                                     leftLocal.z > -0.42f && leftLocal.z < -0.16f && rightLocal.z > -0.42f && rightLocal.z < -0.16f &&
-                                     leftLocal.y > -0.20f && leftLocal.y < 0.25f && rightLocal.y > -0.20f && rightLocal.y < 0.25f &&
-                                     vrState.leftController.grip > 0.60f && vrState.rightController.grip > 0.60f);
-            bool rappingRodImpact = (rVel.z < -1.15f);
-            if (bothAtRappingRod && rappingRodImpact && (now - s_lastRappingRodTime > 2000)) {
-                s_lastRappingRodTime = now;
-                VR_LOG_INFO("Environmental Gesture: HYDROPONICS PRECIPITATOR RAPPING ROD IMPACTED (Rz: %.2f)", rVel.z);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                vrState.rightHapticPulse = 0.98f; // Rapping anvil impact shockwave (270 Hz)
-                vrState.leftHapticPulse = 0.70f;  // Precipitator plate vibration rumble (85 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Photovoltaic Array Tension Guy-Wire Rigging Turnbuckle Locking Nut Strike (ADR 0203)
-            static DWORD s_lastGuyWireNutTime = 0;
-            bool handAtTurnbuckleBody = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > -0.20f && leftLocal.y < 0.20f &&
-                                         vrState.leftController.grip > 0.55f);
-            bool handHoldingMalletTool = (twoHandDist < 0.22f && vrState.rightController.grip > 0.60f);
-            bool guyWireNutImpact = (rVel.y < -1.10f);
-            if (handAtTurnbuckleBody && handHoldingMalletTool && guyWireNutImpact && (now - s_lastGuyWireNutTime > 1800)) {
-                s_lastGuyWireNutTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA GUY-WIRE TURNBUCKLE LOCK NUT STAKED (Ry: %.2f)", rVel.y);
-                SendKeyTap('E');
-                SendKeyTap('W');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                vrState.rightHapticPulse = 0.98f; // Locking nut impact detent snap (260 Hz)
-                vrState.leftHapticPulse = 0.60f;  // High-tension wire resonance chime (140 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Ash Quenching Trough Agitator Rake Sweep (ADR 0204)
-            static DWORD s_lastAshRakeTime = 0;
-            bool bothAtAshRake = (twoHandDist > 0.22f && twoHandDist < 0.45f &&
-                                  leftLocal.z > -0.42f && leftLocal.z < -0.16f && rightLocal.z > -0.42f && rightLocal.z < -0.16f &&
-                                  leftLocal.y > -0.45f && leftLocal.y < -0.15f && rightLocal.y > -0.45f && rightLocal.y < -0.15f &&
-                                  vrState.leftController.grip > 0.55f && vrState.rightController.grip > 0.55f);
-            bool ashRakeSweep = (fabsf(lVel.x) > 0.70f && fabsf(rVel.x) > 0.70f);
-            if (bothAtAshRake && ashRakeSweep && (now - s_lastAshRakeTime > 2000)) {
-                s_lastAshRakeTime = now;
-                VR_LOG_INFO("Environmental Gesture: HYDROPONICS ASH QUENCHING TROUGH RAKED (Lx: %.2f, Rx: %.2f)", lVel.x, rVel.x);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Clinker fracture crunch (280 Hz)
-                vrState.leftHapticPulse = 0.65f;  // Gritty slurry grating friction (180 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Grease Nipple Cap Removal (ADR 0207)
-            static DWORD s_lastGreaseCapTime = 0;
-            bool handAtGreaseFitting = (rightLocal.z > -0.42f && rightLocal.z < -0.15f && rightLocal.y > 0.08f && rightLocal.y < 0.38f &&
-                                        vrState.rightController.grip > 0.45f && vrState.rightController.grip < 0.85f &&
-                                        vrState.rightController.trigger < 0.40f);
-            bool greaseCapTwist = (fabsf(rVel.x) > 0.65f);
-            if (handAtGreaseFitting && greaseCapTwist && (now - s_lastGreaseCapTime > 1800)) {
-                s_lastGreaseCapTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA TRUSS GREASE NIPPLE CAP UNTHREADED (Rx: %.2f)", rVel.x);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.90f; // Thread unseating detent click (270 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Thread friction drag (170 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Combustion Air Damper Linkage Cotter Pin Extraction (ADR 0208)
-            static DWORD s_lastDamperCotterTime = 0;
-            bool handAtDamperClevis = (leftLocal.z > -0.40f && leftLocal.z < -0.16f && leftLocal.y > -0.15f && leftLocal.y < 0.25f &&
-                                       vrState.leftController.grip > 0.55f);
-            bool handAtCotterEyelet = (twoHandDist < 0.22f && vrState.rightController.grip > 0.60f);
-            bool cotterExtractionHaul = (rVel.z > 0.90f);
-            if (handAtDamperClevis && handAtCotterEyelet && cotterExtractionHaul && (now - s_lastDamperCotterTime > 1800)) {
-                s_lastDamperCotterTime = now;
-                VR_LOG_INFO("Environmental Gesture: HYDROPONICS DAMPER COTTER PIN EXTRACTED & FREED (Rz: %.2f)", rVel.z);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.98f; // Cotter pin release snap (290 Hz)
-                vrState.leftHapticPulse = 0.65f;  // Corroded clevis drag (210 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Retaining Ring Circlip Pliers Pinch (ADR 0211)
-            static DWORD s_lastCirclipTime = 0;
-            bool handAtHingeGrooveCollar = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                            vrState.leftController.grip > 0.55f);
-            bool handHoldingCirclipPliers = (twoHandDist < 0.22f && vrState.rightController.grip > 0.60f &&
-                                             vrState.rightController.trigger > 0.60f);
-            bool circlipAxialThrust = (rVel.z < -0.85f);
-            if (handAtHingeGrooveCollar && handHoldingCirclipPliers && circlipAxialThrust && (now - s_lastCirclipTime > 1800)) {
-                s_lastCirclipTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA TRUSS CIRCLIP SEATED & SNAPPED (Rz: %.2f)", rVel.z);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.98f; // Circlip snap detent (300 Hz)
-                vrState.leftHapticPulse = 0.65f;  // Pliers spring compression tension (200 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Secondary Air Damper Handwheel Spin (ADR 0212)
-            static DWORD s_lastSecondaryDamperTime = 0;
-            static int s_secondaryDamperRevs = 0;
-            bool handAtSecondaryDamper = (rightLocal.z > -0.42f && rightLocal.z < -0.16f && rightLocal.y > 0.10f && rightLocal.y < 0.42f &&
-                                          vrState.rightController.grip > 0.55f);
-            float secondaryDamperSpeed = sqrtf(rVel.x * rVel.x + rVel.y * rVel.y);
-            if (handAtSecondaryDamper && secondaryDamperSpeed > 0.48f && (now - s_lastSecondaryDamperTime > 250)) {
-                s_lastSecondaryDamperTime = now;
-                s_secondaryDamperRevs++;
-                VR_LOG_INFO("Environmental Gesture: HYDROPONICS SECONDARY AIR DAMPER WHEEL CRANK #%d (Speed: %.2f)", s_secondaryDamperRevs, secondaryDamperSpeed);
-                vrState.rightHapticPulse = 0.55f; // Spindle rotation friction (140 Hz)
-                if (s_secondaryDamperRevs >= 3) {
-                    s_secondaryDamperRevs = 0;
-                    VR_LOG_INFO("Environmental Gesture: SECONDARY AIR DRAFT VANES OPENED");
-                    SendKeyTap('E');
-                    SendKeyTap('Q');
-                    SendKeyTap(VK_SPACE);
-                    SendKeyTap(VK_TAB);
-                    vrState.rightHapticPulse = 0.95f; // Mechanical end-stop thud (220 Hz)
-                }
-            }
-
-            // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Axial Play Shimming Washer Insertion (ADR 0215)
-            static DWORD s_lastShimWasherTime = 0;
-            bool handAtHingeGapClevis = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                         vrState.leftController.grip > 0.55f);
-            bool handHoldingSlottedShim = (twoHandDist < 0.22f && vrState.rightController.grip > 0.60f);
-            bool shimLateralSlide = (fabsf(rVel.x) > 0.85f);
-            if (handAtHingeGapClevis && handHoldingSlottedShim && shimLateralSlide && (now - s_lastShimWasherTime > 1800)) {
-                s_lastShimWasherTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA TRUSS SHIM WASHER INSERTED & SEATED (Rx: %.2f)", rVel.x);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.95f; // Mechanical gap detent seating click (280 Hz)
-                vrState.leftHapticPulse = 0.65f;  // Shim sliding friction (190 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Flue Gas Thermocouple Well Threaded Plug Tightening (ADR 0216)
-            static DWORD s_lastThermocouplePlugTime = 0;
-            bool handAtThermocouplePlug = (rightLocal.z > -0.40f && rightLocal.z < -0.16f && rightLocal.y > -0.10f && rightLocal.y < 0.25f &&
-                                           vrState.rightController.grip > 0.45f && vrState.rightController.grip < 0.85f &&
-                                           vrState.rightController.trigger < 0.40f);
-            bool thermocouplePlugTwist = (fabsf(rVel.x) > 0.65f);
-            if (handAtThermocouplePlug && thermocouplePlugTwist && (now - s_lastThermocouplePlugTime > 1800)) {
-                s_lastThermocouplePlugTime = now;
-                VR_LOG_INFO("Environmental Gesture: HYDROPONICS THERMOCOUPLE PLUG TORQUED & SEALED (Rx: %.2f)", rVel.x);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.98f; // Metallic torque stop thud (270 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Copper crush washer deformation (160 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Axial Retaining Cap Screw Driver Torque (ADR 0219)
-            static DWORD s_lastRetainingScrewTime = 0;
-            bool handAtHingeScrewBoss = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                         vrState.leftController.grip > 0.55f);
-            bool handHoldingHexDriver = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                         vrState.rightController.trigger < 0.40f);
-            bool hexDriverScrewTorque = (fabsf(rVel.x) > 0.65f);
-            if (handAtHingeScrewBoss && handHoldingHexDriver && hexDriverScrewTorque && (now - s_lastRetainingScrewTime > 1800)) {
-                s_lastRetainingScrewTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA TRUSS RETAINING CAP SCREW TORQUED & LOCKED (Rx: %.2f)", rVel.x);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Mechanical torque stop thud (290 Hz)
-                vrState.leftHapticPulse = 0.60f;  // Helical thread tightening friction (170 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Bearing Housing Oil Level Sight-Glass Inspection & Vent (ADR 0220)
-            static DWORD s_lastDraftFanVentTime = 0;
-            bool handAtDraftFanPedestal = (rightLocal.z > -0.42f && rightLocal.z < -0.16f && rightLocal.y > 0.05f && rightLocal.y < 0.35f &&
-                                           vrState.rightController.grip > 0.45f && vrState.rightController.grip < 0.85f &&
-                                           vrState.rightController.trigger < 0.40f);
-            bool draftFanVentTwist = (fabsf(rVel.x) > 0.65f);
-            if (handAtDraftFanPedestal && draftFanVentTwist && (now - s_lastDraftFanVentTime > 1800)) {
-                s_lastDraftFanVentTime = now;
-                VR_LOG_INFO("Environmental Gesture: HYDROPONICS DRAFT FAN BEARING VENT UNSEATED & PURGED (Rx: %.2f)", rVel.x);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.85f; // Pneumatic vent surge (95 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Knurled brass thread friction (150 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Axial Play Vernier Caliper Micrometer Verification (ADR 0223)
-            static DWORD s_lastVernierTime = 0;
-            bool handAtHingeGuideCollar = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                           vrState.leftController.grip > 0.55f);
-            bool handHoldingVernierGauge = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                            vrState.rightController.trigger < 0.35f);
-            bool vernierSlideStroke = (fabsf(rVel.z) > 0.45f);
-            if (handAtHingeGuideCollar && handHoldingVernierGauge && vernierSlideStroke && (now - s_lastVernierTime > 1800)) {
-                s_lastVernierTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA TRUSS VERNIER MICROMETER VERIFIED & LOCKED (Rz: %.2f)", rVel.z);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.90f; // Optical tolerance confirmation chime (310 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Vernier slide micro-clicks (210 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Primary Air Plenum Cleanout Manhole Cover Dog Clamp (ADR 0224)
-            static DWORD s_lastPlenumClampTime = 0;
-            bool bothHandsAtPlenumCollar = (twoHandDist > 0.20f && twoHandDist < 0.40f &&
-                                            leftLocal.z > -0.42f && leftLocal.z < -0.16f &&
-                                            leftLocal.y > -0.35f && leftLocal.y < 0.05f &&
-                                            vrState.leftController.grip > 0.55f && vrState.rightController.grip > 0.55f);
-            bool plenumClampPull = (lVel.y < -0.75f && rVel.y < -0.75f);
-            if (bothHandsAtPlenumCollar && plenumClampPull && (now - s_lastPlenumClampTime > 1800)) {
-                s_lastPlenumClampTime = now;
-                VR_LOG_INFO("Environmental Gesture: HYDROPONICS PLENUM DOG CLAMPS LEVERED & DOGGED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Forged dog-clamp seating thuds (270 Hz)
-                vrState.leftHapticPulse = 0.95f;  // Cast-iron clamp hinge swing (130 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Thermal Blanket Velcro Sealing Flap (ADR 0227)
-            static DWORD s_lastThermalBlanketTime = 0;
-            bool handHoldingBlanketFlap = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                           vrState.leftController.grip > 0.55f);
-            bool handPressingVelcroSeam = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                           vrState.rightController.trigger > 0.50f);
-            bool velcroSeamStroke = (fabsf(rVel.y) > 0.50f || fabsf(rVel.x) > 0.50f);
-            if (handHoldingBlanketFlap && handPressingVelcroSeam && velcroSeamStroke && (now - s_lastThermalBlanketTime > 1800)) {
-                s_lastThermalBlanketTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA TRUSS THERMAL BLANKET VELCRO SEAM SEALED (Ry: %.2f, Rx: %.2f)", rVel.y, rVel.x);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.90f; // Magnetic border snap click (260 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Velcro seam friction (180 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Primary Air Plenum Ash Hoist Bucket Winch Crank (ADR 0228)
-            static DWORD s_lastAshWinchTime = 0;
-            static int s_ashWinchRevs = 0;
-            bool handAtAshWinch = (rightLocal.z > -0.42f && rightLocal.z < -0.16f && rightLocal.y > -0.20f && rightLocal.y < 0.25f &&
-                                   vrState.rightController.grip > 0.55f);
-            float ashWinchSpeed = sqrtf(rVel.x * rVel.x + rVel.y * rVel.y);
-            if (handAtAshWinch && ashWinchSpeed > 0.48f && (now - s_lastAshWinchTime > 250)) {
-                s_lastAshWinchTime = now;
-                s_ashWinchRevs++;
-                VR_LOG_INFO("Environmental Gesture: HYDROPONICS ASH HOIST WINCH CRANK #%d (Speed: %.2f)", s_ashWinchRevs, ashWinchSpeed);
-                vrState.rightHapticPulse = 0.55f; // Cable drum winding rumble (140 Hz)
-                if (s_ashWinchRevs >= 3) {
-                    s_ashWinchRevs = 0;
-                    VR_LOG_INFO("Environmental Gesture: ASH HOIST BUCKET ELEVATED TO HEARTH FLOOR");
-                    SendKeyTap('E');
-                    SendKeyTap('Q');
-                    SendKeyTap(VK_SPACE);
-                    SendKeyTap(VK_TAB);
-                    vrState.rightHapticPulse = 0.95f; // Hoist dog ratchet thud (220 Hz)
-                }
-            }
-
-            // Dark Athena EVA Solar Collector Truss Articulation Drive Motor Pinion Gear Backlash Adjustment (ADR 0231)
-            static DWORD s_lastPinionBacklashTime = 0;
-            bool handAtPinionGearbox = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
-                                        vrState.leftController.grip > 0.55f);
-            bool handOnBacklashAdjuster = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                           vrState.rightController.trigger > 0.50f);
-            bool backlashAdjusterTorque = (fabsf(rVel.x) > 0.45f || fabsf(rVel.y) > 0.45f);
-            if (handAtPinionGearbox && handOnBacklashAdjuster && backlashAdjusterTorque && (now - s_lastPinionBacklashTime > 1800)) {
-                s_lastPinionBacklashTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA TRUSS DRIVE MOTOR PINION BACKLASH ADJUSTED (Rx: %.2f, Ry: %.2f)", rVel.x, rVel.y);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.92f; // Eccentric adjuster detent click (280 Hz)
-                vrState.leftHapticPulse = 0.60f;  // Gearbox casing resonance (140 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Primary Air Plenum Slag Agitator Scraping Bar (ADR 0232)
-            static DWORD s_lastSlagScraperTime = 0;
-            static int s_slagScraperStrokes = 0;
-            bool handsOnSlagScraper = (twoHandDist > 0.16f && twoHandDist < 0.38f &&
-                                       vrState.leftController.grip > 0.55f && vrState.rightController.grip > 0.55f);
-            bool scraperAtPlenumTuyeres = (rightLocal.z > -0.45f && rightLocal.z < -0.15f &&
-                                           rightLocal.y > -0.30f && rightLocal.y < 0.20f);
-            bool scraperStroke = (fabsf(rVel.z) > 0.65f && fabsf(lVel.z) > 0.55f);
-            if (handsOnSlagScraper && scraperAtPlenumTuyeres && scraperStroke && (now - s_lastSlagScraperTime > 300)) {
-                s_lastSlagScraperTime = now;
-                s_slagScraperStrokes++;
-                VR_LOG_INFO("Environmental Gesture: INCINERATOR SLAG SCRAPER STROKE #%d (Rz: %.2f, Lz: %.2f)", s_slagScraperStrokes, rVel.z, lVel.z);
-                vrState.rightHapticPulse = 0.65f; // Scraper grating drag friction (200 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Shaft resonance (150 Hz)
-                if (s_slagScraperStrokes >= 3) {
-                    s_slagScraperStrokes = 0;
-                    VR_LOG_INFO("Environmental Gesture: PRIMARY AIR TUYERES CLEARED OF REFRACTORY SLAG");
-                    SendKeyTap('E');
-                    SendKeyTap('Q');
-                    SendKeyTap(VK_TAB);
-                    SendKeyTap(VK_SPACE);
-                    vrState.rightHapticPulse = 0.95f; // Refractory clinker dislodged impact (300 Hz)
-                    vrState.leftHapticPulse = 0.85f;  // Shaft vibration impact (160 Hz)
-                }
-            }
-
-            // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Axial Play Vernier Caliper Dial Gauge Clamping Screw (ADR 0235)
-            static DWORD s_lastVernierClampTime = 0;
-            bool handAtVernierCollar = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                        vrState.leftController.grip > 0.55f);
-            bool handPinchingClampScrew = (twoHandDist < 0.22f &&
-                                           vrState.rightController.grip > 0.45f && vrState.rightController.grip < 0.85f &&
-                                           vrState.rightController.trigger < 0.35f);
-            bool clampScrewTorque = (fabsf(rVel.x) > 0.65f);
-            if (handAtVernierCollar && handPinchingClampScrew && clampScrewTorque && (now - s_lastVernierClampTime > 1800)) {
-                s_lastVernierClampTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA TRUSS VERNIER DIAL GAUGE CLAMPED & LOCKED (Rx: %.2f)", rVel.x);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Knurled brass clamping screw torque stop (290 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Caliper rail contact friction (150 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Weight Clip Insertion (ADR 0236)
-            static DWORD s_lastBalanceClipTime = 0;
-            bool handAtFanPort = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
-                                  vrState.leftController.grip > 0.55f);
-            bool handAligningClip = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                     vrState.rightController.trigger > 0.50f);
-            bool clipInsertionThrust = (rVel.z < -0.85f);
-            if (handAtFanPort && handAligningClip && clipInsertionThrust && (now - s_lastBalanceClipTime > 1800)) {
-                s_lastBalanceClipTime = now;
-                VR_LOG_INFO("Environmental Gesture: HYDROPONICS DRAFT FAN ROTOR BALANCE CLIP SEATED (Rz: %.2f)", rVel.z);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Spring-steel tang snap (280 Hz)
-                vrState.leftHapticPulse = 0.60f;  // Blade runner resonance (130 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Axial Play Vernier Caliper Dial Gauge Zero Calibration Thumbscrew (ADR 0239)
-            static DWORD s_lastVernierZeroTime = 0;
-            bool handAtVernierAnvil = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                       vrState.leftController.grip > 0.55f);
-            bool handOnZeroScrew = (twoHandDist < 0.22f &&
-                                    vrState.rightController.grip > 0.45f && vrState.rightController.grip < 0.85f &&
-                                    vrState.rightController.trigger < 0.35f);
-            bool zeroScrewTwist = (fabsf(rVel.x) > 0.65f);
-            if (handAtVernierAnvil && handOnZeroScrew && zeroScrewTwist && (now - s_lastVernierZeroTime > 1800)) {
-                s_lastVernierZeroTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA TRUSS VERNIER GAUGE ZERO-CALIBRATED (Rx: %.2f)", rVel.x);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.50f; // Knurled brass zero-detent ratchet (240 Hz)
-                vrState.leftHapticPulse = 0.90f;  // Optical zero datum confirmation tone (320 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Lock Tang Crimping Plier Squeeze (ADR 0240)
-            static DWORD s_lastTangCrimpTime = 0;
-            bool handAtImpellerRoot = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
-                                       vrState.leftController.grip > 0.55f);
-            bool handWithCrimpingPliers = (twoHandDist < 0.22f && vrState.rightController.grip > 0.60f &&
-                                           vrState.rightController.trigger > 0.60f);
-            bool tangCrimpSqueeze = (rVel.z < -0.80f);
-            if (handAtImpellerRoot && handWithCrimpingPliers && tangCrimpSqueeze && (now - s_lastTangCrimpTime > 1800)) {
-                s_lastTangCrimpTime = now;
-                VR_LOG_INFO("Environmental Gesture: DRAFT FAN BALANCE CLIP TANG CRIMPED & STAKED (Rz: %.2f)", rVel.z);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.98f; // Plier mechanical bottom-out snap (310 Hz)
-                vrState.leftHapticPulse = 0.65f;  // Blade deformation resistance (170 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Axial Play Vernier Caliper Dial Gauge Retaining Dog Set Screw (ADR 0243)
-            static DWORD s_lastVernierDogScrewTime = 0;
-            bool handAtVernierFixture = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                         vrState.leftController.grip > 0.55f);
-            bool handOnDogSetScrew = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                      vrState.rightController.trigger < 0.40f);
-            bool dogSetScrewTorque = (fabsf(rVel.x) > 0.65f);
-            if (handAtVernierFixture && handOnDogSetScrew && dogSetScrewTorque && (now - s_lastVernierDogScrewTime > 1800)) {
-                s_lastVernierDogScrewTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA TRUSS VERNIER DOG SET SCREW TORQUED & LOCKED (Rx: %.2f)", rVel.x);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Hardened dog screw torque stop (290 Hz)
-                vrState.leftHapticPulse = 0.60f;  // Hinge lug friction (160 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Phase Angle Stroboscope Synchronization (ADR 0244)
-            static DWORD s_lastStrobeSyncTime = 0;
-            bool handAimingStrobe = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
-                                     vrState.leftController.grip > 0.55f);
-            bool handTuningStrobeDial = (twoHandDist < 0.22f &&
-                                         vrState.rightController.grip > 0.45f && vrState.rightController.grip < 0.85f &&
-                                         vrState.rightController.trigger < 0.35f);
-            bool strobeDialTwist = (fabsf(rVel.x) > 0.65f);
-            if (handAimingStrobe && handTuningStrobeDial && strobeDialTwist && (now - s_lastStrobeSyncTime > 1800)) {
-                s_lastStrobeSyncTime = now;
-                VR_LOG_INFO("Environmental Gesture: DRAFT FAN STROBOSCOPE PHASE LOCKED (Rx: %.2f)", rVel.x);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.55f; // Optical flash sync micro-clicks (190 Hz)
-                vrState.leftHapticPulse = 0.90f;  // Stationary rotor strobe lock tone (310 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Axial Play Vernier Caliper Dial Gauge Retaining Dog Set Screw Driver Detent Release (ADR 0247)
-            static DWORD s_lastVernierDetentReleaseTime = 0;
-            bool handAtDogReleaseAnvil = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                          vrState.leftController.grip > 0.55f);
-            bool handOnDogReleaseScrew = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                          vrState.rightController.trigger < 0.40f);
-            bool dogReleaseTorque = (fabsf(rVel.x) > 0.65f);
-            if (handAtDogReleaseAnvil && handOnDogReleaseScrew && dogReleaseTorque && (now - s_lastVernierDetentReleaseTime > 1800)) {
-                s_lastVernierDetentReleaseTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA TRUSS VERNIER DOG DETENT RELEASED (Rx: %.2f)", rVel.x);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.65f; // Set screw thread unseating rasp (260 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Fixture clamp release pop (180 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Phase Angle Stroboscope Target Reflective Tape Burnish (ADR 0248)
-            static DWORD s_lastTapeBurnishTime = 0;
-            bool handAtTapeCollar = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
-                                     vrState.leftController.grip > 0.55f);
-            bool handWithBurnisher = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                      vrState.rightController.trigger > 0.50f);
-            bool tapeBurnishStroke = (rVel.z < -0.85f);
-            if (handAtTapeCollar && handWithBurnisher && tapeBurnishStroke && (now - s_lastTapeBurnishTime > 1800)) {
-                s_lastTapeBurnishTime = now;
-                VR_LOG_INFO("Environmental Gesture: DRAFT FAN STROBOSCOPE TARGET TAPE BURNISHED (Rz: %.2f)", rVel.z);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Roller burnish seating snap (280 Hz)
-                vrState.leftHapticPulse = 0.60f;  // Shaft cylindrical friction (140 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Axial Play Vernier Caliper Fixture Removal & Stowage (ADR 0251)
-            static DWORD s_lastVernierStowTime = 0;
-            bool handAtHingeAnvilCollar = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                           vrState.leftController.grip > 0.55f);
-            bool handGrippingCaliperChassis = (twoHandDist < 0.22f && vrState.rightController.grip > 0.60f &&
-                                               vrState.rightController.trigger > 0.50f);
-            bool caliperRemovalHaul = (rVel.z > 0.85f);
-            if (handAtHingeAnvilCollar && handGrippingCaliperChassis && caliperRemovalHaul && (now - s_lastVernierStowTime > 1800)) {
-                s_lastVernierStowTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA TRUSS VERNIER CALIPER REMOVED & STOWED (Rz: %.2f)", rVel.z);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Magnetic anvil quick-release clack (290 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Hinge lug clearance (150 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Phase Angle Optical Tachometer Sensor Alignment (ADR 0252)
-            static DWORD s_lastTachAlignTime = 0;
-            bool handHoldingTachClamp = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
-                                         vrState.leftController.grip > 0.55f);
-            bool handOnSensorGimbal = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                       vrState.rightController.trigger < 0.40f);
-            bool tachGimbalTwist = (fabsf(rVel.x) > 0.65f);
-            if (handHoldingTachClamp && handOnSensorGimbal && tachGimbalTwist && (now - s_lastTachAlignTime > 1800)) {
-                s_lastTachAlignTime = now;
-                VR_LOG_INFO("Environmental Gesture: DRAFT FAN OPTICAL TACHOMETER ALIGNED (Rx: %.2f)", rVel.x);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.55f; // Optical receiver micro-clicks (190 Hz)
-                vrState.leftHapticPulse = 0.95f;  // Optical alignment lock chime (320 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Axial Play Vernier Caliper Storage Pouch Magnetic Flap Seal (ADR 0255)
-            static DWORD s_lastVernierPouchSealTime = 0;
-            bool handAtThighHolsterRim = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > -0.45f && leftLocal.y < -0.10f &&
-                                          vrState.leftController.grip > 0.55f);
-            bool handOnMagneticFlap = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                       vrState.rightController.trigger > 0.50f);
-            bool flapSealStroke = (rVel.y < -0.65f);
-            if (handAtThighHolsterRim && handOnMagneticFlap && flapSealStroke && (now - s_lastVernierPouchSealTime > 1800)) {
-                s_lastVernierPouchSealTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA TRUSS VERNIER POUCH FLAP SEALED (Ry: %.2f)", rVel.y);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Neodymium magnetic clasp snap (270 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Kevlar fabric tension (130 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Cable Strain Relief Clamp Screw (ADR 0256)
-            static DWORD s_lastCableClampTime = 0;
-            bool handAtCableSaddle = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
-                                      vrState.leftController.grip > 0.55f);
-            bool handOnClampScrew = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                     vrState.rightController.trigger < 0.40f);
-            bool cableClampTorque = (fabsf(rVel.x) > 0.65f);
-            if (handAtCableSaddle && handOnClampScrew && cableClampTorque && (now - s_lastCableClampTime > 1800)) {
-                s_lastCableClampTime = now;
-                VR_LOG_INFO("Environmental Gesture: DRAFT FAN TACHOMETER CABLE CLAMP TORQUED (Rx: %.2f)", rVel.x);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Saddle clamp torque stop (280 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Shielded cable compression (140 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Axial Play Vernier Caliper Storage Pouch Retention D-Ring Carabiner Clip (ADR 0259)
-            static DWORD s_lastPouchCarabinerTime = 0;
-            bool handAtPouchDRing = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > -0.45f && leftLocal.y < -0.10f &&
-                                     vrState.leftController.grip > 0.55f);
-            bool handOnCarabinerGate = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                        vrState.rightController.trigger > 0.50f);
-            bool pouchCarabinerSnap = (rVel.z < -0.80f);
-            if (handAtPouchDRing && handOnCarabinerGate && pouchCarabinerSnap && (now - s_lastPouchCarabinerTime > 1800)) {
-                s_lastPouchCarabinerTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA TRUSS VERNIER POUCH CARABINER SNAPPED (Rz: %.2f)", rVel.z);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.98f; // Spring-steel carabiner gate snap (290 Hz)
-                vrState.leftHapticPulse = 0.60f;  // Titanium D-ring tension (140 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Cable Shield Grounding Lug Screw (ADR 0260)
-            static DWORD s_lastTachGroundScrewTime = 0;
-            bool handAtPedestalBoss = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
-                                       vrState.leftController.grip > 0.55f);
-            bool handOnGroundScrew = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                      vrState.rightController.trigger < 0.40f);
-            bool tachGroundScrewTorque = (fabsf(rVel.x) > 0.65f);
-            if (handAtPedestalBoss && handOnGroundScrew && tachGroundScrewTorque && (now - s_lastTachGroundScrewTime > 1800)) {
-                s_lastTachGroundScrewTime = now;
-                VR_LOG_INFO("Environmental Gesture: DRAFT FAN TACHOMETER GROUND SCREW TORQUED (Rx: %.2f)", rVel.x);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.98f; // Grounding screw torque stop (290 Hz)
-                vrState.leftHapticPulse = 0.60f;  // Braided copper wire compression (150 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Photovoltaic Cell Busbar Laser Weld Inspection Pyrometer (ADR 0263)
-            static DWORD s_lastBusbarPyrometerTime = 0;
-            bool handAtBusbarGuide = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                      vrState.leftController.grip > 0.55f);
-            bool handOnPyrometerHead = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                        vrState.rightController.trigger > 0.50f);
-            bool pyrometerScanStroke = (rVel.z < -0.80f);
-            if (handAtBusbarGuide && handOnPyrometerHead && pyrometerScanStroke && (now - s_lastBusbarPyrometerTime > 1800)) {
-                s_lastBusbarPyrometerTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR BUSBAR WELD PYROMETER INSPECTED (Rz: %.2f)", rVel.z);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Laser pyrometer pulse chime (310 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Busbar thermal contact buzz (160 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Signal Amplifier Potentiometer (ADR 0264)
-            static DWORD s_lastTachPotentiometerTime = 0;
-            bool handAtAmpCasing = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
-                                    vrState.leftController.grip > 0.55f);
-            bool handOnPotentiometerTrimmer = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                               vrState.rightController.trigger < 0.40f);
-            bool tachPotentiometerTorque = (fabsf(rVel.x) > 0.65f);
-            if (handAtAmpCasing && handOnPotentiometerTrimmer && tachPotentiometerTorque && (now - s_lastTachPotentiometerTime > 1800)) {
-                s_lastTachPotentiometerTime = now;
-                VR_LOG_INFO("Environmental Gesture: DRAFT FAN TACHOMETER POTENTIOMETER ADJUSTED (Rx: %.2f)", rVel.x);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.55f; // Potentiometer detent wiper micro-clicks (200 Hz)
-                vrState.leftHapticPulse = 0.95f;  // Signal gain lock chime (330 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode Heat Sink Clamp Spring (ADR 0267)
-            static DWORD s_lastDiodeClampSpringTime = 0;
-            bool handAtDiodeHousing = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                       vrState.leftController.grip > 0.55f);
-            bool handOnDiodeSpring = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                      vrState.rightController.trigger > 0.50f);
-            bool diodeSpringStroke = (rVel.y < -0.65f);
-            if (handAtDiodeHousing && handOnDiodeSpring && diodeSpringStroke && (now - s_lastDiodeClampSpringTime > 1800)) {
-                s_lastDiodeClampSpringTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR BYPASS DIODE CLAMP SPRING SEATED (Ry: %.2f)", rVel.y);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.95f; // Tempered spring-steel snap (280 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Heat sink pad compression (140 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Signal Cable Magnetic Shield Wrap (ADR 0268)
-            static DWORD s_lastTachShieldWrapTime = 0;
-            bool handAtMotorPedestalCable = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
-                                             vrState.leftController.grip > 0.55f);
-            bool handOnShieldFoil = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                     vrState.rightController.trigger < 0.40f);
-            bool tachShieldWrapTorque = (fabsf(rVel.x) > 0.65f);
-            if (handAtMotorPedestalCable && handOnShieldFoil && tachShieldWrapTorque && (now - s_lastTachShieldWrapTime > 1800)) {
-                s_lastTachShieldWrapTime = now;
-                VR_LOG_INFO("Environmental Gesture: DRAFT FAN TACHOMETER SHIELD FOIL WRAPPED (Rx: %.2f)", rVel.x);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Metallic shielding wrap click (260 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Silicone cable strain (150 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode Ceramic Insulator Wafer Insertion (ADR 0271)
-            static DWORD s_lastDiodeCeramicWaferTime = 0;
-            bool handAtDiodePlate = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                     vrState.leftController.grip > 0.55f);
-            bool handOnCeramicWafer = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                       vrState.rightController.trigger > 0.50f);
-            bool ceramicWaferStroke = (rVel.z < -0.80f);
-            if (handAtDiodePlate && handOnCeramicWafer && ceramicWaferStroke && (now - s_lastDiodeCeramicWaferTime > 1800)) {
-                s_lastDiodeCeramicWaferTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR DIODE CERAMIC WAFER INSERTED (Rz: %.2f)", rVel.z);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Ceramic wafer detent seating snap (290 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Mounting plate guide tension (150 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Signal Cable Silicone Strain Relief Boot (ADR 0272)
-            static DWORD s_lastTachStrainBootTime = 0;
-            bool handAtGlandAdapter = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
-                                       vrState.leftController.grip > 0.55f);
-            bool handOnSiliconeBoot = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                       vrState.rightController.trigger < 0.40f);
-            bool tachStrainBootStroke = (rVel.z < -0.80f);
-            if (handAtGlandAdapter && handOnSiliconeBoot && tachStrainBootStroke && (now - s_lastTachStrainBootTime > 1800)) {
-                s_lastTachStrainBootTime = now;
-                VR_LOG_INFO("Environmental Gesture: DRAFT FAN TACHOMETER STRAIN RELIEF BOOT SEATED (Rz: %.2f)", rVel.z);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Elastomeric boot detent snap (270 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Gland adapter friction (140 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode Ceramic Insulator Wafer Lock Tab Plier Crimp (ADR 0275)
-            static DWORD s_lastWaferTabCrimpTime = 0;
-            bool handAtDiodePlateCollar = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                           vrState.leftController.grip > 0.55f);
-            bool handOnTabCrimper = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                     vrState.rightController.trigger > 0.50f);
-            bool waferTabCrimpStroke = (rVel.y < -0.65f);
-            if (handAtDiodePlateCollar && handOnTabCrimper && waferTabCrimpStroke && (now - s_lastWaferTabCrimpTime > 1800)) {
-                s_lastWaferTabCrimpTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR DIODE WAFER TAB CRIMPED (Ry: %.2f)", rVel.y);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.95f; // Tab deformation crimp snap (300 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Bracket clamp tension (160 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Signal Cable Heat-Shrink Sleeve Heat Gun Pass (ADR 0276)
-            static DWORD s_lastTachHeatShrinkTime = 0;
-            bool handAtCableBootCollar = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
-                                          vrState.leftController.grip > 0.55f);
-            bool handOnHeatGunNozzle = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                        vrState.rightController.trigger < 0.40f);
-            bool tachHeatGunSweep = (fabsf(rVel.x) > 0.65f);
-            if (handAtCableBootCollar && handOnHeatGunNozzle && tachHeatGunSweep && (now - s_lastTachHeatShrinkTime > 1800)) {
-                s_lastTachHeatShrinkTime = now;
-                VR_LOG_INFO("Environmental Gesture: DRAFT FAN TACHOMETER HEAT SHRINK SLEEVE CURED (Rx: %.2f)", rVel.x);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Hot-air blower buzz (250 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Curing sleeve contraction (150 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode Terminal Lead Screw Torquing (ADR 0279)
-            static DWORD s_lastDiodeLeadScrewTime = 0;
-            bool handAtDiodeLugCollar = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                         vrState.leftController.grip > 0.55f);
-            bool handOnLeadHexDriver = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                        vrState.rightController.trigger < 0.40f);
-            bool diodeLeadScrewTorque = (fabsf(rVel.x) > 0.65f);
-            if (handAtDiodeLugCollar && handOnLeadHexDriver && diodeLeadScrewTorque && (now - s_lastDiodeLeadScrewTime > 1800)) {
-                s_lastDiodeLeadScrewTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR DIODE TERMINAL LEAD SCREW TORQUED (Rx: %.2f)", rVel.x);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Screw torque stop click (290 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Copper lug tension (160 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Signal Amplifier BNC Output Connector Twist-Lock (ADR 0280)
-            static DWORD s_lastTachBncLockTime = 0;
-            bool handAtBncPortBoss = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
-                                      vrState.leftController.grip > 0.55f);
-            bool handOnBncCollar = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                    vrState.rightController.trigger > 0.50f);
-            bool tachBncLockMotion = (rVel.z < -0.70f && fabsf(rVel.x) > 0.60f);
-            if (handAtBncPortBoss && handOnBncCollar && tachBncLockMotion && (now - s_lastTachBncLockTime > 1800)) {
-                s_lastTachBncLockTime = now;
-                VR_LOG_INFO("Environmental Gesture: DRAFT FAN TACHOMETER BNC CONNECTOR LOCKED (Rz: %.2f, Rx: %.2f)", rVel.z, rVel.x);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Bayonet detent snap (280 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Bulkhead receptacle resistance (150 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode Terminal Protective Silicone Boot Slide (ADR 0283)
-            static DWORD s_lastDiodeBootSlideTime = 0;
-            bool handAtDiodeLugBracket = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                          vrState.leftController.grip > 0.55f);
-            bool handOnTerminalBoot = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                       vrState.rightController.trigger > 0.50f);
-            bool diodeBootSlideStroke = (rVel.z < -0.80f);
-            if (handAtDiodeLugBracket && handOnTerminalBoot && diodeBootSlideStroke && (now - s_lastDiodeBootSlideTime > 1800)) {
-                s_lastDiodeBootSlideTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR DIODE TERMINAL BOOT SLID (Rz: %.2f)", rVel.z);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.95f; // Elastomeric boot detent snap (280 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Bracket guide tension (140 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Signal Amplifier BNC Cable P-Clamp Screw (ADR 0284)
-            static DWORD s_lastTachPClampScrewTime = 0;
-            bool handAtPClampSaddle = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
-                                       vrState.leftController.grip > 0.55f);
-            bool handOnPClampHexDriver = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                         vrState.rightController.trigger < 0.40f);
-            bool tachPClampScrewTorque = (fabsf(rVel.x) > 0.65f);
-            if (handAtPClampSaddle && handOnPClampHexDriver && tachPClampScrewTorque && (now - s_lastTachPClampScrewTime > 1800)) {
-                s_lastTachPClampScrewTime = now;
-                VR_LOG_INFO("Environmental Gesture: DRAFT FAN TACHOMETER P-CLAMP SCREW TORQUED (Rx: %.2f)", rVel.x);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // P-clamp torque stop click (290 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Cushioned saddle compression (150 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode Silicone Boot Retention Zip-Tie Tension & Flush Cut (ADR 0287)
-            static DWORD s_lastDiodeZipTieTime = 0;
-            bool handAtDiodeBootCollar = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                          vrState.leftController.grip > 0.55f);
-            bool handOnZipTieTensioner = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                          vrState.rightController.trigger > 0.50f);
-            bool diodeZipTieStroke = (rVel.y < -0.65f);
-            if (handAtDiodeBootCollar && handOnZipTieTensioner && diodeZipTieStroke && (now - s_lastDiodeZipTieTime > 1800)) {
-                s_lastDiodeZipTieTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR DIODE BOOT ZIP-TIE TENSIONED (Ry: %.2f)", rVel.y);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Flush-cut blade snap (310 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Boot compression tension (160 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Diagnostic Oscilloscope Probe Ground Clip Attachment (ADR 0288)
-            static DWORD s_lastTachGroundClipTime = 0;
-            bool handAtGroundStud = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
-                                     vrState.leftController.grip > 0.55f);
-            bool handOnGroundClip = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                     vrState.rightController.trigger < 0.40f);
-            bool tachGroundClipStroke = (rVel.z < -0.75f);
-            if (handAtGroundStud && handOnGroundClip && tachGroundClipStroke && (now - s_lastTachGroundClipTime > 1800)) {
-                s_lastTachGroundClipTime = now;
-                VR_LOG_INFO("Environmental Gesture: DRAFT FAN TACHOMETER OSCILLOSCOPE GROUND CLIP ATTACHED (Rz: %.2f)", rVel.z);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Alligator clip bite snap (280 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Ground stud contact (140 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode Thermal Grease Syringe Bead Extrusion (ADR 0291)
-            static DWORD s_lastDiodeGreaseExtrudeTime = 0;
-            bool handAtHeatsinkPocket = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                         vrState.leftController.grip > 0.55f);
-            bool handOnGreaseSyringe = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                        vrState.rightController.trigger > 0.50f);
-            bool diodeGreaseExtrudeStroke = (fabsf(rVel.x) > 0.65f);
-            if (handAtHeatsinkPocket && handOnGreaseSyringe && diodeGreaseExtrudeStroke && (now - s_lastDiodeGreaseExtrudeTime > 1800)) {
-                s_lastDiodeGreaseExtrudeTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR DIODE THERMAL GREASE EXTRUDED (Rx: %.2f)", rVel.x);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Viscous paste extrusion drag (260 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Heatsink pocket stabilization (140 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Diagnostic Oscilloscope Frequency Dial Alignment (ADR 0292)
-            static DWORD s_lastTachDialAlignTime = 0;
-            bool handAtOscilloscopeBezel = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
-                                            vrState.leftController.grip > 0.55f);
-            bool handOnTachDial = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                   vrState.rightController.trigger < 0.40f);
-            bool tachDialAlignStroke = (fabsf(rVel.x) > 0.70f);
-            if (handAtOscilloscopeBezel && handOnTachDial && tachDialAlignStroke && (now - s_lastTachDialAlignTime > 1800)) {
-                s_lastTachDialAlignTime = now;
-                VR_LOG_INFO("Environmental Gesture: DRAFT FAN TACHOMETER OSCILLOSCOPE FREQUENCY DIAL ALIGNED (Rx: %.2f)", rVel.x);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Rotary switch detent click (320 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Chassis fan rumble (120 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode Ceramic Wafer Alignment Guide Pin Insertion (ADR 0295)
-            static DWORD s_lastDiodeGuidePinTime = 0;
-            bool handAtHeatsinkCollar = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                         vrState.leftController.grip > 0.55f);
-            bool handOnGuidePin = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                   vrState.rightController.trigger < 0.40f);
-            bool diodeGuidePinStroke = (rVel.z < -0.75f);
-            if (handAtHeatsinkCollar && handOnGuidePin && diodeGuidePinStroke && (now - s_lastDiodeGuidePinTime > 1800)) {
-                s_lastDiodeGuidePinTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR DIODE GUIDE PIN INSERTED (Rz: %.2f)", rVel.z);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Polished guide pin sliding stop click (290 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Heatsink pocket grounding tension (150 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Diagnostic Oscilloscope Trigger Threshold Level Knob Twist (ADR 0296)
-            static DWORD s_lastTachTriggerKnobTime = 0;
-            bool handAtOscilloscopeBracket = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
-                                              vrState.leftController.grip > 0.55f);
-            bool handOnTriggerKnob = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                      vrState.rightController.trigger > 0.50f);
-            bool tachTriggerKnobStroke = (fabsf(rVel.x) > 0.65f);
-            if (handAtOscilloscopeBracket && handOnTriggerKnob && tachTriggerKnobStroke && (now - s_lastTachTriggerKnobTime > 1800)) {
-                s_lastTachTriggerKnobTime = now;
-                VR_LOG_INFO("Environmental Gesture: DRAFT FAN TACHOMETER OSCILLOSCOPE TRIGGER KNOB TWISTED (Rx: %.2f)", rVel.x);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Trigger potentiometer micro-stepped clicks (310 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Fan induction motor harmonics (130 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode Ceramic Wafer Alignment Guide Pin Retraction & Latch Engagement (ADR 0299)
-            static DWORD s_lastDiodePinRetractTime = 0;
-            bool handAtHeatsinkLatchCollar = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                              vrState.leftController.grip > 0.55f);
-            bool handOnGuidePinHead = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                       vrState.rightController.trigger < 0.40f);
-            bool diodePinRetractStroke = (rVel.z > 0.75f);
-            if (handAtHeatsinkLatchCollar && handOnGuidePinHead && diodePinRetractStroke && (now - s_lastDiodePinRetractTime > 1800)) {
-                s_lastDiodePinRetractTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR DIODE GUIDE PIN RETRACTED & LATCH ENGAGED (Rz: %.2f)", rVel.z);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.95f; // Spring latch snap (280 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Heatsink pocket resonance (140 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Diagnostic Oscilloscope Channel Input Coupling Toggle (ADR 0300)
-            static DWORD s_lastTachCouplingToggleTime = 0;
-            bool handAtOscilloscopeLowerBezel = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
-                                                 vrState.leftController.grip > 0.55f);
-            bool handOnCouplingSwitch = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                         vrState.rightController.trigger > 0.50f);
-            bool tachCouplingToggleStroke = (fabsf(rVel.y) > 0.65f);
-            if (handAtOscilloscopeLowerBezel && handOnCouplingSwitch && tachCouplingToggleStroke && (now - s_lastTachCouplingToggleTime > 1800)) {
-                s_lastTachCouplingToggleTime = now;
-                VR_LOG_INFO("Environmental Gesture: DRAFT FAN TACHOMETER OSCILLOSCOPE CHANNEL COUPLING TOGGLED (Ry: %.2f)", rVel.y);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // 3-position slide switch detent click (300 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Chassis grounding vibration (130 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode Ceramic Wafer Lock Tab Plier Final Clinch (ADR 0303)
-            static DWORD s_lastDiodeTabClinchTime = 0;
-            bool handAtDiodePocketBracket = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                             vrState.leftController.grip > 0.55f);
-            bool handOnClinchPliers = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                       vrState.rightController.trigger > 0.50f);
-            bool diodeTabClinchStroke = (rVel.y < -0.70f);
-            if (handAtDiodePocketBracket && handOnClinchPliers && diodeTabClinchStroke && (now - s_lastDiodeTabClinchTime > 1800)) {
-                s_lastDiodeTabClinchTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR DIODE LOCK TAB CLINCHED (Ry: %.2f)", rVel.y);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Metal tab deformation crunch (310 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Bracket reaction force (160 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Diagnostic Oscilloscope Volts/Div Vertical Sensitivity Rotary Switch Step (ADR 0304)
-            static DWORD s_lastTachVoltsDivTime = 0;
-            bool handAtOscilloscopeUpperBezel = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
-                                                 vrState.leftController.grip > 0.55f);
-            bool handOnVoltsDivKnob = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                       vrState.rightController.trigger < 0.40f);
-            bool tachVoltsDivStroke = (fabsf(rVel.x) > 0.70f);
-            if (handAtOscilloscopeUpperBezel && handOnVoltsDivKnob && tachVoltsDivStroke && (now - s_lastTachVoltsDivTime > 1800)) {
-                s_lastTachVoltsDivTime = now;
-                VR_LOG_INFO("Environmental Gesture: DRAFT FAN TACHOMETER OSCILLOSCOPE VOLTS/DIV STEPPED (Rx: %.2f)", rVel.x);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // 8-position detented rotary switch clicks (330 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Chassis frame vibration (130 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode Cathode Terminal Lug Lead Torque Wrench Tighten (ADR 0307)
-            static DWORD s_lastDiodeLugTorqueTime = 0;
-            bool handAtDiodeCathodePost = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                           vrState.leftController.grip > 0.55f);
-            bool handOnTorqueWrench = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                       vrState.rightController.trigger < 0.40f);
-            bool diodeLugTorqueStroke = (fabsf(rVel.x) > 0.70f);
-            if (handAtDiodeCathodePost && handOnTorqueWrench && diodeLugTorqueStroke && (now - s_lastDiodeLugTorqueTime > 1800)) {
-                s_lastDiodeLugTorqueTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR DIODE TERMINAL LUG TORQUED (Rx: %.2f)", rVel.x);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Mechanical torque wrench break-over click (320 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Terminal post reaction tension (150 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Diagnostic Oscilloscope Timebase Variable Vernier Calibration Knob Twist (ADR 0308)
-            static DWORD s_lastTachVernierTime = 0;
-            bool handAtOscilloscopeSideBracket = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
-                                                  vrState.leftController.grip > 0.55f);
-            bool handOnVernierKnob = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                      vrState.rightController.trigger > 0.50f);
-            bool tachVernierStroke = (fabsf(rVel.x) > 0.65f);
-            if (handAtOscilloscopeSideBracket && handOnVernierKnob && tachVernierStroke && (now - s_lastTachVernierTime > 1800)) {
-                s_lastTachVernierTime = now;
-                VR_LOG_INFO("Environmental Gesture: DRAFT FAN TACHOMETER OSCILLOSCOPE TIMEBASE VERNIER TWISTED (Rx: %.2f)", rVel.x);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Continuous viscous potentiometer drag (300 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Chassis grounding hum (120 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode Silicone Insulator Boot Final Slide & Hermetic Seal Clench (ADR 0311)
-            static DWORD s_lastDiodeBootSealTime = 0;
-            bool handAtDiodeBracketCollar = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                             vrState.leftController.grip > 0.55f);
-            bool handOnBootCollar = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                     vrState.rightController.trigger > 0.50f);
-            bool diodeBootSealStroke = (rVel.z < -0.80f);
-            if (handAtDiodeBracketCollar && handOnBootCollar && diodeBootSealStroke && (now - s_lastDiodeBootSealTime > 1800)) {
-                s_lastDiodeBootSealTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR DIODE BOOT HERMETIC SEAL CLENCHED (Rz: %.2f)", rVel.z);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.95f; // Elastomeric seal seating pop (290 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Heatsink bracket reaction (150 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Diagnostic Oscilloscope Phase Marker Reticle Crosshair Alignment (ADR 0312)
-            static DWORD s_lastTachReticleAlignTime = 0;
-            bool handAtOscilloscopeLowerBezelPos = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
-                                                    vrState.leftController.grip > 0.55f);
-            bool handOnReticleKnob = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                      vrState.rightController.trigger < 0.40f);
-            bool tachReticleAlignStroke = (fabsf(rVel.x) > 0.65f && fabsf(rVel.y) > 0.45f);
-            if (handAtOscilloscopeLowerBezelPos && handOnReticleKnob && tachReticleAlignStroke && (now - s_lastTachReticleAlignTime > 1800)) {
-                s_lastTachReticleAlignTime = now;
-                VR_LOG_INFO("Environmental Gesture: DRAFT FAN TACHOMETER OSCILLOSCOPE RETICLE CROSSHAIR ALIGNED (Rx: %.2f, Ry: %.2f)", rVel.x, rVel.y);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Reticle alignment lock detent click (340 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Chassis resonance hum (130 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode Silicone Insulator Boot Nylon Cable Tie Tension & Flush Cutter Snip (ADR 0315)
-            static DWORD s_lastDiodeZipTieTensionTime = 0;
-            bool handAtDiodeBootNeck = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                        vrState.leftController.grip > 0.55f);
-            bool handOnZipTieGun = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                    vrState.rightController.trigger > 0.50f);
-            bool diodeZipTieTensionStroke = (fabsf(rVel.x) > 0.65f);
-            if (handAtDiodeBootNeck && handOnZipTieGun && diodeZipTieTensionStroke && (now - s_lastDiodeZipTieTensionTime > 1800)) {
-                s_lastDiodeZipTieTensionTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR DIODE BOOT ZIP TIE TENSIONED & FLUSH CUT (Rx: %.2f)", rVel.x);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Mechanical guillotine blade flush-cut snap (330 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Heatsink bracket reaction (140 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Optical Tachometer Diagnostic Oscilloscope Vector Phase Angle Polar Display Graticule Lock (ADR 0316)
-            static DWORD s_lastTachPolarLockTime = 0;
-            bool handAtOscilloscopeBezelFrame = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
-                                                 vrState.leftController.grip > 0.55f);
-            bool handOnPolarRockerSwitch = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                            vrState.rightController.trigger < 0.40f);
-            bool tachPolarLockStroke = (rVel.y > 0.65f);
-            if (handAtOscilloscopeBezelFrame && handOnPolarRockerSwitch && tachPolarLockStroke && (now - s_lastTachPolarLockTime > 1800)) {
-                s_lastTachPolarLockTime = now;
-                VR_LOG_INFO("Environmental Gesture: DRAFT FAN TACHOMETER OSCILLOSCOPE POLAR GRATICULE DISPLAY LOCKED (Ry: %.2f)", rVel.y);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Rocker switch toggle detent snap (350 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Chassis grounding vibration (130 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode Circuit Continuity & Resistance Multimeter Probe Test (ADR 0319)
-            static DWORD s_lastDiodeMultimeterProbeTime = 0;
-            bool handAtGroundLug = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                    vrState.leftController.grip > 0.55f);
-            bool handOnCathodeProbe = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                       vrState.rightController.trigger < 0.40f);
-            bool diodeProbeStroke = (rVel.z < -0.75f);
-            if (handAtGroundLug && handOnCathodeProbe && diodeProbeStroke && (now - s_lastDiodeMultimeterProbeTime > 1800)) {
-                s_lastDiodeMultimeterProbeTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR DIODE CONTINUITY MULTIMETER PROBE TESTED (Rz: %.2f)", rVel.z);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.95f; // Gold-plated probe tip contact snap (310 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Ground clip reaction (150 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Correction Trial Weight Clip Installation (ADR 0320)
-            static DWORD s_lastTachTrialWeightTime = 0;
-            bool handAtImpellerRim = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
-                                      vrState.leftController.grip > 0.55f);
-            bool handOnTrialWeightClip = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                          vrState.rightController.trigger > 0.50f);
-            bool tachTrialWeightStroke = (rVel.z < -0.80f);
-            if (handAtImpellerRim && handOnTrialWeightClip && tachTrialWeightStroke && (now - s_lastTachTrialWeightTime > 1800)) {
-                s_lastTachTrialWeightTime = now;
-                VR_LOG_INFO("Environmental Gesture: DRAFT FAN DYNAMIC BALANCE TRIAL WEIGHT CLIP INSTALLED (Rz: %.2f)", rVel.z);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Spring-steel balance clip seating thud (360 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Impeller acoustic resonance (140 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Photovoltaic Array Bypass Diode High-Current DC Bus Main Breaker Switch Interlock Clench (ADR 0323)
-            static DWORD s_lastDiodeBusBreakerTime = 0;
-            bool handAtBreakerHousing = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                         vrState.leftController.grip > 0.55f);
-            bool handOnBreakerHandle = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                        vrState.rightController.trigger > 0.50f);
-            bool diodeBreakerThrowStroke = (rVel.y < -0.80f);
-            if (handAtBreakerHousing && handOnBreakerHandle && diodeBreakerThrowStroke && (now - s_lastDiodeBusBreakerTime > 1800)) {
-                s_lastDiodeBusBreakerTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR DIODE DC BUS MAIN BREAKER CLOSED & INTERLOCKED (Ry: %.2f)", rVel.y);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.98f; // Magnetic blowout arc shockwave (380 Hz)
-                vrState.leftHapticPulse = 0.60f;  // Busbar hum (160 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Correction Trial Weight Lock-Tang Staking Punch (ADR 0324)
-            static DWORD s_lastTachWeightStakeTime = 0;
-            bool handAtImpellerBladeEdge = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
-                                            vrState.leftController.grip > 0.55f);
-            bool handOnStakingPunch = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                       vrState.rightController.trigger < 0.40f);
-            bool tachWeightStakeStroke = (rVel.z < -0.85f);
-            if (handAtImpellerBladeEdge && handOnStakingPunch && tachWeightStakeStroke && (now - s_lastTachWeightStakeTime > 1800)) {
-                s_lastTachWeightStakeTime = now;
-                VR_LOG_INFO("Environmental Gesture: DRAFT FAN TRIAL WEIGHT LOCK-TANG STAKED (Rz: %.2f)", rVel.z);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.98f; // Center punch detent impact shockwave (380 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Impeller acoustic chime (150 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Photovoltaic Array Primary Sun-Tracking Gimbal Pitch Actuator Manual Clasp Unlatch (ADR 0327)
-            static DWORD s_lastGimbalPitchClaspTime = 0;
-            bool handAtGimbalClevisFrame = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                            vrState.leftController.grip > 0.55f);
-            bool handOnPitchClasp = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                     vrState.rightController.trigger > 0.50f);
-            bool gimbalPitchUnlatchStroke = (rVel.z > 0.75f && rVel.y > 0.50f);
-            if (handAtGimbalClevisFrame && handOnPitchClasp && gimbalPitchUnlatchStroke && (now - s_lastGimbalPitchClaspTime > 1800)) {
-                s_lastGimbalPitchClaspTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR GIMBAL PITCH CLASP UNLATCHED (Rz: %.2f, Ry: %.2f)", rVel.z, rVel.y);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_SPACE);
-                SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.95f; // Hardened steel lock clasp release snap (350 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Gimbal frame resonance (140 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Rotor Dynamic Balance Correction Residual Vibration Sensor Zero-Calibration Verification (ADR 0328)
-            static DWORD s_lastTachVibZeroTime = 0;
-            bool handAtOscilloscopeBezelRim = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
-                                               vrState.leftController.grip > 0.55f);
-            bool handOnZeroTrimDial = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                       vrState.rightController.trigger < 0.40f);
-            bool tachVibZeroStroke = (fabsf(rVel.x) > 0.65f);
-            if (handAtOscilloscopeBezelRim && handOnZeroTrimDial && tachVibZeroStroke && (now - s_lastTachVibZeroTime > 1800)) {
-                s_lastTachVibZeroTime = now;
-                VR_LOG_INFO("Environmental Gesture: DRAFT FAN VIBRATION SENSOR ZERO-CALIBRATED (Rx: %.2f)", rVel.x);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // 10-turn precision potentiometer drag & detent click (360 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Chassis grounding vibration (130 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Photovoltaic Array Primary Sun-Tracking Gimbal Yaw Actuator Manual Clasp Unlatch (ADR 0331)
-            static DWORD s_lastGimbalYawClaspTime = 0;
-            bool handAtGimbalYawCollar = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                          vrState.leftController.grip > 0.55f);
-            bool handOnYawClasp = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                   vrState.rightController.trigger > 0.50f);
-            bool gimbalYawUnlatchStroke = (fabsf(rVel.x) > 0.75f && rVel.z > 0.50f);
-            if (handAtGimbalYawCollar && handOnYawClasp && gimbalYawUnlatchStroke && (now - s_lastGimbalYawClaspTime > 1800)) {
-                s_lastGimbalYawClaspTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR GIMBAL YAW CLASP UNLATCHED (Rx: %.2f, Rz: %.2f)", rVel.x, rVel.z);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_SPACE);
-                SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.95f; // Hardened titanium yaw clasp toggle snap (360 Hz)
-                vrState.leftHapticPulse = 0.52f;  // Gimbal yoke low-frequency resonance (145 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Motor Starter Circuit Breaker Interlock Close (ADR 0332)
-            static DWORD s_lastDraftFanBreakerTime = 0;
-            bool handAtStarterDoorFlange = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
-                                            vrState.leftController.grip > 0.55f);
-            bool handOnStarterBreaker = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                         vrState.rightController.trigger < 0.40f);
-            bool draftFanBreakerStroke = (rVel.y < -0.85f && rVel.z < -0.50f);
-            if (handAtStarterDoorFlange && handOnStarterBreaker && draftFanBreakerStroke && (now - s_lastDraftFanBreakerTime > 1800)) {
-                s_lastDraftFanBreakerTime = now;
-                VR_LOG_INFO("Environmental Gesture: DRAFT FAN MOTOR STARTER BREAKER CLOSED (Ry: %.2f, Rz: %.2f)", rVel.y, rVel.z);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.98f; // 480V copper bus contact closure snap (370 Hz)
-                vrState.leftHapticPulse = 0.58f;  // Electromagnetic inductive hum rumble (135 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Photovoltaic Array Primary Sun-Tracking Gimbal Harmonic Drive Manual Hand-Crank Slew Calibration (ADR 0335)
-            static DWORD s_lastGimbalHandCrankTime = 0;
-            bool handAtHarmonicDriveCollar = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                              vrState.leftController.grip > 0.55f);
-            bool handOnCrankKnob = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                    vrState.rightController.trigger < 0.40f);
-            float crankCircVel = sqrtf(rVel.y * rVel.y + rVel.z * rVel.z);
-            bool gimbalHandCrankStroke = (crankCircVel > 0.65f);
-            if (handAtHarmonicDriveCollar && handOnCrankKnob && gimbalHandCrankStroke && (now - s_lastGimbalHandCrankTime > 1800)) {
-                s_lastGimbalHandCrankTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR GIMBAL HARMONIC DRIVE HAND-CRANK SLEW (CircVel: %.2f)", crankCircVel);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.92f; // Harmonic drive flexspline gear mesh friction (330 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Structural gearbox casing resonance (150 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Variable Frequency Drive Speed Control Potentiometer Dial Adjustment (ADR 0336)
-            static DWORD s_lastDraftFanVfdPotTime = 0;
-            bool handAtVfdChassisFrame = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
-                                          vrState.leftController.grip > 0.55f);
-            bool handOnVfdPotDial = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                     vrState.rightController.trigger < 0.40f);
-            bool draftFanVfdPotStroke = (rVel.x > 0.65f && rVel.y > 0.45f);
-            if (handAtVfdChassisFrame && handOnVfdPotDial && draftFanVfdPotStroke && (now - s_lastDraftFanVfdPotTime > 1800)) {
-                s_lastDraftFanVfdPotTime = now;
-                VR_LOG_INFO("Environmental Gesture: DRAFT FAN VFD SPEED POT ADJUSTED (Rx: %.2f, Ry: %.2f)", rVel.x, rVel.y);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_RETURN);
-                SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.95f; // Precision 10-turn potentiometer drag (360 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Inverter IGBT switching hum (140 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Photovoltaic Array Primary Sun-Tracking Gimbal Optical Sun-Sensor Quadrant Photodiode Collimator Alignment (ADR 0339)
-            static DWORD s_lastSunSensorAlignTime = 0;
-            bool handAtSunSensorCollar = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                          vrState.leftController.grip > 0.55f);
-            bool handOnCollimatorRing = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                         vrState.rightController.trigger < 0.40f);
-            bool sunSensorAlignStroke = (rVel.z < -0.75f && fabsf(rVel.x) > 0.50f);
-            if (handAtSunSensorCollar && handOnCollimatorRing && sunSensorAlignStroke && (now - s_lastSunSensorAlignTime > 1800)) {
-                s_lastSunSensorAlignTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR SUN-SENSOR COLLIMATOR ALIGNED (Rz: %.2f, Rx: %.2f)", rVel.z, rVel.x);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap('Q');
-                SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Optical collimator barrel lock detent snap (370 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Outboard spar structural resonance (160 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Variable Frequency Drive Acceleration Ramp Parameter Keypad Entry (ADR 0340)
-            static DWORD s_lastDraftFanKeypadTime = 0;
-            bool handAtKeypadBezel = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
-                                      vrState.leftController.grip > 0.55f);
-            bool handPointingKeypad = (twoHandDist < 0.22f && vrState.rightController.grip < 0.45f &&
-                                       vrState.rightController.trigger < 0.35f);
-            bool draftFanKeypadPokeStroke = (rVel.z < -0.70f);
-            if (handAtKeypadBezel && handPointingKeypad && draftFanKeypadPokeStroke && (now - s_lastDraftFanKeypadTime > 1800)) {
-                s_lastDraftFanKeypadTime = now;
-                VR_LOG_INFO("Environmental Gesture: DRAFT FAN VFD KEYPAD ACCELERATION PARAMETER ENTERED (Rz: %.2f)", rVel.z);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Membrane switch tactile snap (380 Hz)
-                vrState.leftHapticPulse = 0.50f;  // Chassis enclosure resonance (130 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Photovoltaic Array Primary Sun-Tracking Gimbal Closed-Loop Optical Tracking Servo Controller Enable Switch Toggle (ADR 0343)
-            static DWORD s_lastGimbalServoEnableTime = 0;
-            bool handAtServoEnclosureCollar = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                               vrState.leftController.grip > 0.55f);
-            bool handOnServoToggleBat = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                         vrState.rightController.trigger < 0.40f);
-            bool gimbalServoToggleStroke = (rVel.y > 0.65f && rVel.z < -0.40f);
-            if (handAtServoEnclosureCollar && handOnServoToggleBat && gimbalServoToggleStroke && (now - s_lastGimbalServoEnableTime > 1800)) {
-                s_lastGimbalServoEnableTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR GIMBAL SERVO CONTROLLER ENABLED (Ry: %.2f, Rz: %.2f)", rVel.y, rVel.z);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.98f; // Spring-loaded toggle switch detent snap (380 Hz)
-                vrState.leftHapticPulse = 0.60f;  // Servo drive inverter coil whine (170 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Variable Frequency Drive Motor Run Forward Pushbutton Latch (ADR 0344)
-            static DWORD s_lastDraftFanRunButtonTime = 0;
-            bool handAtOperatorConsoleRim = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
-                                             vrState.leftController.grip > 0.55f);
-            bool handOnRunPushbutton = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                        vrState.rightController.trigger > 0.50f);
-            bool draftFanRunButtonStroke = (rVel.z < -0.80f);
-            if (handAtOperatorConsoleRim && handOnRunPushbutton && draftFanRunButtonStroke && (now - s_lastDraftFanRunButtonTime > 1800)) {
-                s_lastDraftFanRunButtonTime = now;
-                VR_LOG_INFO("Environmental Gesture: DRAFT FAN MOTOR RUN PUSHBUTTON LATCHED (Rz: %.2f)", rVel.z);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                SendKeyTap('Q');
-                SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.98f; // Industrial pushbutton spring contact snap (390 Hz)
-                vrState.leftHapticPulse = 0.60f;  // Motor run contactor magnetic pull (150 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Photovoltaic Array Primary Sun-Tracking Gimbal Azimuth Limit Switch Cam Dog Engagement (ADR 0347)
-            static DWORD s_lastGimbalAzimuthCamDogTime = 0;
-            bool handAtAzimuthLimitBracket = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                              vrState.leftController.grip > 0.55f);
-            bool handOnCamDogShoe = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                     vrState.rightController.trigger < 0.40f);
-            bool gimbalAzimuthCamDogStroke = (fabsf(rVel.x) > 0.65f && rVel.z < -0.50f);
-            if (handAtAzimuthLimitBracket && handOnCamDogShoe && gimbalAzimuthCamDogStroke && (now - s_lastGimbalAzimuthCamDogTime > 1800)) {
-                s_lastGimbalAzimuthCamDogTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR GIMBAL AZIMUTH LIMIT CAM DOG ENGAGED (Rx: %.2f, Rz: %.2f)", rVel.x, rVel.z);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.95f; // Alloy cam dog detent snap (400 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Limit switch bracket resonance (160 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Motor Run Pilot Indicator Strobe Lamp Visual Verification (ADR 0348)
-            static DWORD s_lastDraftFanRunIndicatorTime = 0;
-            bool handAtVfdControlPanelTopRim = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
-                                                vrState.leftController.grip > 0.55f);
-            bool handPointingIndicatorStrobe = (twoHandDist < 0.22f && vrState.rightController.grip < 0.45f &&
-                                                vrState.rightController.trigger < 0.35f);
-            bool draftFanRunIndicatorStroke = (rVel.z < -0.75f);
-            if (handAtVfdControlPanelTopRim && handPointingIndicatorStrobe && draftFanRunIndicatorStroke && (now - s_lastDraftFanRunIndicatorTime > 1800)) {
-                s_lastDraftFanRunIndicatorTime = now;
-                VR_LOG_INFO("Environmental Gesture: DRAFT FAN MOTOR RUN PILOT INDICATOR STROBE LAMP VERIFIED (Rz: %.2f)", rVel.z);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Strobe lens push-to-test micro-switch click (400 Hz)
-                vrState.leftHapticPulse = 0.55f;  // VFD enclosure acoustic vibration (145 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Photovoltaic Array Primary Sun-Tracking Gimbal Elevation/Pitch Limit Switch Cam Dog Engagement (ADR 0351)
-            static DWORD s_lastGimbalElevationCamDogTime = 0;
-            bool handAtElevationLimitBracket = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                                vrState.leftController.grip > 0.55f);
-            bool handOnElevationCamDog = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                          vrState.rightController.trigger < 0.40f);
-            bool gimbalElevationCamDogStroke = (fabsf(rVel.y) > 0.65f && rVel.z < -0.50f);
-            if (handAtElevationLimitBracket && handOnElevationCamDog && gimbalElevationCamDogStroke && (now - s_lastGimbalElevationCamDogTime > 1800)) {
-                s_lastGimbalElevationCamDogTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR GIMBAL ELEVATION LIMIT CAM DOG ENGAGED (Ry: %.2f, Rz: %.2f)", rVel.y, rVel.z);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Alloy cam dog detent snap (410 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Limit switch housing resonance (165 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Motor Starter Auxiliary Contact Block Mechanical Latch Verification (ADR 0352)
-            static DWORD s_lastAuxContactLatchTime = 0;
-            bool handAtAuxContactBlockFrame = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
-                                               vrState.leftController.grip > 0.55f);
-            bool handPointingAuxContactPlunger = (twoHandDist < 0.22f && vrState.rightController.grip < 0.45f &&
-                                                  vrState.rightController.trigger < 0.35f);
-            bool auxContactLatchStroke = (rVel.z < -0.75f);
-            if (handAtAuxContactBlockFrame && handPointingAuxContactPlunger && auxContactLatchStroke && (now - s_lastAuxContactLatchTime > 1800)) {
-                s_lastAuxContactLatchTime = now;
-                VR_LOG_INFO("Environmental Gesture: DRAFT FAN MOTOR STARTER AUXILIARY CONTACT LATCHED (Rz: %.2f)", rVel.z);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                SendKeyTap(VK_RETURN);
-                SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Mechanical auxiliary contact latch snap (410 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Starter enclosure resonance (150 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Photovoltaic Array Primary Sun-Tracking Gimbal Elevation/Pitch Quadrant Worm Gear Backlash Vernier Squeeze (ADR 0355)
-            static DWORD s_lastGimbalWormVernierTime = 0;
-            bool handAtElevationQuadrantFlange = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                                  vrState.leftController.grip > 0.55f);
-            bool handOnWormVernierCollar = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                            vrState.rightController.trigger > 0.50f);
-            bool gimbalWormVernierStroke = (rVel.z < -0.75f && fabsf(rVel.x) > 0.50f);
-            if (handAtElevationQuadrantFlange && handOnWormVernierCollar && gimbalWormVernierStroke && (now - s_lastGimbalWormVernierTime > 1800)) {
-                s_lastGimbalWormVernierTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR GIMBAL WORM GEAR BACKLASH VERNIER SQUEEZED (Rz: %.2f, Rx: %.2f)", rVel.z, rVel.x);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                SendKeyTap(VK_SPACE);
-                SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.95f; // Eccentric backlash detent click (410 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Quadrant gear mesh resonance (160 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Motor Starter Thermal Overload Relay Manual Reset Plunger Trip (ADR 0356)
-            static DWORD s_lastThermalOverloadResetTime = 0;
-            bool handAtStarterRelayRail = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
-                                           vrState.leftController.grip > 0.55f);
-            bool handPointingOverloadPlunger = (twoHandDist < 0.22f && vrState.rightController.grip < 0.45f &&
-                                                vrState.rightController.trigger < 0.35f);
-            bool thermalOverloadPlungeStroke = (rVel.z < -0.75f);
-            if (handAtStarterRelayRail && handPointingOverloadPlunger && thermalOverloadPlungeStroke && (now - s_lastThermalOverloadResetTime > 1800)) {
-                s_lastThermalOverloadResetTime = now;
-                VR_LOG_INFO("Environmental Gesture: DRAFT FAN MOTOR STARTER THERMAL OVERLOAD RELAY RESET (Rz: %.2f)", rVel.z);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                SendKeyTap(VK_SPACE);
-                SendKeyTap('Q');
-                vrState.rightHapticPulse = 0.95f; // Bimetallic overload snap (410 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Starter frame acoustic vibration (150 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Photovoltaic Array Primary Sun-Tracking Gimbal Pitch Quadrant Drive Pinion Tooth Grease Port Needle Lubrication (ADR 0359)
-            static DWORD s_lastGimbalPinionGreaseTime = 0;
-            bool handAtPitchQuadrantGreaseBoss = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                                  vrState.leftController.grip > 0.55f);
-            bool handOnGreaseNeedleDispenser = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                                vrState.rightController.trigger > 0.50f);
-            bool gimbalPinionGreaseStroke = (rVel.z < -0.75f && fabsf(rVel.y) > 0.50f);
-            if (handAtPitchQuadrantGreaseBoss && handOnGreaseNeedleDispenser && gimbalPinionGreaseStroke && (now - s_lastGimbalPinionGreaseTime > 1800)) {
-                s_lastGimbalPinionGreaseTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR GIMBAL PINION TOOTH GREASE PORT NEEDLE LUBRICATION (Rz: %.2f, Ry: %.2f)", rVel.z, rVel.y);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                SendKeyTap(VK_SPACE);
-                SendKeyTap('Q');
-                SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Grease port needle seating click (420 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Quadrant gear casing acoustic vibration (165 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Motor Starter Phase Reversal Protective Relay Latch Reset (ADR 0360)
-            static DWORD s_lastPhaseRelayResetTime = 0;
-            bool handAtPhaseRelayChassis = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
-                                            vrState.leftController.grip > 0.55f);
-            bool handAtPhaseResetPlunger = (twoHandDist < 0.22f && vrState.rightController.grip < 0.45f &&
-                                            vrState.rightController.trigger < 0.35f);
-            bool phaseRelayResetStroke = (rVel.z < -0.75f);
-            if (handAtPhaseRelayChassis && handAtPhaseResetPlunger && phaseRelayResetStroke && (now - s_lastPhaseRelayResetTime > 1800)) {
-                s_lastPhaseRelayResetTime = now;
-                VR_LOG_INFO("Environmental Gesture: DRAFT FAN MOTOR STARTER PHASE REVERSAL PROTECTIVE RELAY LATCH RESET (Rz: %.2f)", rVel.z);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                SendKeyTap(VK_SPACE);
-                SendKeyTap('Q');
-                SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Solid-state protective relay latch snap (420 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Starter enclosure acoustic resonance (155 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Photovoltaic Array Primary Sun-Tracking Gimbal Pitch Quadrant Drive Pinion Bearing Retainer Castle Nut Cotter Pin Insertion & Tine Spread (ADR 0363)
-            static DWORD s_lastGimbalPinionCotterPinTime = 0;
-            bool handAtPitchPinionBearingFlange = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                                   vrState.leftController.grip > 0.55f);
-            bool handHoldingCotterPliers = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                            vrState.rightController.trigger > 0.50f);
-            bool gimbalPinionCotterStroke = (rVel.z < -0.75f && fabsf(rVel.x) > 0.50f);
-            if (handAtPitchPinionBearingFlange && handHoldingCotterPliers && gimbalPinionCotterStroke && (now - s_lastGimbalPinionCotterPinTime > 1800)) {
-                s_lastGimbalPinionCotterPinTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR GIMBAL PINION CASTLE NUT COTTER PIN INSERTED & SPREAD (Rz: %.2f, Rx: %.2f)", rVel.z, rVel.x);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                SendKeyTap(VK_SPACE);
-                SendKeyTap('Q');
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Cotter pin tine spread snap (425 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Bearing retainer housing resonance (170 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Motor Starter Phase Loss Sensor Test Button Actuation (ADR 0364)
-            static DWORD s_lastPhaseLossTestTime = 0;
-            bool handAtPhaseMonitorChassis = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
-                                              vrState.leftController.grip > 0.55f);
-            bool handPointingPhaseLossTestBtn = (twoHandDist < 0.22f && vrState.rightController.grip < 0.45f &&
-                                                 vrState.rightController.trigger < 0.35f);
-            bool phaseLossTestStroke = (rVel.z < -0.75f);
-            if (handAtPhaseMonitorChassis && handPointingPhaseLossTestBtn && phaseLossTestStroke && (now - s_lastPhaseLossTestTime > 1800)) {
-                s_lastPhaseLossTestTime = now;
-                VR_LOG_INFO("Environmental Gesture: DRAFT FAN MOTOR STARTER PHASE LOSS SENSOR TEST BUTTON DEPRESSED (Rz: %.2f)", rVel.z);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                SendKeyTap(VK_SPACE);
-                SendKeyTap('Q');
-                SendKeyTap(VK_RETURN);
-                vrState.rightHapticPulse = 0.95f; // Micro-switch tactile snap (425 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Starter frame acoustic resonance (160 Hz)
-            }
-
-            // Dark Athena EVA Solar Collector Photovoltaic Array Primary Sun-Tracking Gimbal Pitch Quadrant Drive Pinion Bearing Oil Seal Press Ring Snap Ring Seating (ADR 0367)
-            static DWORD s_lastGimbalPinionSnapRingTime = 0;
-            bool handAtPitchPinionSealBoss = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
-                                              vrState.leftController.grip > 0.55f);
-            bool handHoldingSnapRingPliers = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                              vrState.rightController.trigger > 0.50f);
-            bool gimbalPinionSnapRingStroke = (rVel.z < -0.75f && fabsf(rVel.x) > 0.50f);
-            if (handAtPitchPinionSealBoss && handHoldingSnapRingPliers && gimbalPinionSnapRingStroke && (now - s_lastGimbalPinionSnapRingTime > 1800)) {
-                s_lastGimbalPinionSnapRingTime = now;
-                VR_LOG_INFO("Environmental Gesture: EVA SOLAR GIMBAL PINION OIL SEAL SNAP RING SEATED (Rz: %.2f, Rx: %.2f)", rVel.z, rVel.x);
-                SendKeyTap('E');
-                SendKeyTap(VK_SPACE);
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                SendKeyTap(VK_SPACE);
-                SendKeyTap('Q');
-                SendKeyTap(VK_RETURN);
-                SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Circlip detent expansion snap (430 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Bearing cover acoustic vibration (175 Hz)
-            }
-
-            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Induced Draft Fan Motor Starter Phase Unbalance Relay Trip Sensitivity Trimmer Potentiometer Adjustment (ADR 0368)
-            static DWORD s_lastPhaseUnbalanceTrimmerTime = 0;
-            bool handAtPhaseMonitorCasing = (leftLocal.z > -0.42f && leftLocal.z < -0.16f && leftLocal.y > 0.05f && leftLocal.y < 0.35f &&
-                                             vrState.leftController.grip > 0.55f);
-            bool handHoldingCeramicDriver = (twoHandDist < 0.22f && vrState.rightController.grip > 0.55f &&
-                                             vrState.rightController.trigger < 0.40f);
-            bool phaseUnbalanceTrimmerStroke = (fabsf(rVel.x) > 0.55f && rVel.z < -0.65f);
-            if (handAtPhaseMonitorCasing && handHoldingCeramicDriver && phaseUnbalanceTrimmerStroke && (now - s_lastPhaseUnbalanceTrimmerTime > 1800)) {
-                s_lastPhaseUnbalanceTrimmerTime = now;
-                VR_LOG_INFO("Environmental Gesture: DRAFT FAN MOTOR STARTER PHASE UNBALANCE TRIMMER ADJUSTED (Rx: %.2f, Rz: %.2f)", rVel.x, rVel.z);
-                SendKeyTap('E');
-                SendKeyTap('Q');
-                SendKeyTap(VK_TAB);
-                SendKeyTap(VK_RETURN);
-                SendKeyTap(VK_SPACE);
-                SendKeyTap('Q');
-                SendKeyTap(VK_RETURN);
-                SendKeyTap(VK_SPACE);
-                vrState.rightHapticPulse = 0.95f; // Trimmer wiper micro-click (430 Hz)
-                vrState.leftHapticPulse = 0.55f;  // Starter chassis acoustic resonance (165 Hz)
-            }
-#endif
+// Track C #16: deleted 3017 lines of #if 0 legacy environmental-gesture dead code
+// (ADR 0398, EVA/incinerator/whizzer spam). No active symbols inside; build verified green.
         }
     }
 
@@ -9915,7 +6956,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             s_lastEyeshineTime = now;
             s_eyeshineActive = !s_eyeshineActive;
             VR_LOG_INFO("Tactical Gesture: EYESHINE %s (Right Temple Tap)", s_eyeshineActive ? "ACTIVATED" : "DEACTIVATED");
-            SendKeyTap('Q'); // Native Riddick Eyeshine key
+            SendGestureTap('Q', "tactical/eyeshine"); // Track C #15
             vrState.rightHapticPulse = 0.85f; // High-resonance optical buzz
         }
 
@@ -9928,7 +6969,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             s_lastFlashlightTime = now;
             s_flashlightActive = !s_flashlightActive;
             VR_LOG_INFO("Tactical Gesture: SHOULDER FLASHLIGHT %s (Left Shoulder Tap)", s_flashlightActive ? "ACTIVATED" : "DEACTIVATED");
-            SendKeyTap('F'); // Native Riddick Flashlight key
+            SendGestureTap('F', "tactical/flashlight"); // Track C #15
             vrState.leftHapticPulse = 0.75f; // Mechanical click pulse
         }
 
@@ -9945,7 +6986,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             } else if ((now - s_radioHoldStartTime >= 120) && (now - s_lastRadioInterceptTime > 1200)) {
                 s_lastRadioInterceptTime = now;
                 VR_LOG_INFO("Tactical Intercept: GUARD RADIO TRANSCEIVER EAVESDROPPING ENGAGED");
-                SendKeyTap(VK_TAB); // PDA / Tactical audio channel
+                SendGestureTap(VK_TAB, "tactical/radio-intercept"); // Track C #15
                 if (rightAtEar) vrState.rightHapticPulse = 0.40f; // Squelch burst (220 Hz)
                 if (leftAtEar) vrState.leftHapticPulse = 0.40f;
             }
@@ -9962,7 +7003,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         if (visorPullDown && (now - s_lastSolarVisorTime > 1200)) {
             s_lastSolarVisorTime = now;
             VR_LOG_INFO("Orbital EVA Gesture: POLARIZED SOLAR RADIATION VISOR PULLED DOWN");
-            SendKeyTap('Q'); // Toggle optical tint filter
+            SendGestureTap('Q', "tactical/visor"); // Track C #15
             if (rightAtBrow) vrState.rightHapticPulse = 0.65f; // Solid mechanical visor latch click (150 Hz)
             if (leftAtBrow) vrState.leftHapticPulse = 0.65f;
         }
@@ -9978,7 +7019,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     static bool s_leftGripDown = false, s_rightGripDown = false;
 
     // Right Trigger -> Fire / Primary Attack / UI Select Click
-    bool wantRightTrigger = vrState.rightController.trigger > 0.5f;
+    bool wantRightTrigger = domCtrl.trigger > 0.5f; // Track C #14
     if (wantRightTrigger != s_rightTriggerDown) {
         mouse_event(wantRightTrigger ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
         s_rightTriggerDown = wantRightTrigger;
@@ -10036,7 +7077,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
 
     // Heavy Mech Rotary Chaingun Dual-Hand Recoil Compensation (ADR 0107)
     static DWORD s_lastRecoilCompTime = 0;
-    bool isDualHandBracedChaingun = s_twoHandedStabilizationActive && (vrState.rightController.trigger > 0.80f) && (vrState.leftController.grip > 0.60f);
+    bool isDualHandBracedChaingun = s_twoHandedStabilizationActive && (domCtrl.trigger > 0.80f) && (offCtrl.grip > 0.60f); // Track C #14
     if (isDualHandBracedChaingun && (s_triggerHoldStartTime != 0) && (now - s_triggerHoldStartTime > 300)) {
         if (now - s_lastRecoilCompTime > 90) {
             s_lastRecoilCompTime = now;
@@ -10049,8 +7090,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // Security Tranq Gun Tactile Capacitor Charging (ADR 0039)
     static DWORD s_tranqChargeStartTime = 0;
     static bool s_isChargingTranq = false;
-    bool isAimingStance = (vrState.leftController.trigger > 0.40f) || s_twoHandedStabilizationActive;
-    if (isAimingStance && vrState.rightController.trigger > 0.35f && vrState.rightController.trigger < 0.90f) {
+    bool isAimingStance = (offCtrl.trigger > 0.40f) || s_twoHandedStabilizationActive; // Track C #14
+    if (isAimingStance && domCtrl.trigger > 0.35f && domCtrl.trigger < 0.90f) { // Track C #14
         if (!s_isChargingTranq) {
             s_isChargingTranq = true;
             s_tranqChargeStartTime = now;
@@ -10070,7 +7111,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     }
 
     // Block / Aim: Engaged physically via Boxer Guard pose OR manually via Left Trigger
-    bool wantBlock = s_physicalBlockEngaged || (vrState.leftController.trigger > 0.5f);
+    bool wantBlock = s_physicalBlockEngaged || (offCtrl.trigger > 0.5f); // Track C #14
     s_isAimingOrBlocking = wantBlock;
     if (wantBlock != s_currentBlockEngaged) {
         if (wantBlock) {

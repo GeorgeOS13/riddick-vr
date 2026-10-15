@@ -7,7 +7,7 @@
 #define RIDDICK_VR_IPC_FRAME_CONSUMED_EVENT "Local\\RiddickVR_FrameConsumed"
 #define RIDDICK_VR_IPC_MUTEX_NAME "Local\\RiddickVR_Mutex"
 
-#define RIDDICK_VR_PROTOCOL_VERSION 1
+#define RIDDICK_VR_PROTOCOL_VERSION 2 // Track C #9: +comfortVignette field
 
 constexpr uint32_t RIDDICK_VR_BTN_A           = 1 << 0;
 constexpr uint32_t RIDDICK_VR_BTN_B           = 1 << 1;
@@ -86,6 +86,7 @@ struct RiddickVRSharedState {
     bool eyeshineActive;     // Riddick Eyeshine night vision mode active (ADR 0022)
     bool flashlightActive;   // Tactical shoulder flashlight active
     uint16_t reservedFlags;  // 4-byte alignment padding
+    float comfortVignette;   // Track C #9: 0..1 motion comfort level (thumbstick move/turn)
     uint32_t clientFrameCount;
     uint32_t heartbeatTimestamp;
 };
