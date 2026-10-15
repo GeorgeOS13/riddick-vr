@@ -142,6 +142,13 @@ The script automatically produces:
 * `dist\riddickvr-host.exe` (64-bit native OpenXR companion)
 * `dist\opengl32.dll` (32-bit game proxy hook)
 
+### Configuration (`riddick_vr.ini`)
+Copy `tools/riddick_vr.ini.example` to `riddick_vr.ini` next to the game EXE to tune:
+turning (snap angle, smooth speed, deadzones), head-look gain
+(`LookSensitivityYaw/Pitch` - calibrate: a 90-degree head turn must turn the
+view 90 degrees; scale proportionally), comfort vignette, seated mode, world
+scale, southpaw, and gesture debounce. Missing file = built-in defaults.
+
 ---
 
 ## 🎮 Installation & Play
@@ -165,7 +172,7 @@ The script automatically produces:
 * **Physical Boxer Guard:** Raise both fists to chin level ($Y \in [-0.28, +0.18]\text{ m}, Z \in [-0.42, -0.12]\text{ m}$) with clenched grips ($> 0.40$) to engage solid block mode (`RMB`).
 * **Melee Combos:** Fast physical jabs, hooks, uppercuts, and dual Ulak cross-slashes break guard instantly with zero latency.
 * **Counter-Disarms & Parries:** Driving fists forward from Boxer Guard into an incoming strike triggers native Starbreeze disarms and bone-cracking shockwave haptics ($0.95$).
-* **Physical Ladder Climbing:** Reach above shoulder and grip rungs to climb hand-over-hand; pull downward with both hands simultaneously to mantle up ledges.
+* **Physical Ladder Climbing:** Reach above shoulder and grip rungs to climb hand-over-hand; pull downward to climb. Hang still 1.5s and you will feel the hint pulse telling you to PULL DOWN. Pull down with one hand, then the other within the grace window (or both together) to mantle up ledges - the ready double-pulse means the second hand will complete the mantle.
 * **Tactical Reloads:** Bring off-hand to weapon receiver ($< 20\text{ cm}$) or touch waist ammo pouch.
 * **Two-Handed Firearm Stabilization:** Bring off-hand within $25\text{ cm}$ of firearm with grip held for SLERP aim stabilization and $0.65\times$ jitter dampening.
 * **Tactical Inventory Holstering:**

@@ -3824,10 +3824,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         VR_LOG_INFO("Button Y: RIDDICK EYESHINE NIGHT VISION TOGGLED ('Q')");
     }
 
-    // Unified Mode Discipline & Invariant Projection (ADR 0405, ADR 0409):
-    // GH #18: cinema mode removed permanently (no branches, no POV switching).
-    // Menus render natively into the eye buffer; keep the invariant assignment.
-    vrState.cinemaMode = false;
+    // GH #43/#44: cinema mode is now authoritative from stereo_renderer's
+    // Has3DThisFrame()+HasMenuCursor() detection in OnSwapBuffers. The hook
+    // no longer overrides it — menus/cinematics get the cinema screen path,
+    // gameplay gets full-bleed immersion with bar-crop.
 
     // 0. Singularity-Free Relative Quaternion Head Tracking Look Input (ADR 0409)
     // GH #17 step 7: math delegated to UpdateHeadLook (explicit HeadLookState,
