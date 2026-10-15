@@ -115,7 +115,7 @@ Geometry (recovered from MXR.dll ``CTriangleMeshCore::Read`` +
                  is an array of fixed **34-byte** records (version ``0x100``)::
 
                      u16  version           = 0x100
-                     f32  translation[3]    bind-pose local translation
+                     f32  translation[3]    bind-pose model-space position
                      u16  reserved          (0 in every shipped asset)
                      u16  child_start       first child's slot in NODEINDICES
                      u16  child_count       number of direct children
@@ -513,7 +513,10 @@ class SkeletonNode:
     and ``FUN_1001fc30`` reader agree byte for byte)::
 
         u16  version
-        f32  translation[3]    x,y,z bind-pose local translation
+        f32  translation[3]    bind-pose model-space position (not a local offset;
+                               same coordinate space as VERTEXFRAMES - see
+                               ADR-0419 "Update - NODES translations are
+                               model-space")
         u16  unknown_c         (0 in every shipped asset)
         u16  child_start       first child's slot in NODEINDICES
         u16  child_count       number of direct children

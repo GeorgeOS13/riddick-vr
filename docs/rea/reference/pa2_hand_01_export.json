@@ -1,0 +1,67 @@
+{
+  "source": "C:\\Program Files (x86)\\Starbreeze Studios\\Riddick EFBB\\Content\\Models\\Characters\\Pa2\\Pa2_Hand_01.xmd",
+  "source_size": 43221,
+  "coordinate_system": "engine model space (Z-up), unconverted",
+  "rotations_available": false,
+  "surfaces": [
+    "PA2_INMATE_B01  ",
+    "PA2_INMATE_B01  "
+  ],
+  "skeleton": null,
+  "cluster_count": 2,
+  "clusters": [
+    {
+      "index": 0,
+      "vertices": 138,
+      "triangles": 180,
+      "uvs": 138,
+      "vertex_frames": 1,
+      "bounds_min": [
+        -1.5035115480422974,
+        -3.731362819671631,
+        -1.9966641664505005
+      ],
+      "bounds_max": [
+        2.8119680881500244,
+        2.3497087955474854,
+        2.724130392074585
+      ],
+      "skinned": false,
+      "influences": 0,
+      "bones_used": [],
+      "bone_count_used": 0
+    },
+    {
+      "index": 1,
+      "vertices": 540,
+      "triangles": 1076,
+      "uvs": 0,
+      "vertex_frames": 1,
+      "bounds_min": [
+        -1.5035115480422974,
+        -3.731362819671631,
+        -1.9966641664505005
+      ],
+      "bounds_max": [
+        2.8119680881500244,
+        2.3497087955474854,
+        2.724130392074585
+      ],
+      "skinned": false,
+      "influences": 0,
+      "bones_used": [],
+      "bone_count_used": 0
+    }
+  ],
+  "totals": {
+    "vertices": 678,
+    "triangles": 1256,
+    "uvs": 138,
+    "skinned_clusters": 0
+  },
+  "written": [
+    "Pa2_Hand_01_c00.obj",
+    "Pa2_Hand_01_c01.obj",
+    "Pa2_Hand_01.skin.json"
+  ]
+}

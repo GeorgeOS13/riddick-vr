@@ -163,3 +163,12 @@ pass pins both down exactly.
 - Consequence: the skeleton hierarchy is now recovered exactly as the engine
   walks it (child-list order, not just parent pointers), which is what a native
   skinned-hand path needs to pose the arm chain to tracked controllers.
+
+## Update - 2026-10-16 (wake 9): `translation[3]` is model-space, not local
+The field labelled "bind-pose local translation" above is actually the node's
+**bind-pose model-space position** (same space as `VERTEXFRAMES`). Evidence: in
+`Riddick_B05.xmd`, node 2 (`parent 1`) shares node 1's `z == 32.617` at the hips;
+read as a local child offset it would land at `z = 65.2` on a ~52-unit figure.
+The full evidence and the aggregate check over 248 skeletons are in
+`docs/adr/0419-xmd-mesh-skin-export.md` ("Update - NODES translations are
+model-space"). `tools/mos_xmd.py` docstrings corrected.

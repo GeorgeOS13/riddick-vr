@@ -2,6 +2,53 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 9 — 2026-10-16 00:17 (scheduled loop)
+- **Unit:** GH #55 → #46 — emit the decoded mesh/skin data: new
+  `tools/xmd_export.py` (+ `tools/test_xmd_export.py`) exports any `.xmd`'s
+  clusters to Wavefront OBJ, a `.skin.json` (skeleton hierarchy + per-vertex
+  bone influences) and a compact `.export.json` manifest, so the native hand/arm
+  path can consume real data without re-deriving the binary format.
+- Change:
+  - `tools/xmd_export.py` (new): `decode_cluster()`, `mesh_obj()`,
+    `combined_obj()`, `skeleton_dict()`, `cluster_skin_dict()`, `manifest()`,
+    `export_model()`; CLI `--out/--prefix/--cluster/--combined/--no-skin/--list/--json`.
+    Dependency-free, read-only, built on `tools/mos_xmd.py`.
+  - `tools/test_xmd_export.py` (new): 6 headless synthetic-container tests
+    (OBJ round-trip with/without UVs, combined index rebasing, skin weights,
+    cluster select + out-of-range, manifest bone/surface stats, skeleton child
+    table, CLI errors).
+  - `.github/workflows/vr-worker.yml`: runs the new test next to
+    `test_mos_xmd.py`.
+  - `docs/adr/0419-xmd-mesh-skin-export.md` (new); ADR-0418 gets a pointer update.
+  - `docs/rea/reference/riddick_b05_export.json`,
+    `docs/rea/reference/pa2_hand_01_export.json`: generated manifests (evidence).
+  - `tools/mos_xmd.py`: corrected the `NODES` `translation[3]` docstring from
+    "local" to **model-space** (see below).
+- Evidence: all **631** shipped `.xmd` under `Content/Models` decode and export →
+  **631 ok / 0 fail**: **4662** clusters, **1,242,285** verts, **1,860,184**
+  tris, **423,559** UVs, **3103** skinned; every emitted OBJ re-parses with
+  `#v`/`#f` equal to the decoded counts and all face indices in range.
+  `Riddick_B05.xmd` → 7 clusters (0/3 legs bones 0-9 z0-25; 1/4 and 2/5 the two
+  arms bones 10-23, `|y|`≤25.4 z≈44-52; 6 = untextured `SHADOWDATA` body);
+  clusters 3/4/5 duplicate 0/1/2 with an empty `TVERTEXFRAMES`.
+  `Pa2_Hand_01.xmd` → 2 clusters / 678 verts / 1256 tris, unskinned.
+  `test_mos_xmd.py`, `test_xmd_export.py`, `validate_addresses.py`,
+  `verify_hook_init.py`, `scenario_tests.py --check`, `verify_reported_fixes.py`
+  all PASS. No C++ changed, so `build-all.ps1`/CTest were not rerun.
+- **Finding (correction):** `NODES` `translation[3]` is the node's **bind-pose
+  model-space position**, not a local offset. `Riddick_B05`: node 1 (pelvis) and
+  node 2 (left hip, `parent 1`) both `z == 32.617` (a local off. would put the
+  hip at z 65 on a ~52-unit figure); node 15 (`parent 11`) z 56.1. Aggregate over
+  **248** skeletons: chaining translations explodes past the mesh bbox (>25%
+  span) in **196/248** vs **96/248** for the direct reading. ADR-0419 has the
+  detail; ADR-0418/mos_xmd docstrings corrected.
+- Blocker: none. Open (next): the exact `SURFACES`→`CLUSTER` mapping (which
+  cluster is `RIDDICK_ARMSCAR_*`) and the `BONEDEFORM` bone-index space (node
+  index vs `NODEINDICES` position) both still need the engine consumer to pin
+  down; then bake the arm/hand mesh + skeleton and add the native skinned draw
+  path in `VRHandRenderer` behind a config flag (fallback: procedural hands).
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 8 — 2026-10-16 00:15 (scheduled loop)
 - **Unit:** GH #55 → #46 — correct/extend the just-committed `.xmd` `SKELETON`
   decode: pin the `+0x0E` node field and the real meaning of `NODEINDICES`.
