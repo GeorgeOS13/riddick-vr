@@ -500,12 +500,12 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
 
             if (m_sharedState.cinemaMode) {
                 // In Cinema Mode (Menus / Cutscenes), letterbox to 16:9 for the floating cinema quad
-                float srcAspect = (srcH > 0) ? (static_cast<float>(srcW) / static_cast<float>(srcH)) : (16.0f / 9.0f);
+                constexpr float TARGET_CINEMA_ASPECT = 16.0f / 9.0f;
                 dstW = m_eyeWidth;
-                dstH = static_cast<GLint>(dstW / srcAspect);
+                dstH = static_cast<GLint>(dstW / TARGET_CINEMA_ASPECT);
                 if (dstH > static_cast<GLint>(m_eyeHeight)) {
                     dstH = m_eyeHeight;
-                    dstW = static_cast<GLint>(dstH * srcAspect);
+                    dstW = static_cast<GLint>(dstH * TARGET_CINEMA_ASPECT);
                 }
                 dstX = (m_eyeWidth - dstW) / 2;
                 dstY = (m_eyeHeight - dstH) / 2;
@@ -519,6 +519,7 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
                     OpenGLProxy::real_glClearFunc(GL_COLOR_BUFFER_BIT);
                 }
             }
+
 
             // Read from default backbuffer 0
             OpenGLProxy::real_glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */, 0);

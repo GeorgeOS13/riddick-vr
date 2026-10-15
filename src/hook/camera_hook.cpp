@@ -248,7 +248,25 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         s_manualCinemaToggle = !s_manualCinemaToggle;
         VR_LOG_INFO("Cinema Screen Mode toggled manually: %s", s_manualCinemaToggle ? "ON (Virtual Screen)" : "OFF (Immersive 3D)");
     }
-    vrState.cinemaMode = cursorShowing || s_manualCinemaToggle;
+    s_prevButtons = btns;
+
+    // Accurately detect menus and cutscenes for cinemaMode:
+    // If projection matrix is orthographic (proj[15] == 1.0f), or no 3D gameplay projection has been loaded yet,
+    // or proj[0] > 1.20f (cutscene telephoto lens), or cursorShowing is true, or s_manualCinemaToggle is true -> cinemaMode = true.
+    bool isMenuOrCutscene = false;
+    if (!OpenGLProxy::Has3DGameplayProjection()) {
+        isMenuOrCutscene = true;
+    } else {
+        const float* proj = OpenGLProxy::GetLastProjectionMatrix();
+        if (proj) {
+            bool isOrtho = (fabsf(proj[15] - 1.0f) < 0.001f);
+            bool isTelephoto = (proj[0] > 1.20f);
+            if (isOrtho || isTelephoto) {
+                isMenuOrCutscene = true;
+            }
+        }
+    }
+    vrState.cinemaMode = isMenuOrCutscene || cursorShowing || s_manualCinemaToggle;
 
     // 0. Decoupled Motion Controller Aim Steering & Head Tracking Look Input (ADR 0008)
     // Only apply in-game look when not in cinema menu mode
@@ -434,16 +452,12 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                     pullPitch = (ctrlPitch > 0.0f) ? (ctrlPitch - AIM_DEADZONE) : (ctrlPitch + AIM_DEADZONE);
                                 }
 
-                                // Aim weights: tightened during physical ADS and two-handed stabilization, lighter during hip fire
-                                if (s_isPhysicalADS) {
-                                    wAim = 0.90f; // Ultra-fine 1:1 iron sight tracking
-                                    wPull = 0.12f;
-                                } else if (s_twoHandedStabilizationActive || isAiming) {
-                                    wAim = 0.75f;
-                                    wPull = 0.08f;
+                                // Aim weights: only pull aim when actively aiming (ADS or two-handed stabilization or aiming trigger)
+                                bool isActivelyAiming = (s_isPhysicalADS || s_twoHandedStabilizationActive || isAiming) && !s_physicalBlockEngaged && !isReloading;
+                                if (isActivelyAiming) {
+                                    wPull = s_isPhysicalADS ? 0.12f : 0.08f;
                                 } else {
-                                    wAim = 0.35f;
-                                    wPull = 0.03f;
+                                    wPull = 0.0f;
                                 }
                             }
                         }
@@ -452,38 +466,24 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     s_hasPrevCtrlAim = false;
                 }
 
-                // Blend head tracking look with motion controller aim steering
-                float combinedYaw = deltaYaw + (deltaCtrlYaw * wAim) + (pullYaw * wPull);
-                float combinedPitch = deltaPitch + (deltaCtrlPitch * wAim) + (pullPitch * wPull);
+                // Decouple head tracking look from mouse look: head orientation is handled purely in VR
+                // view matrix stabilization without mouse emulation.
+                // In mouse_event, only inject subtle controller deadband aim pull when actively aiming.
+                bool isActivelyAiming = (s_isPhysicalADS || s_twoHandedStabilizationActive || isAiming) && !s_physicalBlockEngaged && !isReloading;
+                float aimPullYaw = isActivelyAiming ? (pullYaw * wPull) : 0.0f;
+                float aimPullPitch = isActivelyAiming ? (pullPitch * wPull) : 0.0f;
 
                 constexpr float SENSITIVITY_YAW = 445.6f;
                 constexpr float SENSITIVITY_PITCH = 445.6f;
 
-                float mouseDeltaX = -combinedYaw * SENSITIVITY_YAW;
-                float mouseDeltaY = -combinedPitch * SENSITIVITY_PITCH;
+                float mouseDeltaX = -aimPullYaw * SENSITIVITY_YAW;
+                float mouseDeltaY = -aimPullPitch * SENSITIVITY_PITCH;
 
-                // Two-Handed Firearm Stabilization (ADR 0005): dampens micro-tremors and aiming jitter
+                // Two-Handed Firearm Stabilization: dampens micro-tremors and aiming jitter
                 if (s_twoHandedStabilizationActive || s_isPhysicalADS) {
                     float stabilizeDamping = s_isPhysicalADS ? 0.50f : 0.65f;
                     mouseDeltaX *= stabilizeDamping;
                     mouseDeltaY *= stabilizeDamping;
-                }
-
-                // ADR 0384: DirectSound & OpenAL 3D Spatial Audio Listener Yaw Synchronization
-                // Keep the in-engine camera yaw (which drives the audio listener forward vector) in continuous sync with HMD yaw
-                static float s_engineAudioListenerYaw = 0.0f;
-                s_engineAudioListenerYaw += (-mouseDeltaX / SENSITIVITY_YAW);
-                while (s_engineAudioListenerYaw > 3.14159265f) s_engineAudioListenerYaw -= 6.2831853f;
-                while (s_engineAudioListenerYaw < -3.14159265f) s_engineAudioListenerYaw += 6.2831853f;
-
-                float listenerYawError = currentYaw - s_engineAudioListenerYaw;
-                while (listenerYawError > 3.14159265f) listenerYawError -= 6.2831853f;
-                while (listenerYawError < -3.14159265f) listenerYawError += 6.2831853f;
-
-                if (fabsf(listenerYawError) > 0.015f) { // Error threshold ~0.85 degrees
-                    float syncCorrection = listenerYawError * 0.12f * SENSITIVITY_YAW;
-                    mouseDeltaX -= syncCorrection;
-                    s_engineAudioListenerYaw += (syncCorrection / SENSITIVITY_YAW);
                 }
 
                 s_accumulatedLookX += mouseDeltaX;
@@ -848,36 +848,38 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     }
     s_prevStickClickToggle = (stickRightClick && leftGripHeld);
 
-    float stickX = vrState.rightController.thumbstickX;
+    if (!vrState.cinemaMode) {
+        float stickX = vrState.rightController.thumbstickX;
 
-    if (s_turnMode == VR_TURN_SNAP) {
-        // Pure Snap Turn: require deflection > 0.70f, trigger clean single 45° mouse delta
-        // CRITICAL: Absolutely no smooth mouse move during ramp-up or return to center!
-        constexpr float SNAP_THRESHOLD = 0.70f;
-        constexpr float RESET_THRESHOLD = 0.30f;
+        if (s_turnMode == VR_TURN_SNAP) {
+            // Pure Snap Turn: require deflection > 0.70f, trigger clean single 45° mouse delta
+            // CRITICAL: Absolutely no smooth mouse move during ramp-up or return to center!
+            constexpr float SNAP_THRESHOLD = 0.70f;
+            constexpr float RESET_THRESHOLD = 0.30f;
 
-        if (fabsf(stickX) > SNAP_THRESHOLD) {
-            if (s_snapTurnArmed) {
-                s_snapTurnArmed = false;
-                int snapDelta = (stickX > 0.0f) ? 350 : -350;
-                mouse_event(MOUSEEVENTF_MOVE, snapDelta, 0, 0, 0);
-                vrState.rightHapticPulse = 0.25f; // Crisp tactile click on snap
+            if (fabsf(stickX) > SNAP_THRESHOLD) {
+                if (s_snapTurnArmed) {
+                    s_snapTurnArmed = false;
+                    int snapDelta = (stickX > 0.0f) ? 350 : -350;
+                    mouse_event(MOUSEEVENTF_MOVE, snapDelta, 0, 0, 0);
+                    vrState.rightHapticPulse = 0.25f; // Crisp tactile click on snap
+                }
+            } else if (fabsf(stickX) < RESET_THRESHOLD) {
+                s_snapTurnArmed = true;
             }
-        } else if (fabsf(stickX) < RESET_THRESHOLD) {
-            s_snapTurnArmed = true;
-        }
-    } else {
-        // Pure Smooth Turn: continuous rotation with progressive cubic curve
-        // Zero sudden 350-pixel snaps at stick limits
-        constexpr float SMOOTH_DEADZONE = 0.20f;
-        if (fabsf(stickX) > SMOOTH_DEADZONE) {
-            float norm = (fabsf(stickX) - SMOOTH_DEADZONE) / (1.0f - SMOOTH_DEADZONE);
-            float curvedSpeed = norm * norm * 18.0f; // Smooth cubic ramp
-            int deltaX = static_cast<int>(std::copysign(curvedSpeed, stickX));
-            if (deltaX == 0 && norm > 0.05f) {
-                deltaX = (stickX > 0.0f) ? 1 : -1;
+        } else {
+            // Pure Smooth Turn: continuous rotation with progressive cubic curve
+            // Zero sudden 350-pixel snaps at stick limits
+            constexpr float SMOOTH_DEADZONE = 0.20f;
+            if (fabsf(stickX) > SMOOTH_DEADZONE) {
+                float norm = (fabsf(stickX) - SMOOTH_DEADZONE) / (1.0f - SMOOTH_DEADZONE);
+                float curvedSpeed = norm * norm * 18.0f; // Smooth cubic ramp
+                int deltaX = static_cast<int>(std::copysign(curvedSpeed, stickX));
+                if (deltaX == 0 && norm > 0.05f) {
+                    deltaX = (stickX > 0.0f) ? 1 : -1;
+                }
+                mouse_event(MOUSEEVENTF_MOVE, deltaX, 0, 0, 0);
             }
-            mouse_event(MOUSEEVENTF_MOVE, deltaX, 0, 0, 0);
         }
     }
 

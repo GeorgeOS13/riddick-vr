@@ -80,6 +80,7 @@ static GLenum s_currentMatrixMode = 0x1700; // GL_MODELVIEW
 static float s_lastProjection[16] = {0};
 static float s_lastView[16] = {0};
 static bool s_hasProjection = false;
+static bool s_has3DGameplayProjection = false;
 static uint32_t s_projMatrixCount = 0;
 static uint32_t s_modelviewMatrixCount = 0;
 
@@ -283,6 +284,13 @@ void WINAPI OpenGLProxy::Hook_glLoadMatrixf(const GLfloat *m) {
         memcpy(s_lastProjection, m, sizeof(s_lastProjection));
         s_hasProjection = true;
         s_projMatrixCount++;
+
+        bool isOrtho = (fabsf(m[15] - 1.0f) < 0.001f);
+        bool isTelephoto = (m[0] > 1.20f);
+        if (!isOrtho && !isTelephoto && m[0] > 0.001f) {
+            s_has3DGameplayProjection = true;
+        }
+
         if (s_projMatrixCount == 1 || s_projMatrixCount % 300 == 0) {
             VR_LOG_INFO("glLoadMatrixf [PROJECTION #%u]: [%.2f, %.2f, %.2f, %.2f] [%.2f, %.2f, %.2f, %.2f]",
                 s_projMatrixCount, m[0], m[5], m[10], m[14], m[1], m[2], m[3], m[15]);
@@ -303,12 +311,38 @@ void WINAPI OpenGLProxy::Hook_glLoadMatrixf(const GLfloat *m) {
 
 void WINAPI OpenGLProxy::Hook_glFrustum(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble zNear, GLdouble zFar) {
     VR_LOG_INFO("glFrustum called: L=%.2f R=%.2f B=%.2f T=%.2f Near=%.2f Far=%.2f", left, right, bottom, top, zNear, zFar);
+    if (s_currentMatrixMode == 0x1701 /* GL_PROJECTION */) {
+        memset(s_lastProjection, 0, sizeof(s_lastProjection));
+        s_lastProjection[0] = static_cast<float>((2.0 * zNear) / (right - left));
+        s_lastProjection[5] = static_cast<float>((2.0 * zNear) / (top - bottom));
+        s_lastProjection[8] = static_cast<float>((right + left) / (right - left));
+        s_lastProjection[9] = static_cast<float>((top + bottom) / (top - bottom));
+        s_lastProjection[10] = static_cast<float>(-(zFar + zNear) / (zFar - zNear));
+        s_lastProjection[11] = -1.0f;
+        s_lastProjection[14] = static_cast<float>(-(2.0 * zFar * zNear) / (zFar - zNear));
+        s_lastProjection[15] = 0.0f;
+        s_hasProjection = true;
+        if (s_lastProjection[0] <= 1.20f && s_lastProjection[0] > 0.001f) {
+            s_has3DGameplayProjection = true;
+        }
+    }
     if (real_glFrustum) {
         real_glFrustum(left, right, bottom, top, zNear, zFar);
     }
 }
 
 void WINAPI OpenGLProxy::Hook_glOrtho(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble zNear, GLdouble zFar) {
+    if (s_currentMatrixMode == 0x1701 /* GL_PROJECTION */) {
+        memset(s_lastProjection, 0, sizeof(s_lastProjection));
+        s_lastProjection[0] = static_cast<float>(2.0 / (right - left));
+        s_lastProjection[5] = static_cast<float>(2.0 / (top - bottom));
+        s_lastProjection[10] = static_cast<float>(-2.0 / (zFar - zNear));
+        s_lastProjection[12] = static_cast<float>(-(right + left) / (right - left));
+        s_lastProjection[13] = static_cast<float>(-(top + bottom) / (top - bottom));
+        s_lastProjection[14] = static_cast<float>(-(zFar + zNear) / (zFar - zNear));
+        s_lastProjection[15] = 1.0f;
+        s_hasProjection = true;
+    }
     if (real_glOrtho) {
         real_glOrtho(left, right, bottom, top, zNear, zFar);
     }
@@ -332,6 +366,10 @@ GLenum OpenGLProxy::GetCurrentMatrixMode() {
 
 bool OpenGLProxy::HasInterceptedProjection() {
     return s_hasProjection;
+}
+
+bool OpenGLProxy::Has3DGameplayProjection() {
+    return s_has3DGameplayProjection;
 }
 
 const float* OpenGLProxy::GetLastProjectionMatrix() {

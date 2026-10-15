@@ -239,6 +239,7 @@ bool IpcBridgeClient::WriteState(const RiddickVRSharedState& state) {
         m_pSharedState->clientFrameCount++;
         m_pSharedState->leftEyeSharedHandle = state.leftEyeSharedHandle;
         m_pSharedState->rightEyeSharedHandle = state.rightEyeSharedHandle;
+        m_pSharedState->cinemaMode = state.cinemaMode;
         ReleaseMutex(m_hMutex);
         return true;
     }

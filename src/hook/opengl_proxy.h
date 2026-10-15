@@ -70,6 +70,7 @@ public:
     // Matrix state inspection
     static GLenum GetCurrentMatrixMode();
     static bool HasInterceptedProjection();
+    static bool Has3DGameplayProjection();
     static const float* GetLastProjectionMatrix();
     static const float* GetLastViewMatrix();
 
