@@ -81,6 +81,11 @@ static float s_lastProjection[16] = {0};
 static float s_lastView[16] = {0};
 static bool s_hasProjection = false;
 static bool s_has3DGameplayProjection = false;
+// GH #43/#44: per-frame 3D freshness. Menus/cinematics use ortho/2D
+// projections; gameplay uses perspective. The latch above never resets, so
+// stamp the swap-frame of each perspective sighting instead.
+static uint64_t s_swapFrameCount = 0;
+static uint64_t s_last3DFrame = 0;
 static uint32_t s_projMatrixCount = 0;
 static uint32_t s_modelviewMatrixCount = 0;
 
@@ -238,6 +243,7 @@ BOOL WINAPI OpenGLProxy::Hook_wglMakeCurrent(HDC hdc, HGLRC hglrc) {
 
 BOOL WINAPI OpenGLProxy::Hook_wglSwapBuffers(HDC hdc) {
     RiddickVR_EnsureHookInitialized();
+    s_swapFrameCount++;
     StereoRenderer::Instance().OnSwapBuffers(hdc);
     return real_wglSwapBuffers ? real_wglSwapBuffers(hdc) : SwapBuffers(hdc);
 }
@@ -306,6 +312,7 @@ void WINAPI OpenGLProxy::Hook_glLoadMatrixf(const GLfloat *m) {
         bool isPerspective = (fabsf(m[15]) < 0.01f && m[0] > 0.10f && m[0] < 4.0f);
         if (isPerspective) {
             s_has3DGameplayProjection = true;
+            s_last3DFrame = s_swapFrameCount;
         }
 
         if (isPerspective) {
@@ -368,6 +375,7 @@ void WINAPI OpenGLProxy::Hook_glFrustum(GLdouble left, GLdouble right, GLdouble 
         s_hasProjection = true;
         if (s_lastProjection[0] > 0.10f && s_lastProjection[0] < 4.0f) {
             s_has3DGameplayProjection = true;
+            s_last3DFrame = s_swapFrameCount;
         }
     }
     if (real_glFrustum) {
@@ -417,6 +425,12 @@ bool OpenGLProxy::HasInterceptedProjection() {
 
 bool OpenGLProxy::Has3DGameplayProjection() {
     return s_has3DGameplayProjection;
+}
+
+bool OpenGLProxy::Has3DThisFrame() {
+    // Allow a 2-frame grace so a single ortho HUD pass inside gameplay
+    // (crosshair, damage flash) does not flicker into cinema mode.
+    return s_has3DGameplayProjection && (s_swapFrameCount - s_last3DFrame <= 2);
 }
 
 const float* OpenGLProxy::GetLastProjectionMatrix() {

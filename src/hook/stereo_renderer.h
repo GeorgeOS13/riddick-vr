@@ -51,6 +51,13 @@ private:
     bool CreateEyeBuffers(uint32_t width, uint32_t height);
     void DestroyEyeBuffers();
 
+    // GH #43/#44: letterbox/pillarbox scan of the backbuffer (throttled,
+    // smoothed) so baked gameplay bars are cropped out; menus use fit instead.
+    // Rect in absolute GL-origin (y-up) backbuffer coords.
+    void ScanActiveRegion(GLint ox, GLint oy, GLint srcW, GLint srcH);
+    void BlitEye(bool isLeftEye, GLint sx0, GLint sy0, GLint sx1, GLint sy1,
+                 GLint dx0, GLint dy0, GLint dx1, GLint dy1);
+
     bool InitD3D11Interop(uint32_t width, uint32_t height);
     void ReleaseD3D11Interop();
     void LockSharedTextures();
@@ -97,6 +104,12 @@ private:
     GLint m_viewportY = 0;
     GLsizei m_viewportWidth = 0;
     GLsizei m_viewportHeight = 0;
+
+    // GH #44: smoothed active content rect (window coords, y-up) used as the
+    // gameplay blit source so baked letterbox/pillarbox bars are cropped out.
+    bool m_hasActiveRect = false;
+    GLint m_activeX0 = 0, m_activeY0 = 0, m_activeX1 = 0, m_activeY1 = 0;
+    uint32_t m_barScanCooldown = 0;
 
     IpcBridgeClient m_ipcClient;
     RiddickVRSharedState m_sharedState{};

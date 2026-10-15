@@ -635,6 +635,82 @@ void StereoRenderer::UnlockSharedTextures() {
     }
 }
 
+void StereoRenderer::BlitEye(bool isLeftEye, GLint sx0, GLint sy0, GLint sx1, GLint sy1,
+                 GLint dx0, GLint dy0, GLint dx1, GLint dy1) {
+    GLuint fbo = isLeftEye ? m_leftFbo : m_rightFbo;
+    OpenGLProxy::real_glBindFramebuffer(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, fbo);
+    // NOTE: call sites pass y-flipped src coords (top-down into GL bottom-up).
+    OpenGLProxy::glBlitFramebuffer(sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1,
+                                   GL_COLOR_BUFFER_BIT, GL_LINEAR);
+}
+
+// GH #44: find the non-black content bounds of the backbuffer so baked
+// letterbox/pillarbox bars can be cropped out of the gameplay blit.
+// Throttled (every 90 swaps), smoothed, GL-origin (y-up) window coords.
+void StereoRenderer::ScanActiveRegion(GLint ox, GLint oy, GLint srcW, GLint srcH) {
+    typedef void (WINAPI *ReadPx_t)(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void*);
+    typedef void (WINAPI *PixelStore_t)(GLenum, GLint);
+    static ReadPx_t pRead = nullptr;
+    static PixelStore_t pStore = nullptr;
+    static bool tried = false;
+    if (!tried) {
+        tried = true;
+        HMODULE hSelf = GetModuleHandleA("opengl32.dll"); // our proxy; forwarders self-resolve
+        if (hSelf) {
+            pRead = (ReadPx_t)GetProcAddress(hSelf, "glReadPixels");
+            pStore = (PixelStore_t)GetProcAddress(hSelf, "glPixelStorei");
+        }
+    }
+    if (!pRead || !pStore || srcW < 64 || srcH < 64) return;
+
+    if (m_barScanCooldown > 0) { m_barScanCooldown--; return; }
+    m_barScanCooldown = 90;
+
+    pStore(0x0CF5 /* GL_PACK_ALIGNMENT */, 1);
+    const int STRIP = 8;
+    static unsigned char row[4096 * 8 * 3];
+    static unsigned char col[8 * 4096 * 3];
+    if (srcW > 4096 || srcH > 4096) return;
+    auto rowLit = [&](GLint y, GLint h) {
+        pRead(ox, oy + y, srcW, h, 0x1907 /* GL_RGB */, 0x1401 /* GL_UNSIGNED_BYTE */, row);
+        for (int i = 0; i < srcW * h * 3; i += 3)
+            if (row[i] > 14 || row[i + 1] > 14 || row[i + 2] > 14) return true;
+        return false;
+    };
+    auto colLit = [&](GLint x, GLint w) {
+        pRead(ox + x, oy, w, srcH, 0x1907 /* GL_RGB */, 0x1401 /* GL_UNSIGNED_BYTE */, col);
+        for (int i = 0; i < w * srcH * 3; i += 3)
+            if (col[i] > 14 || col[i + 1] > 14 || col[i + 2] > 14) return true;
+        return false;
+    };
+
+    GLint y0 = 0, y1 = srcH, x0 = 0, x1 = srcW;
+    for (int y = 0; y < srcH / 2; y += STRIP) { if (rowLit(y, STRIP)) { y0 = y; break; } y0 = y + STRIP; }
+    for (int y = srcH - STRIP; y > srcH / 2; y -= STRIP) { if (rowLit(y, STRIP)) { y1 = y + STRIP; break; } y1 = y; }
+    for (int x = 0; x < srcW / 2; x += STRIP) { if (colLit(x, STRIP)) { x0 = x; break; } x0 = x + STRIP; }
+    for (int x = srcW - STRIP; x > srcW / 2; x -= STRIP) { if (colLit(x, STRIP)) { x1 = x + STRIP; break; } x1 = x; }
+
+    // Reject degenerate detections (keep previous / full frame).
+    if (x1 - x0 < srcW / 3 || y1 - y0 < srcH / 3) return;
+    // Store absolute backbuffer coords.
+    x0 += ox; x1 += ox; y0 += oy; y1 += oy;
+    const GLint fx1 = ox + srcW, fy1 = oy + srcH;
+    if (!m_hasActiveRect) {
+        m_activeX0 = x0; m_activeY0 = y0; m_activeX1 = x1; m_activeY1 = y1;
+        m_hasActiveRect = true;
+        return;
+    }
+    // Snap on large jumps (mode/scene change), else ease toward detection.
+    auto snap = [](GLint a, GLint b, GLint span) { return abs(a - b) > span / 4; };
+    if (snap(x0, m_activeX0, srcW) || snap(x1, m_activeX1, srcW) ||
+        snap(y0, m_activeY0, srcH) || snap(y1, m_activeY1, srcH)) {
+        m_activeX0 = x0; m_activeY0 = y0; m_activeX1 = x1; m_activeY1 = y1;
+    } else {
+        m_activeX0 = (m_activeX0 + x0) / 2; m_activeY0 = (m_activeY0 + y0) / 2;
+        m_activeX1 = (m_activeX1 + x1) / 2; m_activeY1 = (m_activeY1 + y1) / 2;
+    }
+}
+
 void StereoRenderer::OnViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
     // Capture the primary game viewport, including pillarbox/letterbox active regions
     if (width >= 640 && height >= 480) {
@@ -731,23 +807,10 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
             GLint dstW = m_eyeWidth;
             GLint dstH = m_eyeHeight;
 
-            // GH #12: monoscopic capture has no IPD parallax (both eyes blit
-            // the same backbuffer). Apply a small half-IPD horizontal shift per
-            // eye as a convergence cue. This does NOT synthesize true parallax
-            // (occlusion/disparity need an engine-level dual-view render).
-            // Track C #9: comfort vignette adds a motion-scaled extra shift.
-            // Desktop mirror is untouched: only eye-FBO source rects shift.
-            GLint halfIpdPx = (std::max)(1, srcW / 240);
-            GLint comfortPx = 0;
-            if (m_sharedState.comfortVignette > 0.01f) {
-                int shiftPx = static_cast<int>(srcW * m_hudConvergenceOffset * m_sharedState.comfortVignette);
-                comfortPx = (shiftPx > 1) ? shiftPx : 1;
-            }
-            GLint leftSrcX0 = srcX - halfIpdPx - comfortPx;
-            GLint leftSrcX1 = srcX + srcW - halfIpdPx - comfortPx;
-            GLint rightSrcX0 = srcX + halfIpdPx + comfortPx;
-            GLint rightSrcX1 = srcX + srcW + halfIpdPx + comfortPx;
-
+            // GH #43/#44: cinema screen for menus/cinematics (2D frames),
+            // full-bleed immersion for 3D gameplay.
+            bool isCinema = !OpenGLProxy::Has3DThisFrame();
+            m_sharedState.cinemaMode = isCinema;
 
             // Read from default backbuffer 0
             OpenGLProxy::real_glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */, 0);
@@ -755,27 +818,64 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
                 OpenGLProxy::glReadBuffer(0x0405 /* GL_BACK */);
             }
 
-            // Blit into Left Eye FBO (vertically flipped: srcY goes from srcH down to 0)
-            // Fixes: OpenGL bottom-left origin to Direct3D 11 / OpenXR top-left origin!
+            if (isCinema) {
+                // GH #43: fit the 2D frame onto a virtual cinema screen -
+                // contain aspect, centered, black surround (looking at a screen).
+                if (OpenGLProxy::glClearColor && OpenGLProxy::real_glClearFunc) {
+                    OpenGLProxy::real_glBindFramebuffer(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, m_leftFbo);
+                    OpenGLProxy::glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+                    OpenGLProxy::real_glClearFunc(GL_COLOR_BUFFER_BIT);
+                    OpenGLProxy::real_glBindFramebuffer(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, m_rightFbo);
+                    OpenGLProxy::glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+                    OpenGLProxy::real_glClearFunc(GL_COLOR_BUFFER_BIT);
+                }
+                float fit = (std::min)(static_cast<float>(dstW) / srcW, static_cast<float>(dstH) / srcH);
+                GLint cw = static_cast<GLint>(srcW * fit);
+                GLint ch = static_cast<GLint>(srcH * fit);
+                GLint cx0 = (dstW - cw) / 2;
+                GLint cy0 = (dstH - ch) / 2;
+                // y-flipped src (top-down into GL bottom-up), flat screen: no IPD shift.
+                BlitEye(true, srcX, srcY + srcH, srcX + srcW, srcY, cx0, cy0, cx0 + cw, cy0 + ch);
+                VRHandRenderer::Instance().RenderHands(m_sharedState, true, m_eyeWidth, m_eyeHeight);
+                BlitEye(false, srcX, srcY + srcH, srcX + srcW, srcY, cx0, cy0, cx0 + cw, cy0 + ch);
+                VRHandRenderer::Instance().RenderHands(m_sharedState, false, m_eyeWidth, m_eyeHeight);
+            } else {
+                // GH #44: full-bleed gameplay; crop baked letterbox/pillarbox out.
+                ScanActiveRegion(srcX, srcY, srcW, srcH);
+                GLint ax0 = m_hasActiveRect ? m_activeX0 : srcX;
+                GLint ay0 = m_hasActiveRect ? m_activeY0 : srcY;
+                GLint ax1 = m_hasActiveRect ? m_activeX1 : srcX + srcW;
+                GLint ay1 = m_hasActiveRect ? m_activeY1 : srcY + srcH;
+
+            // GH #12: monoscopic capture has no IPD parallax (both eyes blit
+            // the same backbuffer). Apply a small half-IPD horizontal shift per
+            // eye as a convergence cue. This does NOT synthesize true parallax
+            // (occlusion/disparity need an engine-level dual-view render).
+            // Track C #9: comfort vignette adds a motion-scaled extra shift.
+            // Desktop mirror is untouched: only eye-FBO source rects shift.
+            GLint spanW = ax1 - ax0;
+            GLint halfIpdPx = (std::max)(1, spanW / 240);
+            GLint comfortPx = 0;
+            if (m_sharedState.comfortVignette > 0.01f) {
+                int shiftPx = static_cast<int>(spanW * m_hudConvergenceOffset * m_sharedState.comfortVignette);
+                comfortPx = (shiftPx > 1) ? shiftPx : 1;
+            }
+            GLint leftSrcX0 = ax0 - halfIpdPx - comfortPx;
+            GLint leftSrcX1 = ax1 - halfIpdPx - comfortPx;
+            GLint rightSrcX0 = ax0 + halfIpdPx + comfortPx;
+            GLint rightSrcX1 = ax1 + halfIpdPx + comfortPx;
+
+            // Blit active gameplay region full-bleed into both eyes
+            // (y-flipped src: top-down into GL bottom-up).
             // In gameplay mode (dstX=0, dstY=0, dstW=m_eyeWidth, dstH=m_eyeHeight),
             // this fills the entire buffer with 100% immersion and ZERO black bars.
-            OpenGLProxy::real_glBindFramebuffer(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, m_leftFbo);
-            OpenGLProxy::glBlitFramebuffer(
-                leftSrcX0, srcY + srcH, leftSrcX1, srcY,
-                dstX, dstY, dstX + dstW, dstY + dstH,
-                GL_COLOR_BUFFER_BIT, GL_LINEAR
-            );
+            BlitEye(true, leftSrcX0, ay1, leftSrcX1, ay0, dstX, dstY, dstX + dstW, dstY + dstH);
 
             // Render always-visible 3D VR tactical hands into Left Eye buffer
             VRHandRenderer::Instance().RenderHands(m_sharedState, true, m_eyeWidth, m_eyeHeight);
 
-            // Blit into Right Eye FBO (vertically flipped: srcY goes from srcH down to 0)
-            OpenGLProxy::real_glBindFramebuffer(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, m_rightFbo);
-            OpenGLProxy::glBlitFramebuffer(
-                rightSrcX0, srcY + srcH, rightSrcX1, srcY,
-                dstX, dstY, dstX + dstW, dstY + dstH,
-                GL_COLOR_BUFFER_BIT, GL_LINEAR
-            );
+            // Blit active gameplay region full-bleed into Right Eye FBO.
+            BlitEye(false, rightSrcX0, ay1, rightSrcX1, ay0, dstX, dstY, dstX + dstW, dstY + dstH);
 
             // Render always-visible 3D VR tactical hands into Right Eye buffer
             VRHandRenderer::Instance().RenderHands(m_sharedState, false, m_eyeWidth, m_eyeHeight);
@@ -811,6 +911,8 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
 
                 OpenGLProxy::glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
             }
+
+            } // end gameplay full-bleed branch (GH #44)
 
             // Restore default framebuffer 0 for the game and spectator display
             OpenGLProxy::real_glBindFramebuffer(0x8D40 /* GL_FRAMEBUFFER */, 0);

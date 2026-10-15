@@ -71,6 +71,9 @@ public:
     static GLenum GetCurrentMatrixMode();
     static bool HasInterceptedProjection();
     static bool Has3DGameplayProjection();
+    // GH #43/#44: true when a perspective projection was seen within the
+    // last few presented frames (menus/cinematics go ortho/2D between frames).
+    static bool Has3DThisFrame();
     static const float* GetLastProjectionMatrix();
     static const float* GetLastViewMatrix();
 
