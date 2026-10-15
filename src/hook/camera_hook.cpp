@@ -1410,6 +1410,43 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                                        vrState.rightController.trigger > 0.65f);
             bool batonVaultPlunge = (rVel.y < -1.35f);
 
+            // Inmate Pit Brawl Duck-Under Back-Clinch Belly-to-Back Suplex Slam (ADR 0213)
+            static DWORD s_lastBackSuplexTime = 0;
+            static DWORD s_backSuplexClinchTime = 0;
+            bool duckUnderLow = (s_isPhysicallyCrouched || s_isDeepProne || leftLocal.y < -0.25f);
+            bool duckUnderRearSlip = (duckUnderLow && handsDistSledge < 0.24f &&
+                                      fabsf(rVel.x) > 0.85f &&
+                                      vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f);
+            if (duckUnderRearSlip && (now - s_lastBackSuplexTime > 2000)) {
+                if (s_backSuplexClinchTime == 0) {
+                    s_backSuplexClinchTime = now;
+                    VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL REAR WAIST CLINCH LOCKED (Rx: %.2f)", rVel.x);
+                    vrState.leftHapticPulse = 0.90f;  // Abdominal lift strain (220 Hz)
+                    vrState.rightHapticPulse = 0.90f;
+                }
+            }
+            bool backSuplexHoistSlam = (s_backSuplexClinchTime > 0 && (now - s_backSuplexClinchTime < 500) &&
+                                        lVel.y > 1.20f && rVel.y > 1.20f);
+
+            // Security Guard Stun Baton Charged High-Velocity Forward Radial Thrust Disarm (ADR 0214)
+            static DWORD s_lastRadialDisarmTime = 0;
+            static DWORD s_radialDisarmTwistTime = 0;
+            static char s_radialDisarmDirKey = 'A';
+            bool radialDisarmStance = (handsDistSledge < 0.24f &&
+                                       vrState.leftController.grip > 0.65f && vrState.rightController.grip > 0.65f &&
+                                       vrState.rightController.trigger > 0.65f);
+            bool radialDisarmTwist = (radialDisarmStance && fabsf(rVel.x - lVel.x) > 1.15f);
+            if (radialDisarmTwist && (now - s_lastRadialDisarmTime > 2000)) {
+                if (s_radialDisarmTwistTime == 0) {
+                    s_radialDisarmTwistTime = now;
+                    s_radialDisarmDirKey = (rVel.x > 0.0f) ? 'D' : 'A';
+                    VR_LOG_INFO("Tactical Melee: STUN BATON RADIAL DISARM TWIST EXECUTED (Dir: %c, DeltaVx: %.2f)", s_radialDisarmDirKey, rVel.x - lVel.x);
+                    vrState.leftHapticPulse = 0.95f;  // Torque disarm snap (310 Hz)
+                    vrState.rightHapticPulse = 0.95f;
+                }
+            }
+            bool radialDisarmThrust = (s_radialDisarmTwistTime > 0 && (now - s_radialDisarmTwistTime < 500) && rVel.z < -1.35f);
+
             // Inmate Pit Brawl Outside Leg Hook Sweep & Ground Knee Drop (ADR 0209)
             static DWORD s_lastOutsideLegSweepTime = 0;
             static DWORD s_outsideLegSweepHookTime = 0;
@@ -1456,7 +1493,41 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 s_crossBlockHoldStart = 0;
             }
 
-            if (isCrossThrustOvercharged && (now - s_lastCrossThrustTime > 2000)) {
+            if (radialDisarmThrust && (now - s_lastRadialDisarmTime > 2000)) {
+                s_lastRadialDisarmTime = now;
+                s_radialDisarmTwistTime = 0;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Tactical Melee: STUN BATON RADIAL DISARM PENETRATIVE THRUST DISCHARGED (Rz: %.2f)", rVel.z);
+                mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
+                SendKey(s_radialDisarmDirKey, true);
+                SendKey('W', true);
+                SendKey('E', true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey('E', false);
+                SendKey('W', false);
+                SendKey(s_radialDisarmDirKey, false);
+                mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
+                vrState.rightHapticPulse = 0.98f; // Penetrative arc detonation blast (350 Hz)
+                vrState.leftHapticPulse = 0.70f;
+            } else if (backSuplexHoistSlam && (now - s_lastBackSuplexTime > 2000)) {
+                s_lastBackSuplexTime = now;
+                s_backSuplexClinchTime = 0;
+                s_lastPunchTime = now;
+                VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL BELLY-TO-BACK SUPLEX SLAM EXECUTED (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
+                SendKey('S', true);
+                SendKey('W', true);
+                SendKey('C', true);
+                SendKey(VK_SPACE, true);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                SendKey(VK_SPACE, false);
+                SendKey('C', false);
+                SendKey('W', false);
+                SendKey('S', false);
+                vrState.leftHapticPulse = 0.98f;  // Vertebral floor impact shockwave (40 Hz)
+                vrState.rightHapticPulse = 0.98f;
+            } else if (isCrossThrustOvercharged && (now - s_lastCrossThrustTime > 2000)) {
                 s_lastCrossThrustTime = now;
                 s_crossBlockHoldStart = 0;
                 s_lastPunchTime = now;
@@ -4298,6 +4369,46 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKeyTap(VK_RETURN);
                 vrState.rightHapticPulse = 0.98f; // Cotter pin release snap (290 Hz)
                 vrState.leftHapticPulse = 0.65f;  // Corroded clevis drag (210 Hz)
+            }
+
+            // Dark Athena EVA Solar Collector Truss Articulation Lock Hinge Retaining Ring Circlip Pliers Pinch (ADR 0211)
+            static DWORD s_lastCirclipTime = 0;
+            bool handAtHingeGrooveCollar = (leftLocal.z > -0.42f && leftLocal.z < -0.15f && leftLocal.y > 0.10f && leftLocal.y < 0.40f &&
+                                            vrState.leftController.grip > 0.55f);
+            bool handHoldingCirclipPliers = (twoHandDist < 0.22f && vrState.rightController.grip > 0.60f &&
+                                             vrState.rightController.trigger > 0.60f);
+            bool circlipAxialThrust = (rVel.z < -0.85f);
+            if (handAtHingeGrooveCollar && handHoldingCirclipPliers && circlipAxialThrust && (now - s_lastCirclipTime > 1800)) {
+                s_lastCirclipTime = now;
+                VR_LOG_INFO("Environmental Gesture: EVA TRUSS CIRCLIP SEATED & SNAPPED (Rz: %.2f)", rVel.z);
+                SendKeyTap('E');
+                SendKeyTap(VK_SPACE);
+                SendKeyTap(VK_TAB);
+                SendKeyTap(VK_RETURN);
+                vrState.rightHapticPulse = 0.98f; // Circlip snap detent (300 Hz)
+                vrState.leftHapticPulse = 0.65f;  // Pliers spring compression tension (200 Hz)
+            }
+
+            // Subterranean Hydroponics Bio-Waste Incinerator High-Pressure Secondary Air Damper Handwheel Spin (ADR 0212)
+            static DWORD s_lastSecondaryDamperTime = 0;
+            static int s_secondaryDamperRevs = 0;
+            bool handAtSecondaryDamper = (rightLocal.z > -0.42f && rightLocal.z < -0.16f && rightLocal.y > 0.10f && rightLocal.y < 0.42f &&
+                                          vrState.rightController.grip > 0.55f);
+            float secondaryDamperSpeed = sqrtf(rVel.x * rVel.x + rVel.y * rVel.y);
+            if (handAtSecondaryDamper && secondaryDamperSpeed > 0.48f && (now - s_lastSecondaryDamperTime > 250)) {
+                s_lastSecondaryDamperTime = now;
+                s_secondaryDamperRevs++;
+                VR_LOG_INFO("Environmental Gesture: HYDROPONICS SECONDARY AIR DAMPER WHEEL CRANK #%d (Speed: %.2f)", s_secondaryDamperRevs, secondaryDamperSpeed);
+                vrState.rightHapticPulse = 0.55f; // Spindle rotation friction (140 Hz)
+                if (s_secondaryDamperRevs >= 3) {
+                    s_secondaryDamperRevs = 0;
+                    VR_LOG_INFO("Environmental Gesture: SECONDARY AIR DRAFT VANES OPENED");
+                    SendKeyTap('E');
+                    SendKeyTap('Q');
+                    SendKeyTap(VK_SPACE);
+                    SendKeyTap(VK_TAB);
+                    vrState.rightHapticPulse = 0.95f; // Mechanical end-stop thud (220 Hz)
+                }
             }
         }
     }
