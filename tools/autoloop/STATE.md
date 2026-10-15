@@ -2,6 +2,57 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 8 — 2026-10-16 00:15 (scheduled loop)
+- **Unit:** GH #55 → #46 — correct/extend the just-committed `.xmd` `SKELETON`
+  decode: pin the `+0x0E` node field and the real meaning of `NODEINDICES`.
+- Coordination: while this wake was doing independent RE, a **second concurrent
+  writer** (extra `opencode` sessions were live) implemented the skeleton step
+  and committed it as `2a5430d` (Wake 7). Working tree was clean by the time I
+  went to commit, so this wake **builds on** that commit instead of duplicating
+  it (no clobbering; explicit `git add <paths>` only).
+- Observation (real evidence, read-only; Ghidra 12.1.4 via `rea`): the
+  **load-time hierarchy walker `FUN_1001e040`** (called by `FUN_1001f2e0`, in
+  turn called at the end of the skeleton reader `FUN_100219d0`) recurses over the
+  tree. For node `i` it reads `child_count = *(u8*)(node + 0x10)` and
+  `child_start = *(i16*)(node + 0x0E)` and takes each child as
+  `*(u16*)(NODEINDICES_base + (child_start + k) * 2)`, recursing on it. It never
+  reads the `parent` field (`+0x12`). Therefore Wake 7's "`+0x0E` index
+  (uninterpreted)" is really **`child_start`**, and `NODEINDICES` is the
+  **flattened child table** (`node.children == NODEINDICES[child_start :
+  child_start + child_count]`), not merely the set of used non-root nodes.
+- Change:
+  - `tools/mos_xmd.py`: `SkeletonNode.child_start` replaces `unknown_e`;
+    `Skeleton.children_of()` now reads the `NODEINDICES` table exactly like
+    `FUN_1001e040`; added `child_ranges_tile()` and `derived_parents()`;
+    `child_count_matches()` now cross-checks the table against the `parent`
+    field; `validate()` adds child-range bounds, exact tiling,
+    `sum(child_count) == len(NODEINDICES)`, and table-vs-parent-field agreement;
+    padding nodes must also have `child_count == 0`; `geometry_summary()` reports
+    `skeleton_child_table_ok`; `--skeleton` prints `child_start`; docstring
+    documents the child table.
+  - `tools/test_mos_xmd.py`: +3 headless tests (child-table chain walk incl.
+    `child_start` offsets + `derived_parents`, overrun detection, parent-field
+    vs child-table mismatch); the skin helper now emits a matching
+    `NODEINDICES` child table.
+  - `docs/adr/0418-xmd-skeleton-nodes-nodeindices.md`: `+0x0E` corrected to
+    `child_start`; new "Update — 2026-10-16 (wake 8)" section with the
+    `FUN_1001e040` evidence.
+- Evidence: `mos_xmd.py --inventory <game>\Content\Models --check` → **631/631
+  `ok`, 0 failures**. Aggregate via the parser API → **249** skeletons /
+  **12593** nodes / **12424 used** + **169 padding** / **12175** indices;
+  **0** tiling failures, **0** `child_start` overruns, **0** child_count/indices
+  sum mismatches, **0** table-vs-parent mismatches; `max_rotation_slot 73`,
+  `max_movement_slot 20`; deepest chain 12. `test_mos_xmd.py` PASS;
+  `verify_reported_fixes.py`, `scenario_tests.py --check`,
+  `validate_addresses.py`, `verify_hook_init.py` all pass. No C++ changed, so
+  `build-all.ps1`/CTest were not rerun (as in Wakes 3–7).
+- Blocker: none. Next: extract the Riddick hand/forearm surfaces
+  (`RIDDICK_ARMSCAR_D/S/N` in `Riddick_B05.xmd`, `Pa2_Hand_01`) with geometry +
+  UVs + skeleton + skin and add a native mesh path behind a flag, keeping
+  `VRHandRenderer` as fallback (GH #46). Node names remain unshipped — identify
+  the hand bones from geometry/skinning.
+- Branch: committed on `main` (`7b33e0e`), pushed to `origin/main`.
+
 ## Wake 7 — 2026-10-16 00:03 (scheduled loop)
 - **Unit:** GH #55 → #46 — decode the `.xmd` `SKELETON` `NODES`/`NODEINDICES`
   payloads from the shipped `MXR.dll` loader (the skeleton step after
