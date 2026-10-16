@@ -2,6 +2,54 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 23 — 2026-10-16 10:15 (scheduled loop)
+- **Unit:** GH #59→#46 — finish ADR-0429's "Next probe" by re-checking the **field
+  chain** of the live per-bone skin-matrix array against the MXR.dll
+  **disassembly** (`FUN_1002dcc0`), then correct the record.
+- Finding 1 (real evidence, read-only; Ghidra 12.1.4 via `rea`, full pseudo +
+  2543-instruction listing saved at `tools/autoloop/logs/wake23_func_1002dcc0.json`):
+  **ADR-0429's field chain is wrong at its base.** Ghidra's `local_a0` is one
+  local assigned twice; the value that feeds the matrix array is the *second*
+  assignment. Disassembly: `0x1002dd2a MOV EAX,[EAX+0xb0]` (early
+  `local_a0 = param_1[0x2c]`), then `0x1002e47b MOV EBX,[EBX+0x94]` +
+  `0x1002e481 MOV [EBP+0xffffff64],EBX` (`local_a0 = param_1[0x25]`), then
+  `0x1002e476 MOV ECX,[ECX+0x3c]` / `0x1002e48b MOV [EBP+0xffffff64],ECX`
+  (override `local_a0 = *(int*)(param_6 + 0x3c)`). So the owner is
+  **`param_1[0x25]` (= `*(int*)(param_1 + 0x94)`), overridden by
+  `*(int*)(param_6 + 0x3c)`** — **not** `param_1[0x2c]` (`+0xb0`).
+- Finding 2 (confirms the offset shape, from the corrected base):
+  `0x1002e593/0x1002e5a8/0x1002e5af/0x1002e5be` =
+  `iVar15 = *(int*)(local_a0+0x14); matrices = *(int*)(iVar15+0x18);
+  count = *(int*)(iVar15+0x04)`, then handed to `FUN_100238a0` at the already
+  pinned call site (`0x1002f447..0x1002f44d`). `xrefs 0x1002dcc0` → only the
+  vtable slot `0x10144db8` (no static caller → argument types unresolved).
+- Finding 3 (container): the object at `iVar15` is shaped like the engine's
+  **`TList_Vector<TMatrix43<float,float>>`** (`+0x04` count, `+0x18` data, 0x30-B
+  elements) — matching the shipped RTTI at `0x10169fc8`/`0x1016a1c0`/`0x1016a214`
+  and `FUN_10022f90`'s `* 0x30` stride; the same `{+0x04;+0x18}` accessor is used
+  for other `TList_Vector` fields in the same function.
+- Change (docs only, no code/asset):
+  - `docs/adr/0430-xmd-live-skin-matrix-vector-field-chain.md` (new) — the
+    correction, the container shape, and a "not claimed" list.
+  - `docs/adr/0429-…md` — a Correction pointer to ADR-0430.
+  - `docs/rea/reference/MXR_SkinMatrixProvider.txt` — field chain corrected +
+    the disassembly excerpt.
+  - `docs/rea/mos-xmd-format.md` — provider field chain + Next probe updated to
+    `param_1[0x25]` / `*(param_6+0x3c)`.
+- Evidence: `rea function MXR.dll 0x1002dcc0`, `rea xrefs MXR.dll 0x1002dcc0`;
+  artefacts under `tools/autoloop/logs/wake23_*`. No C++/asset changed → no
+  `build-all.ps1`/CTest rerun; `xmd_bake --verify` OK (4 meshes/1548 verts);
+  `test_mos_xmd.py`, `test_xmd_export.py`, `test_xmd_bake.py`,
+  `test_xmd_pose.py`, `test_xsa_anim.py`, `validate_addresses.py`,
+  `verify_hook_init.py`, `verify_reported_fixes.py`, `scenario_tests.py --check`
+  all PASS.
+- Blocker: none for landing. **Next:** identify the owner class of
+  `*(param_1+0x94)` / `*(param_6+0x3c)` and its matrix-list builder (opened
+  GH #60) and decide `world` vs `world·bind_inverse`; the native skinned hand
+  (#46) still needs that runtime array (GH #34) or an offline
+  `bind_inverse × .xsa` pose. Rigid draw (ADR-0427) stays the honest default.
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 22 — 2026-10-16 09:58 (scheduled loop)
 - **Unit:** GH #59→#46 — close ADR-0428's "Next probe": decompile the **builder**
   of the draw-side skin matrix *provider* and decide whether a skinned native hand

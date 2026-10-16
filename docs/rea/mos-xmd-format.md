@@ -245,9 +245,15 @@ The provider consumed by `FUN_100254e0` is built per skinned cluster by
 So `mesh+0x24` is `{u32 n; u8 palette[n]}`, and the provider reads **no** bind/
 reference/inverse matrix — it only selects `matrices[palette[bone]]`. The matrices
 themselves come from the **model instance** (in `FUN_1002dcc0`:
-`local_84 = *(int*)(*(int*)(model[0x2c] + 0x14) + 0x18)`), not from the mesh.
-Pseudocode/field chain: `docs/rea/reference/MXR_SkinMatrixProvider.txt`.
+`local_84 = *(int*)(*(int*)(*(int*)(param_1 + 0x94) + 0x14) + 0x18)`), not from
+the mesh. Pseudocode/field chain: `docs/rea/reference/MXR_SkinMatrixProvider.txt`.
+
+**Corrected (ADR-0430):** the base is `param_1[0x25]` (`param_1 + 0x94`),
+overridden by `*(int*)(param_6 + 0x3c)` when non-null — **not** `param_1[0x2c]`
+(`+0xb0`) as ADR-0429 first recorded (the decompiler local was assigned twice).
+The container is shaped like the engine's `TList_Vector<TMatrix43<float,float>>`
+(`{+0x04 count; +0x18 data}`, `0x30`-byte elements).
 
 **Next probe:** the builder of that live per-bone array (field `+0x18` of
-`*(model[0x2c])+0x14`, candidate `CXR_SkeletonInstance`) — does it compose
+`*(*(param_1+0x94))+0x14`, or of `*(*(param_6+0x3c))+0x14`) — does it compose
 `world·bind_inverse`, or must the native path read it at runtime (GH #34)?

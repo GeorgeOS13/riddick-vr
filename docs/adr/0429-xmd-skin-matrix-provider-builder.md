@@ -11,6 +11,14 @@ own `BONEMATRIXMAP` palette. No game file was modified and no code was deployed.
 This extends the `#59` chain: ADR-0419 → ADR-0423 → ADR-0424 → ADR-0425 →
 ADR-0426 → ADR-0428 (draw-side blend) → **ADR-0429** (provider builder).
 
+> **Correction (ADR-0430).** The field chain in section 3 below is wrong at its
+> **base**: `local_a0` is a decompiler local assigned twice, and the value that
+> feeds the matrix array is `param_1[0x25]` (`param_1 + 0x94`), overridden by
+> `*(int*)(param_6 + 0x3c)` when non-null — **not** `param_1[0x2c]` (`+0xb0`).
+> The `+0x14 → +0x18` (matrices) / `+0x04` (count) offsets and every other
+> conclusion here stand (verified against the disassembly). See
+> `docs/adr/0430-xmd-live-skin-matrix-vector-field-chain.md`.
+
 ## Context
 ADR-0428 decompiled `CXR_Model_TriangleMesh::Cluster_TransformBones_V_N_TgU_TgV`
 (`FUN_100254e0`) and showed it transforms each vertex by a weighted sum of 3×4

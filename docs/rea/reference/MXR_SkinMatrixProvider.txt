@@ -139,14 +139,42 @@ int __thiscall FUN_10022f90(void *this,int param_1)
 ; params[0..9] + two shorts; params[6] = -1).
 ;
 ; The matrices pointer local_84 and the count cap local_94 are not the mesh's:
-; the draw reads them from the model object before the cluster loop:
+; the draw reads them from the model object before the cluster loop.
 ;
-;   local_a0 = param_1[0x2c];                         // param_1 = draw arg #1
+; CORRECTED 2026-10-16 (ADR-0430): Ghidra's `local_a0` is assigned TWICE. The
+; value that feeds the matrix array is the SECOND assignment -- param_1[0x25]
+; (= *(int*)(param_1 + 0x94)), overridden by *(int*)(param_6 + 0x3c) when
+; non-null -- NOT param_1[0x2c] (+0xb0, an earlier, unrelated field on the same
+; argument). Verified in the disassembly of FUN_1002dcc0:
+;
+;   0x1002dd2a  MOV EAX, [EAX + 0xb0]              ; early: local_a0 = param_1[0x2c]
+;   0x1002dd30  MOV [EBP + 0xffffff64], EAX
+;   ...
+;   0x1002e47b  MOV EBX, [EBX + 0x94]              ; EBX = param_1 (TEST [EBX+0x4c] above)
+;   0x1002e481  MOV [EBP + 0xffffff64], EBX        ; local_a0 = param_1[0x25]
+;   0x1002e473  MOV ECX, [EBP + -0x7c]             ; ECX = local_80 = param_6
+;   0x1002e476  MOV ECX, [ECX + 0x3c]              ; ECX = *(int*)(param_6 + 0x3c)
+;   0x1002e487  JZ  0x1002e491
+;   0x1002e489  MOV EBX, ECX
+;   0x1002e48b  MOV [EBP + 0xffffff64], ECX        ; local_a0 = *(int*)(param_6+0x3c)
+;   ...
+;   0x1002e593  MOV ECX, [EBP + 0xffffff64]        ; ECX = local_a0
+;   0x1002e5a8  MOV EAX, [ECX + 0x14]              ; iVar15   = *(int*)(local_a0 + 0x14)
+;   0x1002e5af  MOV EDX, [EAX + 0x18]              ; matrices = *(int*)(iVar15 + 0x18)
+;   0x1002e5be  MOV EAX, [EAX + 0x04]              ; count    = *(int*)(iVar15 + 0x04)
+;
+;   local_a0 = param_1[0x25];                        // param_1 = draw arg #1 (int*)
+;   if (*(int *)(param_6 + 0x3c) != 0)
+;       local_a0 = *(int *)(param_6 + 0x3c);         // override when non-null
 ;   iVar15   = *(int *)(local_a0 + 0x14);
 ;   local_84 = (int *)*(int *)(iVar15 + 0x18);        // -> live per-bone matrix array
 ;   local_94 = *(int *)(iVar15 + 4);                  // -> its entry count
 ;
 ; So the live matrix array is a field (+0x18) of the object at
-; *(model+0x2c)+0x14. Building that array (and any world*bind_inverse composition)
-; is upstream of FUN_100238a0 and of FUN_1002dcc0.
+; *(*(param_1+0x94))+0x14 (or *(*(param_6+0x3c))+0x14). The container is shaped
+; like the engine's TList_Vector<TMatrix43<float,float>> ({+0x04 count; +0x18
+; data}, 0x30-byte elements) -- the RTTI for that family is at 0x10169fc8 /
+; 0x1016a1c0 / 0x1016a214 and matches FUN_10022f90's `* 0x30` stride. Building
+; that array (and any world*bind_inverse composition) is upstream of
+; FUN_100238a0 and of FUN_1002dcc0. See docs/adr/0430-...md.
 # ------------------------------------------------------------------------------
