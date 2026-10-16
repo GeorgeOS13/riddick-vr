@@ -127,9 +127,20 @@ static bool IsGameForeground() {
     return GetForegroundWindow() == s_gameHwnd;
 }
 
+// GH #68: never inject input while the OpenXR simulator harness is driving.
+static bool SimModeNoInput() {
+    static int cached = -1;
+    if (cached < 0) {
+        char buf[8] = {};
+        cached = (GetEnvironmentVariableA("RIDDICKVR_SIM", buf, sizeof(buf)) > 0) ? 1 : 0;
+    }
+    return cached == 1;
+}
+
 // GH #33: Central SendInput-based mouse helpers (migration target for the
 // legacy mouse_event call sites). Relative moves; foreground-guarded.
 static void SendMouseMove(int dx, int dy) {
+    if (SimModeNoInput()) return; // GH #68
     if ((dx == 0 && dy == 0) || !IsGameForeground()) return;
     INPUT in = {};
     in.type = INPUT_MOUSE;
@@ -140,6 +151,7 @@ static void SendMouseMove(int dx, int dy) {
 }
 
 static void SendMouseClick(bool leftButton, bool isDown) {
+    if (SimModeNoInput()) return; // GH #68
     if (!IsGameForeground()) return;
     INPUT in = {};
     in.type = INPUT_MOUSE;

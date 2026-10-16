@@ -7,11 +7,24 @@ namespace RiddickVR {
 
 static HWND s_gestureHwnd = nullptr;
 
+// GH #68: OpenXR-simulator safety. When the harness sets RIDDICKVR_SIM=1 the
+// hook must NOT synthesize desktop input; the sim drives poses programmatically
+// and any real SendInput would hijack the user's keyboard. Checked once, cached.
+static bool SimModeNoInput() {
+    static int cached = -1;
+    if (cached < 0) {
+        char buf[8] = {};
+        cached = (GetEnvironmentVariableA("RIDDICKVR_SIM", buf, sizeof(buf)) > 0) ? 1 : 0;
+    }
+    return cached == 1;
+}
+
 void SetGestureGameHwnd(HWND hwnd) {
     s_gestureHwnd = hwnd;
 }
 
 void SendKey(WORD vk, bool isDown) {
+    if (SimModeNoInput()) return; // GH #68: no input injection in simulator mode
     // GH #33: foreground guard (mirrors camera_hook IsGameForeground).
     // Fail-open while the game HWND is unknown (tests); SetGestureGameHwnd
     // should be wired to the latched game window when available.

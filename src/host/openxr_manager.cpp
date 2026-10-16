@@ -1715,14 +1715,46 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                 totalFrames++;
                 framesCounted++;
 
-                // Capture and dump frame BMP if scheduled
-                if (!m_dumpDir.empty() && m_sharedLeftTex && 
-                    (totalFrames == 1 || totalFrames % m_dumpInterval == 0)) {
-                    char outPath[MAX_PATH];
-                    sprintf_s(outPath, "%s\\test_frame_%04u.bmp", m_dumpDir.c_str(), totalFrames);
-                    if (SaveTextureToBMP(m_d3d11Device, m_d3d11Context, m_sharedLeftTex, outPath)) {
-                        std::cout << "[Mock Host] Captured test frame " << totalFrames << " -> " << outPath << std::endl;
+                // GH #68: frame-time budget sampling (host frame cadence). Emits a
+                // parseable summary the simulator harness reads; budget = 90 Hz.
+                {
+                    static auto s_prevFrameTs = std::chrono::steady_clock::now();
+                    static double s_sumFrameMs = 0.0, s_maxFrameMs = 0.0;
+                    static uint64_t s_frameSamples = 0, s_overBudget = 0;
+                    static const double s_budgetMs = 1000.0 / 90.0; // 11.11 ms @ 90 Hz
+                    const auto nowTs = std::chrono::steady_clock::now();
+                    const double dtMs = std::chrono::duration<double, std::milli>(nowTs - s_prevFrameTs).count();
+                    s_prevFrameTs = nowTs;
+                    if (dtMs > 0.0 && dtMs < 1000.0) { // ignore idle gaps
+                        s_sumFrameMs += dtMs;
+                        if (dtMs > s_maxFrameMs) s_maxFrameMs = dtMs;
+                        if (dtMs > s_budgetMs) s_overBudget++;
+                        s_frameSamples++;
+                        if (s_frameSamples % 30 == 0) {
+                            std::cout << "[Mock Host] FrameBudget samples=" << s_frameSamples
+                                      << " mean_ms=" << std::fixed << std::setprecision(2)
+                                      << (s_sumFrameMs / s_frameSamples)
+                                      << " max_ms=" << s_maxFrameMs
+                                      << " over_budget=" << s_overBudget
+                                      << " budget_ms=" << s_budgetMs << std::endl;
+                        }
                     }
+                }
+
+                // GH #68: capture BOTH eyes for the XR-simulator stereo diff.
+                // test_frame_####.bmp stays the LEFT eye (legacy tooling), and
+                // right_####.bmp is the RIGHT eye.
+                if (!m_dumpDir.empty() && m_sharedLeftTex && m_sharedRightTex &&
+                    (totalFrames == 1 || totalFrames % m_dumpInterval == 0)) {
+                    char leftPath[MAX_PATH];
+                    char rightPath[MAX_PATH];
+                    sprintf_s(leftPath, "%s\\test_frame_%04u.bmp", m_dumpDir.c_str(), totalFrames);
+                    sprintf_s(rightPath, "%s\\right_%04u.bmp", m_dumpDir.c_str(), totalFrames);
+                    const bool okL = SaveTextureToBMP(m_d3d11Device, m_d3d11Context, m_sharedLeftTex, leftPath);
+                    const bool okR = SaveTextureToBMP(m_d3d11Device, m_d3d11Context, m_sharedRightTex, rightPath);
+                    std::cout << "[Mock Host] Captured stereo frame " << totalFrames
+                              << " (L=" << (okL ? "ok" : "err") << " R=" << (okR ? "ok" : "err")
+                              << ") -> " << leftPath << " / " << rightPath << std::endl;
                 }
 
                 ipcHost.SignalFrameConsumed();
