@@ -57,7 +57,10 @@ def main():
 
     require(all(token in stance for token in ("ENTER_THRESHOLD = 0.85f", "EXIT_THRESHOLD = 0.60f",
                                                "ENTER_HOLD_MS = 100", "left.isConnected && right.isConnected")) and
-            "combatStance.active && !isClimbingActive" in camera and
+            # GH #65: melee is swing-velocity driven (no both-trigger chord gate);
+            # the two-hand stance still gates the guard *pose* (next token).
+            "combatStance.active && !isClimbingActive" not in camera and
+            "!isClimbingActive && (now - s_melee.lastPunchTime > 260)" in camera and
             "bool guardPoseDetected = !isClimbingActive && !s_twoHandedStabilizationActive" in camera and
             "chinLevel && inFrontOfFace && handsClose && handsSteady && notPunching" in camera,
             "combat stance must use two-hand hysteresis and gate strikes/guard")
