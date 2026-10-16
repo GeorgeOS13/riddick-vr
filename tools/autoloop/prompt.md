@@ -16,11 +16,14 @@ work this wake, then stop. Keep total effort bounded (<= 4 concurrent subagents)
    --oneline -5`. Read `tools/autoloop/STATE.md` (state from prior wakes) and the
    tail of `tools/autoloop/logs/`.
 2. `gh issue list --state open`. **Player-visible priority (do these first):**
+   - **#67 (TOP) Drive the engine's own first-person arms with the controller
+     (F.E.A.R.-VR style)** — hook the FP viewmodel draw + matrix and re-project
+     into head/controller space; stop trying to make the re-baked overlay look
+     right. This is the real fix for the hands.
    - **#64 Native hands look flat/2D, out of place, and leave stray procedural
-     blocks** — fix orientation/scale/anchor, real 3D shading, remove leftovers
-     (`src/hook/vr_hand_renderer.cpp`, `src/hook/native_hand_pose.h`).
-   - **#61 Native hands untextured (grey)** — bind the real `.xtc` Riddick skin
-     diffuse (`Riddick_ArmScar_D`).
+     blocks** — only fallback work once #67 is underway.
+   - **#61 Native hands untextured (grey/white)** — the baked diffuse decodes
+     white; fix or keep the skin-tone fallback.
    - **#65 Punch/attack fires on controller swing** — first pass landed; validate
      and tune thresholds.
    - **#62 Block = hands in front of the HMD (not below)** — first pass landed;
