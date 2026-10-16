@@ -62,6 +62,12 @@ Shipped-content cross-check (`Content/Registry/RpgAmmo.xrg`, 9/9 `*flags` lines)
   the enclosing function is player-start/camera-entity selection, so it is **not
   established** as the viewmodel gate.
 
+## Follow-up (ADR-0438)
+The "[draw gate]" open question below was resolved **negatively** in ADR-0438:
+the bit is set/cleared by the engine's own per-frame toggler (`FUN_100e6aa0`)
+and has **no direct mask reader** in any shipped x86 module, so #63 moves to
+approach 2 (per-draw suppression). This ADR's flag encoding stays correct.
+
 ## Not claimed
 - The **draw gate** that consumes `noviewmodel` is not identified.
 - No in-headset validation (none is possible offline); this is a static,

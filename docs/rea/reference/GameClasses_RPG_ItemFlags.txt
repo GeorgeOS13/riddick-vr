@@ -117,9 +117,13 @@ exhaustively scanned).
 
 NEXT PROBES
 ===========
-- Find the runtime path to the **equipped item** (`CRPG_Object_Item*`) so the
-  hook could OR 0x2 into `+0x14c` (approach 1, GH #63).
-- Identify the actual first-person weapon/arm draw gate and whether it reads
-  `[+0x14c] & 2` at all (approach 1) — or fall back to approach 2 (a per-draw
-  viewmodel signature).
+- SUPERSEDED by ADR-0438 / `GameClasses_NoviewmodelRuntime.txt`: the draw-gate
+  hunt below resolved NEGATIVELY. `noviewmodel` is set/cleared at runtime by the
+  engine's own `FUN_100e6aa0` (vtable VA 0x101c67e0, slot +0x40) and has **no
+  direct mask reader** of `[+0x14c] & 2` in any shipped x86 module, so GH #63
+  moves to approach 2 (per-draw interception, see the new follow-up issue).
+- (retired) Find the runtime path to the **equipped item** (`CRPG_Object_Item*`)
+  so the hook could OR 0x2 into `+0x14c` (approach 1, GH #63).
+- (retired) Identify the actual first-person weapon/arm draw gate and whether it
+  reads `[+0x14c] & 2` at all (approach 1).
 - Decompile FUN_10040aa0 (the sole caller) to classify FUN_10037020's role.

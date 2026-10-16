@@ -1,0 +1,136 @@
+# GameClasses_Win32_x86.dll — who reads/writes the `noviewmodel` bit at runtime
+# provider: ghidra 12.1.4 (function) + raw byte scan (module-wide)
+# subject : Content/GameClasses_Win32_x86.dll
+#           sha256 = 1898b736f11e0fc0bc2976703592d30184225c6f5b39263cfd54a86b423d8903
+#           (2004 EFBB build; 2,219,520 bytes; image base 0x10000000)
+#           sections: .text VA 0x10001000 raw 0x400 (delta VA=fileoff+0x10000C00)
+#                     .rdata VA 0x101b7000 raw 0x1b5a00 (delta VA=fileoff+0x10001600)
+# evidence: wake31 (function FUN_100e6aa0 pseudocode+assembly; module-wide mask scans)
+# purpose : GH #63 approach 1 ("hide the engine's first-person arms/hands"). ADR-0435
+#           pinned the `noviewmodel` bit (bit 1 = 0x2 @ CRPG_Object_Item+0x14c) but
+#           left the *consumer* open. This records that the only bit-1 code in the
+#           shipped x86 modules is the engine's own per-frame *toggle*, not a draw
+#           gate. Read-only artefact of REA.
+# ------------------------------------------------------------------------------
+
+OBSERVED 1 — the engine SETS and CLEARS the bit itself (per-frame item update)
+============================================================================
+FUN_100e6aa0   GameClasses_Win32_x86.dll   0x100e6aa0 .. 0x100e6b3c   (157 bytes)
+reached through the vtable at VA 0x101c67e0 (slot +0x40; the only xref to
+FUN_100e6aa0 is the dword at file offset 0x1c5220 == VA 0x101c6820, i.e. the
+vtable slot).
+
+Ghidra pseudocode:
+
+    void FUN_100e6aa0(undefined4 param_1, undefined4 param_2)   // this = in_ECX
+    {
+      byte bVar1;
+      int in_ECX;
+      if (*(byte *)(in_ECX + 0x212) < 0xfe) {
+        bVar1 = *(byte *)(in_ECX + 0x212) + 1;
+        *(byte *)(in_ECX + 0x212) = bVar1;
+        if (((*(uint *)(in_ECX + 0x14c) & 2) == 0) && (*(byte *)(in_ECX + 0x210) < bVar1)) {
+          *(uint *)(in_ECX + 0x14c) = *(uint *)(in_ECX + 0x14c) | 2;   // SET noviewmodel
+          FUN_100dcb90(param_2,0x1056,0,0xffffffff,0xffffffff);
+        }
+      }
+      if ((((*(uint *)(in_ECX + 0x14c) & 2) != 0) &&
+          (*(byte *)(in_ECX + 0x211) < *(byte *)(in_ECX + 0x212))) &&
+          (*(short *)(in_ECX + 0x204) != 0)) {
+        *(uint *)(in_ECX + 0x14c) = *(uint *)(in_ECX + 0x14c) & 0xfffffffd;  // CLEAR noviewmodel
+        FUN_100dcb90(param_2,0x1056,0,0xffffffff,0xffffffff);
+      }
+      FUN_100e6450(param_1,param_2);
+      return;
+    }
+
+Assembly (both bit tests, confirming the &2 semantics and the inline set/clear):
+
+    0x100e6ab4 MOV CL,AL
+    0x100e6ab6 MOV EAX,dword ptr [ESI + 0x14c]
+    0x100e6abc ADD CL,0x1
+    0x100e6abf TEST AL,0x2
+    0x100e6ac1 MOV byte ptr [ESI + 0x212],CL
+    0x100e6ac7 JNZ 0x100e6aed
+    0x100e6ac9 CMP CL,byte ptr [ESI + 0x210]
+    0x100e6acf JBE 0x100e6aed
+    0x100e6adc OR EAX,0x2
+    0x100e6ae2 MOV dword ptr [ESI + 0x14c],EAX          ; flags |= 2
+    0x100e6ae8 CALL 0x100dcb90
+    0x100e6aed MOV EAX,dword ptr [ESI + 0x14c]
+    0x100e6af3 TEST AL,0x2
+    0x100e6af5 JZ 0x100e6b2b
+    0x100e6afd CMP CL,byte ptr [ESI + 0x211]
+    0x100e6b05 CMP word ptr [ESI + 0x204],0x0
+    0x100e6b1a AND EAX,0xfffffffd
+    0x100e6b20 MOV dword ptr [ESI + 0x14c],EAX          ; flags &= ~2
+    0x100e6b26 CALL 0x100dcb90
+
+Reading: `+0x14c` is the RPG-item `*flags` bitfield (ADR-0435), so the object is
+an RPG item/weapon instance. `+0x212` is a saturating (<0xfe) per-frame counter;
+`+0x210`/`+0x211` are byte thresholds; `+0x204` is a short gate. The bit is set
+after `+0x210` frames and cleared after `+0x211` frames when `+0x204 != 0` — a
+hysteresis/state machine that notifies `FUN_100dcb90(..., 0x1056, ...)` on every
+transition (0x1056 is very likely an anim property/event id). `0x100dcb90` and
+`0x100e6450` are not decompiled here.
+
+OBSERVED 2 — no direct draw-gate reader of bit 1 exists in the shipped modules
+============================================================================
+Scanned every shipped x86 module (GameClasses, GameWorld_Win32_x86.dll,
+MXR.dll, MSystem.dll, MCCDyn.dll, RndrGL.dll, SbzEngine.exe) raw bytes:
+
+(a) Immediate mask tests `TEST byte|dword [reg+0x14c], imm` for all 8 modrm
+    register variants (modrm 0x80|reg .. 0x87|reg):
+      - exactly ONE site in the entire set tests bit 1:
+          0x10037111  F6 80 4C 01 00 00 02   test byte [eax+0x14c], 2
+        (file offset 0x36511; inside FUN_10037020, see ADR-0435 — the enclosing
+        function is player-start/camera-entity selection, a *different* object's
+        +0x14c).
+      - every other `[+0x14c]` immediate test uses other masks (0x1 wallcollision,
+        0x20 aiming, 0x40 playerflashlight, 0x100 unselectable, 0x800 forcewalk,
+        0x2000 __activated__, 0x4000 needammo, 0x80000 __removed__,
+        0x10000 needequippedlink, 0x100000 renderquantity, 0x200000 questitem,
+        0x400000 forceselected, 0x800000 twohanded, 0x1000000 consume,
+        0x8000000 mergeonly, 0x10000000 weapontargeting, 0x20000000 singleshot,
+        0x40000000 removeinstant, 0x80000000 nomerge …). **None** tests bit 1.
+
+(b) Register mask forms within 40 bytes of any `+0x14c` read (172 read sites in
+    GameClasses; mov/movzx/movsx/test/cmp/and with disp32 0x14c, mod=10):
+      - `TEST AL,2` / `TEST EAX,2` / `AND reg,2` / `BT reg,1`:
+          only the two sites inside FUN_100e6aa0 itself (0x100e6abf, 0x100e6af3).
+      - bit-1-extraction forms (`SHR reg,1`, `TEST reg,1`, `AND reg,1`) near a
+        `+0x14c` read: none.
+
+(c) Documented **false positives** of the byte scan (do not cite as consumers):
+      - 0x1013F898 "test al,2": the bytes are the rel32 operand of the
+        `JNZ 0x1013fb44` at 0x1013f896 (delta 0x2a8 -> 02 A8 00 00); the real
+        instruction at 0x1013f88c is `TEST dword [EAX+0x14c], 0x4000000`.
+      - 0x10052C84 "test al,1": inside `CMP dword [ESI+0x1a8], 0x0`
+        (bytes 83 BE A8 01 00 00 00 contain "A8 01").
+
+INFERENCE (not proven)
+======================
+- `noviewmodel` behaves as an engine *output* of an item state machine (weapon
+  idle/raise-lower style hysteresis), not as a simple boolean input to a draw
+  gate. Since no code path masks bit 1 to make a draw decision, forcing the bit
+  from the hook is not expected to suppress the first-person viewmodel.
+- A *copy-based* consumer (the flags snapshotted into another structure, then
+  compared) cannot be excluded by a mask scan, so this is not a proof that the
+  bit is inert — only that it has no direct mask reader.
+- Class identity of the FUN_100e6aa0 object is inferred from layout (it carries
+  the RPG-item `*flags` at +0x14c); the MSVC RTTI COL chain is not recoverable
+  from the file (no COL references the type descriptors), so the exact class
+  (`CRPG_Object_Item` vs `CRPG_Object_Weapon` vs a client-data type) is not
+  claimed.
+
+NEXT PROBES (for GH #63, approach 2)
+====================================
+- The hook is an opengl32 proxy and already EXPORTS `glBegin` (opengl32.def:13),
+  `glDrawArrays` (:75) and `glDrawElements` (:77); it currently only *forwards*
+  them. Add per-draw interception there and find a reliable viewmodel-pass
+  signature (e.g. the FP projection/camera state, a depth-clear boundary, or a
+  distinct model/material binding) to skip the pass. See the new follow-up
+  issue.
+- Only if approach 2 fails: trace whether the equipped item's `+0x14c` is
+  *copied* anywhere (a `mov` of the whole dword into another field) and whether
+  the copy is compared — that could still make a forced write effective.

@@ -2,6 +2,57 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 31 — 2026-10-16 15:00 (scheduled loop)
+- **Unit:** GH **#63** (duplicate hands) — resolve the last open approach-1
+  unknown (the `noviewmodel` **draw gate**) and re-direct the issue. Result:
+  **negative** (no draw gate exists), so #63 moves to approach 2.
+- Finding 1 (real evidence, read-only; Ghidra 12.1.4 on
+  `Content/GameClasses_Win32_x86.dll`, sha256 `1898b736…`): the engine **sets and
+  clears the `noviewmodel` bit itself**. `FUN_100e6aa0`
+  (`0x100e6aa0..0x100e6b3c`, reached only via the vtable at VA `0x101c67e0`,
+  slot `+0x40`) is a per-frame item update: `flags |= 0x2` once a saturating
+  counter `+0x212` exceeds byte threshold `+0x210`; `flags &= ~0x2` once `+0x212`
+  exceeds `+0x211` **and** `*(short*)(+0x204) != 0`; both transitions call
+  `FUN_100dcb90(this, 0x1056, 0, -1, -1)` (anim property/event). So the bit is a
+  runtime *output* of an item state machine, not a boolean draw-gate input.
+- Finding 2 (decisive, #63): a raw-byte scan of **every** shipped x86 module
+  (GameClasses, GameWorld, MXR, MSystem, MCCDyn, RndrGL, `SbzEngine.exe`) finds
+  **no direct mask reader** of `[+0x14c] & 2`:
+  - exactly one immediate bit-1 test on `+0x14c` anywhere — `0x10037111
+    test byte [eax+0x14c],2`, a *different* object's field (player-start/
+    camera-entity selection, ADR-0435);
+  - `test al,2` / `test eax,2` / `and reg,2` / `bt reg,1` within 40 B of any
+    `+0x14c` read occur **only inside `FUN_100e6aa0` itself** (172 read sites in
+    GameClasses);
+  - no `(flags >> 1) & 1` form near a `+0x14c` read.
+  Documented false positives: `0x1013F898` (a `JNZ` rel32 operand) and
+  `0x10052C84` (bytes of `CMP dword [esi+0x1a8],0`).
+- Change (docs only, no C++/asset): new
+  `docs/rea/reference/GameClasses_NoviewmodelRuntime.txt` (toggler pseudocode +
+  assembly, the exhaustive scan method/results, the false positives, and the
+  inference/`not claimed` list) and
+  `docs/adr/0438-noviewmodel-engine-toggled-no-draw-gate.md`. ADR-0435 and
+  `GameClasses_RPG_ItemFlags.txt` get a correction pointer. New GH issue **#66**
+  for approach 2; comment on #63.
+- Decision: **approach 1 is out** — a forced `flags |= 2` has no reader and the
+  engine's own `FUN_100e6aa0` would clear it each frame. **Approach 2**
+  (per-draw suppression) is feasible: the hook is an `opengl32.dll` proxy that
+  already *exports* `glBegin`/`glDrawArrays`/`glDrawElements`
+  (`src/hook/opengl32.def:13,75,77`) but only forwards them.
+- Evidence: `wake31_func_100E6AF3.json`, `wake31_func_1013F898.json`,
+  `wake31_xrefs_100e6aa0.json` under `tools/autoloop/logs/`; module-wide mask
+  scan scripts (`scan14c_all.py`, `scan_bit1*.py`). No C++/asset changed → no
+  `build-all.ps1`/CTest; `verify_reported_fixes` and `scenario_tests.py --check`
+  PASS.
+- Blocker: none for landing. **Next:** start **#66** (approach 2) — add
+  per-draw interception in `OpenGLProxy` for the already-exported
+  `glBegin`/`glDrawArrays`/`glDrawElements` and search for a reliable
+  viewmodel-pass signature. Only if that fails, trace whether the equipped
+  item's `+0x14c` is *copied* and compared (a copy-based consumer cannot be
+  excluded by a mask scan).
+- Branch: committed on `main`, pushed to `origin/main` (HEAD was already
+  `origin/main` at wake start — no concurrent writer).
+
 ## Wake 30 — 2026-10-16 14:54 (scheduled loop)
 - **Unit:** GH **#65** (punch/attack on swing) — do the issue's *remaining* work:
   expose the strike velocity thresholds in the INI. Extracted the inline
