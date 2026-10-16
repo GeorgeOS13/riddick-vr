@@ -45,12 +45,15 @@ private:
     // Returns false (and draws nothing) when the enable flag is off, the mesh
     // is missing, or the placement degenerates -- the caller then falls back to
     // the procedural primitives. Only active when VRConfig::nativeHands is set.
+    // GH #64: rendered two-sided (culling off + GL two-sided lighting) with the
+    // baked normals driving per-vertex GL lighting, and the on-headset
+    // orientation correction (NativeHandYaw/Pitch/Roll) applied hand-local.
     bool DrawNativeHand(HandSide side);
 
     // GH #61: create (once) the GL texture for the baked Riddick skin diffuse
     // (native_hand_texture.h). Returns false while the texture is unavailable
     // (disabled, no GL entry points, or no baked asset) so DrawNativeHand falls
-    // back to its flat skin-tone + lambert shading.
+    // back to its flat skin-tone tint under the GL lighting.
     bool EnsureNativeHandTexture();
 
     // Geometry utility primitives (colors multiplied by active hand fade)

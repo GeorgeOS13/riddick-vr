@@ -17,6 +17,7 @@ using RiddickVR::MapNativeHandNormal;
 using RiddickVR::MapNativeHandPoint;
 using RiddickVR::NativeHandMesh;
 using RiddickVR::NativeHandPlacement;
+using RiddickVR::RotateNativeHandPlacement;
 
 namespace {
 
@@ -118,6 +119,50 @@ int main() {
           "left +Y normal maps to +Z local");
     MapNativeHandNormal(right, normalIn, out);
     Check(Near(out[2], -1.0f), "right +Y normal maps to -Z local");
+
+    // --- GH #64: hand-local orientation correction composes after the basis ---
+    {
+        NativeHandPlacement copy = left; // positional copy (no GL, POD struct)
+        RotateNativeHandPlacement(copy, 0.0f, 0.0f, 0.0f);
+        Check(Near(Det3(copy.rot), 1.0f) && Near(copy.rot[0][0], 1.0f) &&
+                  Near(copy.rot[1][1], 1.0f) && Near(copy.rot[2][2], 1.0f),
+              "zero angles leave the orientation correction as identity");
+
+        // Yaw +90 about local +Y: local +X -> +Z, and a base-mapped +X offset
+        // must equal R * (base result).
+        RotateNativeHandPlacement(copy, 90.0f, 0.0f, 0.0f);
+        Check(Near(Det3(copy.rot), 1.0f), "yaw correction matrix is orthonormal");
+        Check(Near(copy.rot[0][2], 1.0f) && Near(copy.rot[0][0], 0.0f),
+              "yaw +90 maps local +X onto +Z");
+
+        // Base result for the +X model offset on the unrotated placement.
+        float baseOut[3];
+        MapNativeHandPoint(left, plusX, baseOut);
+        float rotatedOut[3];
+        MapNativeHandPoint(copy, plusX, rotatedOut);
+        // R * baseOut, with R = Ry(90).
+        const float expX = baseOut[2];
+        const float expZ = -baseOut[0];
+        Check(Near(rotatedOut[0], expX) && Near(rotatedOut[1], baseOut[1]) &&
+                  Near(rotatedOut[2], expZ),
+              "rotated point equals R * (basis-mapped point)");
+
+        // Normals rotate identically and stay unit length.
+        float nOut[3];
+        MapNativeHandNormal(copy, normalIn, nOut); // base local (0,0,1) -> +X
+        Check(Near(nOut[0], 1.0f) && Near(nOut[1], 0.0f) && Near(nOut[2], 0.0f),
+              "yaw +90 rotates the +Y normal to local +X");
+        Check(Near((float)std::sqrt((double)Dot(nOut, nOut)), 1.0f),
+              "rotated normal keeps unit length");
+
+        // Pitch +90 about local +X: local +Z -> -Y.
+        NativeHandPlacement pitched = left;
+        RotateNativeHandPlacement(pitched, 0.0f, 90.0f, 0.0f);
+        float pOut[3];
+        MapNativeHandNormal(pitched, normalIn, pOut); // base local (0,0,1)
+        Check(Near(pOut[0], 0.0f) && Near(pOut[1], -1.0f) && Near(pOut[2], 0.0f),
+              "pitch +90 maps local +Z onto -Y");
+    }
 
     // --- Degenerate / invalid inputs are rejected, never silently mapped ----
     const float zeroX[3] = { 0, 0, 0 };

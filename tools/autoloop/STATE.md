@@ -2,6 +2,52 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 29 — 2026-10-16 14:44 (scheduled loop)
+- **Unit:** GH **#64** (native hands flat/2D, out of place, stray procedural
+  blocks) — make the native draw read as **solid lit 3D**, remove the floating
+  overlay blocks, and expose an on-headset **orientation** correction.
+- Finding (read-only, `src/hook/vr_hand_renderer.cpp`): `DrawNativeHand` computed
+  a hand-rolled **two-sided abs-lambert** (`shade = 0.35 + 0.65*|N·L|`, `|.|`
+  kills the terminator) *on top of* the fixed-function `GL_LIGHTING`/`GL_LIGHT0`
+  `RenderHands` already enables → double-shaded and flat-looking; and it drew with
+  **backface culling on** (`GL_CULL_FACE`+`GL_FRONT_FACE(GL_CW)`), which the
+  baked `.xmd` open shell does not respect → missing/single-sided faces. The four
+  hand-local **interaction boxes** were drawn unconditionally, so they floated as
+  stray blocks on the native mesh.
+- Change (code/tests/docs):
+  - `DrawNativeHand`: disable `GL_CULL_FACE` + `glLightModeli(GL_LIGHT_MODEL_TWO_SIDE,
+    GL_TRUE)` for the native batch only (restored inline); **removed the
+    abs-lambert**, letting the shipped unit normals drive real smooth
+    `GL_LIGHTING`; tint goes **white when textured** (MODULATE) so the GH #61
+    diffuse shows at full strength, flat skin tone only for the untextured
+    fallback. New core GL entry point `glLightModeli` added to the dispatch.
+  - `DrawTacticalHand`: `const bool native = DrawNativeHand(side);` gates **both**
+    the procedural hand *and* the interaction boxes → no stray blocks on the
+    native path. Upper-arm cloth intentionally kept (native clusters cover only
+    the forearm + hand).
+  - `native_hand_pose.h`: `RotateNativeHandPlacement(p, yaw, pitch, roll)` — a
+    hand-local orientation correction (degrees; `R = Ry·Rx·Rz`, identity default)
+    applied in `MapNativeHandPoint`/`MapNativeHandNormal`. INI keys
+    `NativeHandYaw/Pitch/Roll` (`vr_config`, clamped ±180°) so the provisional
+    ADR-0427 basis can be corrected on a headset without code changes.
+  - `tests/native_hand_pose_tests.cpp`: rotation-composition, orthonormality,
+    `R * base` equality, unit-length normal, pitch/roll checks.
+  - `tools/verify_reported_fixes.py` (#64 invariant), `src/hook/README.md`,
+    `riddick_vr.ini`, `tools/riddick_vr.ini.example`,
+    `docs/adr/0436-native-hand-solid-3d-and-overlay-cleanup.md` (new).
+- Evidence: `build-all.ps1 -Config Release` OK (x86 `opengl32.dll` + x64 host);
+  CTest **7/7 PASS** on x86 **and** x64 (`native_hand_pose_mapping` now covers the
+  rotation); `validate_addresses`, `test_mos_xmd`, `test_xmd_export`,
+  `test_xmd_bake`, `test_xsa_anim`, `test_xmd_pose`, `test_mos_xtc`,
+  `test_xtc_bake`, `verify_hook_init`, `verify_reported_fixes`,
+  `scenario_tests.py --check` all PASS.
+- Blocker: **not validated in-headset** — the orientation correction defaults to 0
+  (the inferred basis); `NativeHandYaw/Pitch/Roll` + scale/offset/V-flip need
+  headset tuning. Rigid draw only (skinning = GH #58/#60). **Next:** tune the
+  native-hand knobs on hardware; re-anchor the interaction visuals to the native
+  hand frame; then #61 headset UV check.
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 28 — 2026-10-16 14:26 (scheduled loop)
 - **Unit:** GH **#63** (duplicate hands) — RE **approach 1** precondition: pin
   the RPG item `*flags` encoding so the engine's `noviewmodel` flag can be

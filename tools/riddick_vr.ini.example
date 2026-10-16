@@ -46,6 +46,12 @@ NativeHandScale=0.033
 NativeHandOffsetX=0
 NativeHandOffsetY=0
 NativeHandOffsetZ=0
+; Native hand orientation correction (GH #64), degrees applied in the hand-local
+; frame (yaw about up, pitch about right, roll about the forearm axis). Use these
+; to correct the provisional axis basis on a headset without a code change.
+NativeHandYaw=0
+NativeHandPitch=0
+NativeHandRoll=0
 ; --- Native hand texture (GH #61) ---
 ; 1 = modulate the real Riddick skin/scar diffuse (DXT1, baked from the game's
 ; Content/Models.xtc) over the lit native hand mesh; the flat skin tone stays

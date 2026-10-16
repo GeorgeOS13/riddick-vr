@@ -24,7 +24,18 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   draw — the procedural overlay remains the fallback.
 - `native_hand_pose.h` maps the asset's model-space AABB into the hand-local
   frame (unit-tested by `native_hand_pose_mapping`,
-  `tests/native_hand_pose_tests.cpp`).
+  `tests/native_hand_pose_tests.cpp`). GH #64 adds `RotateNativeHandPlacement`
+  for an INI-tunable hand-local orientation correction
+  (`NativeHandYaw/Pitch/Roll`, degrees).
+
+## Native hand draw quality (GH #64)
+- `DrawNativeHand` renders the baked mesh **two-sided** (backface culling
+  disabled + `GL_LIGHT_MODEL_TWO_SIDE`) so no faces vanish and the shipped
+  per-vertex normals drive real smooth `GL_LIGHTING` shading. The old hand-rolled
+  two-sided abs-lambert (which flattened the silhouette into a card) is gone.
+- The hand-local interaction boxes (reload/cartridge/heal/grab glow) are drawn
+  only with the **procedural** hand; on the native path they floated as stray
+  blocks. Re-anchoring them to the native frame is future work. See ADR-0436.
 
 ## Native hand diffuse texture (GH #61)
 - `native_hand_texture.h` + generated `native_hand_texture_data.h`: the real

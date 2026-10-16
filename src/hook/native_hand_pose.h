@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cmath>
+
 // GH #46: provisional model-space -> hand-local placement for the baked native
 // hand/arm meshes (see native_hand_mesh.h).
 //
@@ -27,8 +29,9 @@
 // must tune `NativeHandScale` / offsets -- nothing here claims a validated fit,
 // and the procedural `VRHandRenderer` overlay stays the default path.
 //
-// This header is dependency-free and header-only so the mapping can be unit
-// tested headlessly (tests/native_hand_pose_tests.cpp) without GL or the game.
+// This header is header-only and only depends on <cmath> so the mapping can be
+// unit tested headlessly (tests/native_hand_pose_tests.cpp) without GL or the
+// game.
 
 namespace RiddickVR {
 
@@ -44,6 +47,12 @@ struct NativeHandPlacement {
     // basis[r] is the model-space unit direction of hand-local axis r
     // (row 0 = local X/right, row 1 = local Y/up, row 2 = local Z/backward).
     float basis[3][3] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } };
+
+    // GH #64: optional on-headset orientation correction, applied in the
+    // *hand-local* frame after the basis mapping (identity by default). Set via
+    // RotateNativeHandPlacement(); the row-major matrix maps a hand-local vector
+    // to the corrected hand-local vector.
+    float rot[3][3] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } };
 
     // Model-space AABB the placement was derived from (for diagnostics).
     float aabb_min[3] = { 0.0f, 0.0f, 0.0f };
@@ -123,25 +132,69 @@ inline NativeHandPlacement ComputeNativeHandPlacement(const float aabb_min[3],
     return p;
 }
 
+// GH #64: compose an on-headset orientation correction onto a placement. The
+// angles (degrees) are applied in the hand-local frame, intrinsic order
+// yaw (about local +Y/up) * pitch (about local +X/right) * roll (about local
+// +Z/backward), i.e. R = Ry(yaw) * Rx(pitch) * Rz(roll). Passing all zeros
+// resets the correction to the identity. Intended so a tester can correct the
+// provisional axis basis (ADR-0427) without a code change.
+inline void RotateNativeHandPlacement(NativeHandPlacement& p, float yaw_deg,
+                                      float pitch_deg, float roll_deg) {
+    const float d2r = 0.0174532925199433f;
+    const float cy = std::cos(yaw_deg * d2r), sy = std::sin(yaw_deg * d2r);
+    const float cp = std::cos(pitch_deg * d2r), sp = std::sin(pitch_deg * d2r);
+    const float cr = std::cos(roll_deg * d2r), sr = std::sin(roll_deg * d2r);
+
+    // Ry, Rx, Rz (row-major).
+    const float Ry[3][3] = { { cy, 0.0f, sy }, { 0.0f, 1.0f, 0.0f }, { -sy, 0.0f, cy } };
+    const float Rx[3][3] = { { 1.0f, 0.0f, 0.0f }, { 0.0f, cp, -sp }, { 0.0f, sp, cp } };
+    const float Rz[3][3] = { { cr, -sr, 0.0f }, { sr, cr, 0.0f }, { 0.0f, 0.0f, 1.0f } };
+
+    // tmp = Rx * Rz.
+    float tmp[3][3];
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            tmp[r][c] = Rx[r][0] * Rz[0][c] + Rx[r][1] * Rz[1][c] + Rx[r][2] * Rz[2][c];
+        }
+    }
+    // p.rot = Ry * tmp.
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            p.rot[r][c] = Ry[r][0] * tmp[0][c] + Ry[r][1] * tmp[1][c] + Ry[r][2] * tmp[2][c];
+        }
+    }
+}
+
 // Maps a model-space position into the hand-local frame (metres).
 inline void MapNativeHandPoint(const NativeHandPlacement& p, const float in[3],
                                float out[3]) {
     const float d[3] = { in[0] - p.anchor[0], in[1] - p.anchor[1],
                          in[2] - p.anchor[2] };
+    float local[3];
     for (int r = 0; r < 3; ++r) {
-        out[r] = (d[0] * p.basis[r][0] + d[1] * p.basis[r][1] +
-                  d[2] * p.basis[r][2]) *
-                 p.scale;
+        local[r] = (d[0] * p.basis[r][0] + d[1] * p.basis[r][1] +
+                    d[2] * p.basis[r][2]) *
+                   p.scale;
+    }
+    for (int r = 0; r < 3; ++r) {
+        out[r] = local[0] * p.rot[r][0] + local[1] * p.rot[r][1] +
+                 local[2] * p.rot[r][2];
     }
 }
 
-// Maps a model-space normal into the hand-local frame. The basis is
-// orthonormal, so no re-normalisation or scale is applied.
+// Maps a model-space normal into the hand-local frame. The basis and the
+// orientation correction are both orthonormal, so no re-normalisation or scale
+// is applied.
 inline void MapNativeHandNormal(const NativeHandPlacement& p, const float in[3],
                                 float out[3]) {
+    float local[3];
     for (int r = 0; r < 3; ++r) {
-        out[r] = in[0] * p.basis[r][0] + in[1] * p.basis[r][1] +
-                 in[2] * p.basis[r][2];
+        local[r] = in[0] * p.basis[r][0] + in[1] * p.basis[r][1] +
+                   in[2] * p.basis[r][2];
+    }
+    for (int r = 0; r < 3; ++r) {
+        out[r] = local[0] * p.rot[r][0] + local[1] * p.rot[r][1] +
+                 local[2] * p.rot[r][2];
     }
 }
 

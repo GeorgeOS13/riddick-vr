@@ -43,6 +43,12 @@ struct VRConfig {
     float nativeHandOffsetX = 0.0f;
     float nativeHandOffsetY = 0.0f;
     float nativeHandOffsetZ = 0.0f;
+    // GH #64: on-headset orientation correction for the native mesh, degrees in
+    // the hand-local frame (see RotateNativeHandPlacement). Defaults are the
+    // provisional, uncalibrated basis (ADR-0427) -- tune with a headset.
+    float nativeHandYaw = 0.0f;
+    float nativeHandPitch = 0.0f;
+    float nativeHandRoll = 0.0f;
     // GH #61: bind the baked Riddick skin/scar diffuse (DXT1, baked from
     // Models.xtc) on the native hand mesh. V-flip is provisional and needs
     // on-headset validation (like the placement above); 0 = keep the UVs as

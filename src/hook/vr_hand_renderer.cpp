@@ -51,6 +51,7 @@ typedef void (APIENTRY *glTexImage2D_t)(GLenum target, GLint level, GLint intern
 typedef void (APIENTRY *glTexParameteri_t)(GLenum target, GLenum pname, GLint param);
 typedef void (APIENTRY *glTexEnvi_t)(GLenum target, GLenum pname, GLint param);
 typedef void (APIENTRY *glTexCoord2f_t)(GLfloat s, GLfloat t);
+typedef void (APIENTRY *glLightModeli_t)(GLenum pname, GLint param);
 
 typedef void (APIENTRY *PFNGLUSEPROGRAMPROC)(GLuint program);
 typedef void (APIENTRY *PFNGLBINDBUFFERPROC)(GLenum target, GLuint buffer);
@@ -92,6 +93,7 @@ struct GLDispatch {
     glTexParameteri_t glTexParameteri = nullptr;
     glTexEnvi_t glTexEnvi = nullptr;
     glTexCoord2f_t glTexCoord2f = nullptr;
+    glLightModeli_t glLightModeli = nullptr;
 
     PFNGLUSEPROGRAMPROC glUseProgram = nullptr;
     PFNGLBINDBUFFERPROC glBindBuffer = nullptr;
@@ -142,6 +144,7 @@ struct GLDispatch {
         LOAD_GL(glTexParameteri);
         LOAD_GL(glTexEnvi);
         LOAD_GL(glTexCoord2f);
+        LOAD_GL(glLightModeli);
         #undef LOAD_GL
 
         typedef PROC (WINAPI *wglGetProcAddress_t)(LPCSTR);
@@ -604,9 +607,13 @@ void VRHandRenderer::DrawTacticalHand(HandSide side, float grip, float trigger, 
     }
 
     // 1. Forearm Gauntlet & Wrist Vambrace
-    // GH #46: the baked native arm mesh (when enabled) replaces the procedural
-    // gauntlet/palm/digits; the interaction visuals below are kept either way.
-    if (!DrawNativeHand(side)) {
+    // GH #46/#64: the baked native arm mesh (when enabled) replaces the
+    // procedural gauntlet/palm/digits *and* the hand-local interaction boxes,
+    // which are authored for the procedural geometry and otherwise float as
+    // stray blocks (GH #64). `native` reflects an actual native draw (flag on,
+    // mesh + placement valid); anything else keeps the full procedural hand.
+    const bool native = DrawNativeHand(side);
+    if (!native) {
         DrawForearmGauntlet(side);
 
         // 2. Palm & Armored Knuckle Guard
@@ -634,29 +641,34 @@ void VRHandRenderer::DrawTacticalHand(HandSide side, float grip, float trigger, 
     // Fixed-function only, no new state leaks (restored via PopAttrib in RenderHands).
     // GH #46: warm diegetic palette - amber receiver, warm-orange NanoMED,
     // soft green scanner, warm-shifted cyan grab (all harmonized, fade-scaled).
-    if (interactionGlow > 0.01f) {
-        float g = interactionGlow;
-        // Warm amber receiver-proximity highlight above knuckles.
-        DrawBeveledBox(-0.023f, 0.024f, -0.052f, 0.023f, 0.030f, -0.028f,
-                       0.30f + 0.60f * g, 0.24f + 0.38f * g, 0.16f + 0.06f * g);
-    }
-    if (holdingCartridge) {
-        // Warm NanoMED cartridge block held in palm (waist draw visual).
-        DrawBeveledBox(-0.014f, -0.009f, -0.030f, 0.014f, 0.009f, 0.010f,
-                       0.82f, 0.48f, 0.14f);
-        DrawBeveledBox(-0.014f, 0.009f, -0.030f, 0.014f, 0.014f, 0.010f,
-                       0.95f, 0.68f, 0.22f);
-    }
-    if (palmHeal) {
-        // Soft warm green scanner glow under palm.
-        DrawBeveledBox(-0.021f, -0.017f, -0.036f, 0.021f, -0.011f, 0.028f,
-                       0.18f, 0.72f, 0.34f);
-    }
-    if (grabGlow > 0.01f) {
-        // Warm-shifted cyan grab highlight on fingertips region (object/person volumes).
-        float g = grabGlow;
-        DrawBeveledBox(-0.023f, -0.005f, -0.062f, 0.023f, 0.020f, -0.040f,
-                       0.22f + 0.24f * g, 0.60f + 0.24f * g, 0.62f + 0.22f * g);
+    // GH #64: only with the procedural hand -- these boxes sit at procedural
+    // hand-local coordinates and read as stray floating blocks on the native
+    // mesh. Re-anchoring them to the native frame is future work.
+    if (!native) {
+        if (interactionGlow > 0.01f) {
+            float g = interactionGlow;
+            // Warm amber receiver-proximity highlight above knuckles.
+            DrawBeveledBox(-0.023f, 0.024f, -0.052f, 0.023f, 0.030f, -0.028f,
+                           0.30f + 0.60f * g, 0.24f + 0.38f * g, 0.16f + 0.06f * g);
+        }
+        if (holdingCartridge) {
+            // Warm NanoMED cartridge block held in palm (waist draw visual).
+            DrawBeveledBox(-0.014f, -0.009f, -0.030f, 0.014f, 0.009f, 0.010f,
+                           0.82f, 0.48f, 0.14f);
+            DrawBeveledBox(-0.014f, 0.009f, -0.030f, 0.014f, 0.014f, 0.010f,
+                           0.95f, 0.68f, 0.22f);
+        }
+        if (palmHeal) {
+            // Soft warm green scanner glow under palm.
+            DrawBeveledBox(-0.021f, -0.017f, -0.036f, 0.021f, -0.011f, 0.028f,
+                           0.18f, 0.72f, 0.34f);
+        }
+        if (grabGlow > 0.01f) {
+            // Warm-shifted cyan grab highlight on fingertips region (object/person volumes).
+            float g = grabGlow;
+            DrawBeveledBox(-0.023f, -0.005f, -0.062f, 0.023f, 0.020f, -0.040f,
+                           0.22f + 0.24f * g, 0.60f + 0.24f * g, 0.62f + 0.22f * g);
+        }
     }
 
     m_currentFade = 1.0f;
@@ -744,11 +756,14 @@ bool VRHandRenderer::DrawNativeHand(HandSide side) {
     }
 
     const float metersPerUnit = GetWorldScale() * g_vrConfig.nativeHandScale;
-    const NativeHandPlacement placement = ComputeNativeHandPlacement(
+    NativeHandPlacement placement = ComputeNativeHandPlacement(
         mesh->bounds_min, mesh->bounds_max, side == HandSide::Left, metersPerUnit);
     if (!placement.valid) {
         return false;
     }
+    // GH #64: on-headset orientation correction (degrees, applied hand-local).
+    RotateNativeHandPlacement(placement, g_vrConfig.nativeHandYaw,
+                              g_vrConfig.nativeHandPitch, g_vrConfig.nativeHandRoll);
 
     // GH #61: bind the baked diffuse (no-op fallback when unavailable).
     const bool textured = EnsureNativeHandTexture() && s_gl.glTexCoord2f != nullptr;
@@ -756,8 +771,8 @@ bool VRHandRenderer::DrawNativeHand(HandSide side) {
         s_gl.glEnable(GL_TEXTURE_2D);
         s_gl.glBindTexture(GL_TEXTURE_2D, m_nativeHandTexture);
         if (s_gl.glTexEnvi) {
-            // MODULATE so the lit per-vertex colour (fade + lambert) multiplies
-            // the texture instead of replacing it.
+            // MODULATE so the lit per-vertex colour (fade) multiplies the
+            // texture instead of replacing it.
             s_gl.glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
         }
     }
@@ -768,13 +783,24 @@ bool VRHandRenderer::DrawNativeHand(HandSide side) {
                       g_vrConfig.nativeHandOffsetY,
                       g_vrConfig.nativeHandOffsetZ);
 
-    // Fallback skin tone approximating the RIDDICK_ARMSCAR_D diffuse, with a
-    // two-sided lambert term from the baked normals so the mesh reads as a hand
-    // rather than a flat grey blob. When the baked texture is bound the tone
-    // acts as a subtle tint under MODULATE.
-    const float r = 0.55f, g = 0.42f, b = 0.33f;
+    // GH #64: the baked mesh is an open shell and its triangle winding is not
+    // guaranteed relative to the Y-flipped stereo projection. Render it
+    // two-sided (culling off + GL two-sided lighting) so no faces vanish and the
+    // real per-vertex normals light both the inner and outer surface. The
+    // redundant hand-rolled two-sided abs-lambert that flattened the silhouette
+    // is gone; GL_LIGHTING (set up in RenderHands) now provides the 3D shading.
+    s_gl.glDisable(GL_CULL_FACE);
+    if (s_gl.glLightModeli) {
+        s_gl.glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, GL_TRUE);
+    }
+
+    // Fallback skin tone approximating the RIDDICK_ARMSCAR_D diffuse. When the
+    // baked texture is bound the tint goes to white so MODULATE shows the real
+    // texture at full strength (the fade still scales alpha/colour).
+    const float r = textured ? 1.0f : 0.55f;
+    const float g = textured ? 1.0f : 0.42f;
+    const float b = textured ? 1.0f : 0.33f;
     const float f = (std::clamp)(m_currentFade, 0.0f, 1.0f);
-    const float lx = 0.35f, ly = 0.82f, lz = 0.45f; // hand-local light dir
     const bool flipV = g_vrConfig.nativeHandTextureVFlip != 0;
 
     s_gl.glBegin(GL_TRIANGLES);
@@ -790,11 +816,8 @@ bool VRHandRenderer::DrawNativeHand(HandSide side) {
             MapNativeHandPoint(placement, v.position, localPos);
             MapNativeHandNormal(placement, v.normal, localNormal);
 
-            float ndl = localNormal[0] * lx + localNormal[1] * ly + localNormal[2] * lz;
-            if (ndl < 0.0f) ndl = -ndl; // two-sided (no backface culling guarantee)
-            const float shade = 0.35f + 0.65f * ndl;
-            if (m_useAlphaFade) s_gl.glColor4f(r * shade, g * shade, b * shade, f);
-            else s_gl.glColor3f(r * shade * f, g * shade * f, b * shade * f);
+            if (m_useAlphaFade) s_gl.glColor4f(r, g, b, f);
+            else s_gl.glColor3f(r * f, g * f, b * f);
 
             if (textured) {
                 const float tu = v.uv[0];
@@ -807,6 +830,10 @@ bool VRHandRenderer::DrawNativeHand(HandSide side) {
     }
     s_gl.glEnd();
 
+    if (s_gl.glLightModeli) {
+        s_gl.glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, GL_FALSE);
+    }
+    s_gl.glEnable(GL_CULL_FACE);
     if (textured) {
         // Keep the interaction-glow boxes and the other hand's primitives
         // untextured (state is fully restored by glPopAttrib regardless).

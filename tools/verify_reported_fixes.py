@@ -23,6 +23,7 @@ def main():
     guard_header = (ROOT / "src/hook/combat_guard.h").read_text(encoding="utf-8")
     dialogue = (ROOT / "src/hook/dialogue_navigation.h").read_text(encoding="utf-8")
     config = (ROOT / "src/hook/vr_config.cpp").read_text(encoding="utf-8")
+    pose_header = (ROOT / "src/hook/native_hand_pose.h").read_text(encoding="utf-8")
 
     require("vrState.cinemaMode = false" not in camera,
             "camera update must not override the renderer's cinema decision")
@@ -89,6 +90,18 @@ def main():
     require("gripPose.linearVelocity" in host and "90.0f / frameSpan" in host and
             "ApplyScenarioFrame(state, totalFrames);" in host,
             "scripted mock trajectories must drive velocity-sensitive gestures")
+
+    # GH #64: the native hand mesh must read as solid 3D (two-sided, real
+    # per-vertex GL lighting) with a tunable orientation correction, and the
+    # procedural interaction boxes must not float on the native path.
+    require("RotateNativeHandPlacement" in pose_header and
+            "const bool native = DrawNativeHand(side);" in hands and
+            "s_gl.glDisable(GL_CULL_FACE);" in hands and
+            "GL_LIGHT_MODEL_TWO_SIDE" in hands and
+            "GL_TRUE" in hands and
+            "if (!native) {" in hands and
+            all(f"nativeHand{axis}" in config for axis in ("Yaw", "Pitch", "Roll")),
+            "GH #64: native hands must be two-sided + lit with a tunable orientation")
 
     print("[issue-fixes] source invariants passed (#40, #43-47, #52-54)")
     return 0
