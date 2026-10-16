@@ -2,6 +2,52 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 16 — 2026-10-16 05:00 (scheduled loop)
+- **Unit:** GH #46 → #55/#58 — pin the **pose/base pairing** left open by
+  ADR-0422/0423: is a `.xmd` cluster's stored `VERTEXFRAMES` geometry in the
+  `NODES` bind pose? (answer: **no, not universally**).
+- Finding (real evidence, read-only; `tools/xmd_pose.py`):
+  - Weighted geometry centroid per resolved bone (palette applied) minus
+    `NODES.translation` = the per-bone **bind offset**. Two clusters on the same
+    bone cancel the joint-vs-geometry bias, so their offset difference tells
+    whether they share a reference pose.
+  - `Riddick_B05.xmd` (70 nodes, 7 clusters): **legs c0/c3 vs body c6 agree to
+    rms 0.93** (max 2.69; 10 shared leg bones; AABBs overlap) → same reference
+    pose. **Left arm c1/c4 vs body c6 rms 26.58** (max 29.02; 24 shared bones) and
+    **right arm c2/c5 vs body rms 27.27** (max 28.36; 20 shared bones), AABBs
+    **disjoint**: arm geometry Z `44.2..52.5` is entirely above the body Z
+    `0..36.3`. Duplicates (c0↔c3, c1↔c4, c2↔c5) are rms **0.0**.
+  - The `NODES` bind places the arm bones at Z `33.6..48.8` (overlapping the
+    body), so neither body nor arms is *simply* the bind pose: the arm clusters
+    carry a large baked rotation (raised / chest-height ready pose — inference).
+  - Corpus `tools/xmd_pose.py --inventory <game>\Content\Models --check` →
+    **268 models, 3454 clusters, 3103 skinned, 0 problems**.
+- Change:
+  - `tools/xmd_pose.py` (new): `bone_centroids`, `bind_table` (node → bind
+    translation, parent, children, rotation/movement slot, local offset, derived
+    bind axis), `cluster_pose`, `cluster_relation`, `analyze`, `check`; CLI
+    `--model`/`--cluster`/`--relation`/`--bind-table`/`--offsets`/
+    `--inventory --check`/`--json`. Read-only, dependency-free.
+  - `tools/test_xmd_pose.py` (new): **7** synthetic tests → PASS.
+  - `docs/adr/0424-xmd-cluster-reference-pose-vs-bind.md` (new);
+    `docs/rea/mos-xmd-format.md` reference-pose note + Next-steps update.
+  - `docs/rea/reference/riddick_b05_pose.json` (new evidence: bind table +
+    cluster summaries + relations).
+  - `.github/workflows/vr-worker.yml`: run the new test.
+- Evidence: `xmd_pose.py --model Riddick_B05.xmd` (relations table above);
+  `xmd_pose.py --inventory <game>\Content\Models --check` → 268 models /
+  3454 clusters / 3103 skinned / 0 problems; `test_xmd_pose.py` (7) PASS;
+  `test_mos_xmd.py`, `test_xmd_export.py`, `test_xmd_bake.py`,
+  `test_xsa_anim.py`, `validate_addresses.py`, `verify_hook_init.py`,
+  `verify_reported_fixes.py`, `scenario_tests.py --check` all PASS. No C++
+  changed → no `build-all.ps1`/CTest rerun.
+- Blocker: none. **Next:** the skinned native draw needs a **per-cluster
+  reference/bind-inverse transform** (not one global `NODES` bind) — likely
+  resolved through `matrix_map_id` / the engine's per-cluster matrix setup;
+  a **rigid** native draw of the (already raised, `RIDDICK_ARMSCAR_*`) arm
+  clusters behind a `VRHandRenderer` config flag is viable now.
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 15 — 2026-10-16 04:00 (scheduled loop)
 - **Unit:** GH #58 → #46 — pin the `.xsa` **clip → skeleton-slot → track → key
   pool** binding (the "TRACKS-block → NODES-slot mapping" + "7

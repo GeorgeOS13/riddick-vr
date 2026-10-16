@@ -140,6 +140,19 @@ slot -> track -> pool table). `.xag` files are animation **graphs**
 (states/actions/layers) and contain no `COMPRESSEDANIMATIONSET2`. See
 `docs/adr/0422-xsa-compressed-animation-set.md`.
 
+## Cluster reference pose vs `NODES` bind pose
+A cluster's stored `VERTEXFRAMES` geometry is **not** in general the `NODES`
+bind pose: the bind skeleton is one shared array, but each cluster may be stored
+in its own reference pose. On `Riddick_B05.xmd` the legs cluster (`0/3`) and the
+shadow-body cluster (`6`) agree per bone to **< 1 unit** (weighted geometry
+centroid vs `NODES.translation`) while the two arm clusters (`1/2/4/5`) differ
+from the body by **~26–29 units** and their geometry AABB (Z `44.2 .. 52.5`) is
+disjoint from the body (Z `0 .. 36.3`) — the arms are stored in a raised pose and
+sit above the body's head. `tools/xmd_pose.py` reports this per cluster
+(`bone_centroids`, `bind_table`, `cluster_pose`, `cluster_relation`, `check`).
+Consequence: a **skinned** native draw needs a per-cluster bind/reference
+transform, not one global `NODES` bind. `docs/adr/0424-xmd-cluster-reference-pose-vs-bind.md`.
+
 ## Next steps (for the loop/next agent)
 1. Finish the `VERTEXFRAMES` packing and `BONEDEFORM` stride by reading the
    remainder of `CTriangleMeshCore::Read` + `FUN_1007d260` and validating
@@ -156,4 +169,6 @@ slot -> track -> pool table). `.xag` files are animation **graphs**
    `src/hook/native_hand_mesh.h`). Remaining: the `VRHandRenderer` draw path
    itself (rigid first, then skinned once bone rotations are known — they must
    come from the engine or the `.xsa`/`.xag` groups, **not** `KEYS`, which is a
-   metadata map; see ADR-0421).
+   metadata map; see ADR-0421). A **skinned** path additionally needs a
+   per-cluster reference transform, because the shipped clusters are not all in
+   the `NODES` bind pose (ADR-0424, `tools/xmd_pose.py`).
