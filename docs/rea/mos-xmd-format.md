@@ -255,5 +255,65 @@ The container is shaped like the engine's `TList_Vector<TMatrix43<float,float>>`
 (`{+0x04 count; +0x18 data}`, `0x30`-byte elements).
 
 **Next probe:** the builder of that live per-bone array (field `+0x18` of
-`*(*(param_1+0x94))+0x14`, or of `*(*(param_6+0x3c))+0x14`) — does it compose
-`world·bind_inverse`, or must the native path read it at runtime (GH #34)?
+`*(*(param_1+0x94))+0x14`, or of `*(*(param_6+0x3c))+0x14`) - does it compose
+`world*bind_inverse`, or must the native path read it at runtime (GH #34)?
+
+## Related container: the `.xtc` texture packs (ADR-0431, GH #61)
+The shipped textures are *not* loose files; they live in
+`Content/{GUI,Models,Levels}.xtc` (plus
+`ExtraContent/Offline01/Textures/Offline01.xtc`). A `.xtc` is the **same
+`CDataFile` tree** as `.xmd` (identical `MOS DATAFILE2.0` magic), written by the
+engine's `VirtualXTC` texture container. The class strings are in `MSystem.dll`:
+`CTextureContainer_VirtualXTC2` / `CTextureContainer_VirtualXTC`,
+`?AddFromXTC@CTextureContainer_Plain@@...`, `XTXCompile`,
+`".\Raster\MTextureContainerXTC2.cpp"`, and the diagnostics
+`"Invalid XTC. (IMAGELIST was not a directory.)"` / `"Invalid XTC. (No IMAGELIST)"`.
+
+The three game packs share one layout, parsed by `tools/mos_xtc.py`:
+
+1. **Root** = the usual 0x30-byte node record whose `+0x18` sibling field is the
+   **node-table offset near EOF** and whose `+0x20` offset field is `0` (the root
+   has no payload).
+2. **Two contiguous nodes** at that offset: `TEXTURES` (payload = the packed
+   texture-data blob, starting at file offset `0x30`) and `IMAGEDIRECTORY5`
+   (payload = the image directory, the last region before the node table). The
+   two payloads tile `[0x30, node_start)` exactly.
+
+   | pack | size | node_start | TEXTURES blob | directory |
+   |---|---|---|---|---|
+   | `GUI.xtc` | 0x112C9E6 | 0x112C986 | 0x30 + 0x1127322 | 0x1127352 + 0x5634 |
+   | `Models.xtc` | 0x28DEFF6B | 0x28DEFF0B | 0x30 + 0x28DDD11B | 0x28DDD14B + 0x12DC0 |
+   | `Levels.xtc` | 0x5AE8DCB1 | 0x5AE8DC51 | 0x30 + 0x5AE40437 | 0x5AE40467 + 0x4D7EA |
+
+3. **`IMAGEDIRECTORY5`** is a flat list of framed records (no nested tree):
+   `u32 marker=0xFFFFFFFF; u32 0; u32 name_len; char name[name_len]; 0x20 pad to
+   4; u32 desc[14+]`. 246 (GUI) / 901 (Models) / 3797 (Levels) records, which
+   tile the directory payload exactly.
+
+   `desc` (little-endian). Pinned, and verified across all **4944** records:
+
+   | idx | meaning |
+   |---|---|
+   | 1 | mip level count == `log2(max(w,h)) + 1` (4944/4944) |
+   | 2 | `0x300` constant |
+   | 3 | `0x5000` colour / `0x0` linear (normal map) |
+   | 4 | base mip byte count, OR `0x10` when block-compressed |
+   | 5,6 | width, height (powers of two) |
+   | 9 | absolute file offset of the packed block (strictly increasing, inside `TEXTURES`) |
+   | 10 | `0x102` colour / `0x4300102` linear |
+
+   E.g. `Riddick_ArmScar_D` = 512x1024, 11 mips, compressed, base mip `0x40000`
+   bytes (DXT1-sized), block at `0x16CDEABE` (+350072 B). `riddick_armscar_N` =
+   512x1024, uncompressed (`0x200000` = 512*1024*4 B).
+
+4. Each packed block begins with a **`u32` mip-offset table** (`mip_levels`
+   entries, absolute file offsets), followed by one `[0x2C-byte header + data]`
+   record per mip. The block's pixel codec (looks block-compressed) is **not**
+   decoded yet.
+
+Caveats: the node `count` field (`+0x28`) is 2-14 higher than the framed-record
+count (e.g. Models says 914, frames 901) - the framing tiles exactly, so the
+framed records are authoritative. `Offline01.xtc` uses a *different*, nested
+variant (`SOURCE`/`IMAGELIST`/`IMAGEDIRECTORY4`/`IMAGE`/`NAME`/`PROPERTIES`/
+`MIPMAP`), out of scope here.
+

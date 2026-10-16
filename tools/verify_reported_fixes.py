@@ -26,7 +26,7 @@ def main():
     require("vrState.cinemaMode = false" not in camera,
             "camera update must not override the renderer's cinema decision")
     require("m_sharedState.cinemaMode = isCinema;" in renderer and
-            "!OpenGLProxy::Has3DThisFrame() || OpenGLProxy::HasMenuCursor()" in renderer,
+            "bool isCinema = !OpenGLProxy::Has3DThisFrame() || s_cursorMenu;" in renderer,
             "renderer must select cinema for non-3D frames/menu cursor")
     require("if (isCinema)" in renderer and "ScanActiveRegion(srcX, srcY, srcW, srcH);" in renderer,
             "cinema fit and gameplay active-region crop branches must remain")
@@ -57,7 +57,8 @@ def main():
     require(all(token in stance for token in ("ENTER_THRESHOLD = 0.85f", "EXIT_THRESHOLD = 0.60f",
                                                "ENTER_HOLD_MS = 100", "left.isConnected && right.isConnected")) and
             "combatStance.active && !isClimbingActive" in camera and
-            "guardPoseDetected = combatStance.active" in camera,
+            "bool guardPoseDetected = !isClimbingActive && !s_twoHandedStabilizationActive" in camera and
+            "chinLevel && inFrontOfFace && handsClose && handsSteady && notPunching" in camera,
             "combat stance must use two-hand hysteresis and gate strikes/guard")
     require("using VRArmIK::ClampWristOrientation" in hands and "MIN_ELBOW_ANGLE" in ik_header and
             "arm_ik_tests.cpp" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8") and

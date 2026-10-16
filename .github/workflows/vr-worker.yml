@@ -51,6 +51,8 @@ jobs:
         run: python tools/test_xsa_anim.py
       - name: MOS .xmd cluster reference-pose / bind-pose tests (GH #46/#55)
         run: python tools/test_xmd_pose.py
+      - name: MOS .xtc texture-pack structural tests (GH #61)
+        run: python tools/test_mos_xtc.py
       - name: Hook-init regression test (GH #42)
         run: python tools/verify_hook_init.py
       - name: Scenario manifest validation (GH #48)

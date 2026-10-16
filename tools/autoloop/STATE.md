@@ -2,6 +2,76 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 24 — 2026-10-16 10:55 (scheduled loop)
+- **Unit:** GH **#61** (native-hand texture) — decode the shipped **`.xtc`
+  texture packs** and build a read-only reader, so the real Riddick skin
+  diffuse can be extracted for the native hand draw path.
+- Finding 1 (real evidence, read-only): a `.xtc` is the **same `CDataFile`
+  tree** as `.xmd` (identical `MOS DATAFILE2.0` magic) written by the engine's
+  **`VirtualXTC`** texture container — `MSystem.dll` holds
+  `CTextureContainer_VirtualXTC2` / `VirtualXTC`, `?AddFromXTC@...`,
+  `XTXCompile`, `".\Raster\MTextureContainerXTC2.cpp"`, and
+  `"Invalid XTC. (IMAGELIST was not a directory.)"` / `"Invalid XTC. (No
+  IMAGELIST)"` (raw printable-string scan).
+- Finding 2 (container): root record at 0 with `next_sibling` = node-table
+  offset **near EOF** and `data_offset` = **0** (this is why `mos_xmd.py`
+  rejected `.xtc`). Exactly **two** contiguous nodes: `TEXTURES` (payload = the
+  packed texture-data blob, at file `0x30`) and `IMAGEDIRECTORY5` (payload =
+  the image directory, the last region before the node table). The two payloads
+  tile `[0x30, node_start)` exactly. Concrete: GUI `0x30+0x1127322` /
+  `0x1127352+0x5634`, Models `0x30+0x28DDD11B` / `0x28DDD14B+0x12DC0`, Levels
+  `0x30+0x5AE40437` / `0x5AE40467+0x4D7EA`.
+- Finding 3 (directory): `IMAGEDIRECTORY5` is a flat list of framed records
+  `u32 marker=0xFFFFFFFF; u32 0; u32 name_len; char name[name_len]; 0x20 pad;
+  u32 desc[14+]`. Records tile the payload exactly: **246/901/3797** (GUI/
+  Models/Levels). The node `count` (+0x28) is **248/914/3811** — 2-14 higher;
+  the framing is authoritative (recorded as an open question, not guessed).
+- Finding 4 (descriptor, pinned & cross-checked over **4944/4944** records):
+  `desc[1]` = mip count = `log2(max(w,h))+1`; `desc[2]`=`0x300`;
+  `desc[3]`=`0x5000` colour / `0` linear; `desc[4]` = base-mip bytes | `0x10`
+  when block-compressed; `desc[5]/[6]` = width/height (powers of two);
+  `desc[9]` = **absolute file offset** of the packed block (strictly increasing,
+  inside `TEXTURES`); `desc[10]` = `0x102` colour / `0x4300102` linear.
+  `Riddick_ArmScar_D` = 512x1024, 11 mips, colour, compressed, base `0x40000`
+  (DXT1-sized), block@`0x16CDEABE` (+350072 B); `riddick_armscar_N` = 512x1024
+  raw `0x200000` (=512*1024*4).
+- Finding 5 (block framing): a block starts with a `u32` mip-offset table
+  (`mip_levels` absolute offsets), then one `[0x2C-byte header + data]` record
+  per mip; the mip deltas match the exact DXT1 mip-chain sizes. **The pixel
+  codec is not decoded yet.**
+- Change (code/tools/docs; **no C++**):
+  - `tools/mos_xtc.py` (new): read-only `.xtc` reader — container, framed
+    directory, pinned descriptor; `--list`, `--find NAME`,
+    `--extract NAME --out FILE`, `--json`, `--check`. Seeks (handles the 1.5 GB
+    `Levels.xtc` without loading it).
+  - `tools/test_mos_xtc.py` (new): 12 self-contained synthetic-container tests.
+  - `.github/workflows/vr-worker.yml`: run `test_mos_xtc.py`.
+  - `docs/adr/0431-xtc-texture-pack-container.md` (new) + `.xtc` section in
+    `docs/rea/mos-xmd-format.md`.
+- **Validation fix (pre-existing regressions from the interactive session, not
+  this unit):** commits `f4cdd20` (#44 cursor->cinema debounce, 10:40:37) and
+  `05ae8a6` (#62 pose-based guard, 10:47:06) changed the code but left
+  `tools/verify_reported_fixes.py` asserting the old literals, so the suite was
+  red. Updated the two stale assertions to the current expressions
+  (`... || s_cursorMenu;` and the pose-based `guardPoseDetected =
+  !isClimbingActive && !s_twoHandedStabilizationActive && chinLevel && ...`);
+  the invariants' intent is preserved.
+- Evidence: `python tools/mos_xtc.py --check <GUI|Models|Levels>.xtc` -> ok
+  (246/901/3797); `python tools/test_mos_xtc.py` PASS (12); `--find
+  Riddick_ArmScar_D` -> 512x1024 mips=11; `test_mos_xmd.py`, `test_xmd_pose.py`,
+  `test_xmd_bake.py`, `test_xmd_export.py`, `test_xsa_anim.py`,
+  `validate_addresses.py`, `verify_hook_init.py`, `scenario_tests.py --check`,
+  `verify_reported_fixes.py` all PASS. No C++/asset changed -> no
+  `build-all.ps1`/CTest rerun.
+- Blocker: none. **Next:** decompile `CTextureContainer_VirtualXTC2` /
+  `XTXCompile` in `MSystem.dll` (`rea search MSystem.dll "VirtualXTC2" --kind
+  procedures`) to decode the per-mip `0x2C` header + block codec, then extract
+  `Riddick_ArmScar_D` to RGBA and bind it in `VRHandRenderer::DrawNativeHand`
+  (#61).
+- Branch: committed on `main`, pushed to `origin/main`. (`Offline01.xtc` uses a
+  different nested variant `SOURCE`/`IMAGELIST`/`IMAGEDIRECTORY4`/`IMAGE`/
+  `NAME`/`PROPERTIES`/`MIPMAP` — out of scope, reported as unsupported.)
+
 ## Wake 23 — 2026-10-16 10:15 (scheduled loop)
 - **Unit:** GH #59→#46 — finish ADR-0429's "Next probe" by re-checking the **field
   chain** of the live per-bone skin-matrix array against the MXR.dll
