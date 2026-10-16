@@ -15,13 +15,18 @@ work this wake, then stop. Keep total effort bounded (<= 4 concurrent subagents)
 1. `Set-Location C:\Users\GigelCastel\riddick-vr`; run `git status`, `git log
    --oneline -5`. Read `tools/autoloop/STATE.md` (state from prior wakes) and the
    tail of `tools/autoloop/logs/`.
-2. `gh issue list --state open`. Priority order for work:
-   - **#46 Native Riddick first-person hands/arms** (HIGHEST — users still see
-     procedural OpenGL overlay hands that are NOT the game's real model).
-   - #52 intent-based combat stance/guard, #53 contextual actions + proximity
-     prompts + dialogue navigation, #54 tracked upper-body arms/IK/fingers.
-   - #34 REA-discovered engine calls, #40 ammo quad, #43/#44/#45/#47/#48/#49/
-     #50/#51 (rendering, ladder, camera, crouch, look).
+2. `gh issue list --state open`. **Player-visible priority (do these first):**
+   - **#61 Native hands untextured (grey)** — bind the real `.xtc` Riddick skin
+     diffuse (`Riddick_ArmScar_D`); see `DrawNativeHand` in
+     `src/hook/vr_hand_renderer.cpp` and the `.xtc` findings in the issue.
+   - **#62 Physical block/attack** — block must trigger with the hands held
+     **in front of the HMD** (head-local, NOT below the view); swinging a
+     controller attacks. Relevant: `src/hook/camera_hook.cpp` guard volume and
+     `src/hook/combat_stance.h`.
+   - **#63 Duplicate hands** — suppress the engine's own first-person arms/hands
+     while VR/native hands render.
+   Then #46/#52/#53/#54 tracked-arms work, #34 REA engine calls, #40 ammo quad,
+   #43/#44/#45/#47-#51.
 3. Pick ONE concrete, verifiable unit of work. Prefer the highest-priority open
    item. If the top items are blocked or need new scope, **create new GitHub
    issues** toward full VR portability (with concrete evidence: file:line,
