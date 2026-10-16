@@ -16,13 +16,15 @@ work this wake, then stop. Keep total effort bounded (<= 4 concurrent subagents)
    --oneline -5`. Read `tools/autoloop/STATE.md` (state from prior wakes) and the
    tail of `tools/autoloop/logs/`.
 2. `gh issue list --state open`. **Player-visible priority (do these first):**
+   - **#64 Native hands look flat/2D, out of place, and leave stray procedural
+     blocks** — fix orientation/scale/anchor, real 3D shading, remove leftovers
+     (`src/hook/vr_hand_renderer.cpp`, `src/hook/native_hand_pose.h`).
    - **#61 Native hands untextured (grey)** — bind the real `.xtc` Riddick skin
-     diffuse (`Riddick_ArmScar_D`); see `DrawNativeHand` in
-     `src/hook/vr_hand_renderer.cpp` and the `.xtc` findings in the issue.
-   - **#62 Physical block/attack** — block must trigger with the hands held
-     **in front of the HMD** (head-local, NOT below the view); swinging a
-     controller attacks. Relevant: `src/hook/camera_hook.cpp` guard volume and
-     `src/hook/combat_stance.h`.
+     diffuse (`Riddick_ArmScar_D`).
+   - **#65 Punch/attack fires on controller swing** — first pass landed; validate
+     and tune thresholds.
+   - **#62 Block = hands in front of the HMD (not below)** — first pass landed;
+     validate and tune the envelope.
    - **#63 Duplicate hands** — suppress the engine's own first-person arms/hands
      while VR/native hands render.
    Then #46/#52/#53/#54 tracked-arms work, #34 REA engine calls, #40 ammo quad,
