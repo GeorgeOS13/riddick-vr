@@ -201,3 +201,112 @@ void __thiscall FUN_1001db60(void *this /*local 3x4*/, float *parent, int out)
 ; world*bind_inverse; if the engine rebases the buffer to bone-local at load,
 ; the raw FK world matrices are correct. See ADR-0440 "not claimed".
 # ------------------------------------------------------------------------------
+
+# ==============================================================================
+# ADDENDUM (wake 34, 2026-10-16) -- BOTH halves of the ADR-0440 "not claimed" #1
+# are resolved, and the ADR-0440 false dichotomy is dissolved: the per-bone
+# matrices are *bind-relative deltas* (identity at bind) applied directly to the
+# MODEL-space file geometry. Neither a load-time vertex rebase nor a bind-inverse
+# exists (or is needed).
+#
+# Evidence (MXR.dll, Ghidra pseudocode, read-only):
+#   FUN_1001de10  pose-descriptor array (re)sizer, called by FUN_10021650
+#   FUN_10022f90  per-bone matrix accessor used by the skinning
+#   FUN_100254e0  Cluster_TransformBones_V_N_TgU_TgV (CPU linear-blend skinning)
+#   FUN_1007ee20  per-variant vertex-position accessor
+#   FUN_1001f340  FK tree walk (the translation correction; wake 33)
+# ==============================================================================
+
+; ---------------------------------------------------------------------------
+; 1. ALIASING RESOLVED: poseDesc+0x14 *does* alias poseDesc+0x30.
+;    FUN_1001de10(this = poseDesc, n) resizes the descriptor's three embedded
+;    CListVectorCore members and then CACHES THEIR DATA POINTERS:
+;
+;        this+0x30 = *(*(this+0x14) + 0x18)     ; "world"  <- data of +0x14 list
+;        this+0x34 = *(*(this+0x0c) + 0x18)     ; "local"  <- data of +0x0c list
+;
+;    (both arrays are initialised to the identity 3x4, 12 floats, whenever the
+;     length changes; the third list -- the per-node weight at +0x1c -- is zeroed.)
+;
+;    The draw consumes exactly  *(*(poseDesc+0x14) + 0x18) + bone*0x30
+;    (FUN_1002dcc0). Therefore the array the draw hands to the skinning IS
+;    *(poseDesc+0x30): the raw FK output. (The older "an opaque list object at
+;    +0x14" reading was the *embedded handle*: its core pointer lives AT +0x14;
+;    FUN_1001de10 names the relationship.)
+; ---------------------------------------------------------------------------
+
+; ---------------------------------------------------------------------------
+; 2. NO BIND-INVERSE IN THE SKIN PATH EITHER.
+;    The skinning fetches each 3x4 with FUN_10022f90(provider, bone):
+;
+;        int FUN_10022f90(void*this,int bone) {
+;          if (*(int*)(this+4) != 0)                   // palette remap (u8 per bone)
+;            return *(u8*)(*(int*)(this+4)+bone) * 0x30 + *(int*)this;
+;          return bone * 0x30 + *(int*)this;           // direct 0x30-byte fetch
+;        }
+;
+;    i.e. a RAW 0x30-byte fetch, no arithmetic. The `provider` is the
+;    FUN_100238a0 bundle {+0x00 = the live world array, +0x04 = palette, +0x08 n}.
+;    => the matrix fed to the blend is bit-identical to the FK world output.
+;    Option "(b) a bind-inverse step between the FK output and the consumed list"
+;    is DEAD.
+; ---------------------------------------------------------------------------
+
+; ---------------------------------------------------------------------------
+; 3. THE CONSUMED MATRIX IS APPLIED AS A PLAIN AFFINE -- NO BIND SUBTRACTION.
+;    Single-influence branch of FUN_100254e0 (positions; normals/tangents are the
+;    same shape with the 3x3 part only):
+;
+;        out.x = m[0]*v.x + m[3]*v.y + m[6]*v.z + m[9];
+;        out.y = m[1]*v.x + m[4]*v.y + m[7]*v.z + m[10];
+;        out.z = m[2]*v.x + m[5]*v.y + m[8]*v.z + m[11];
+;
+;    i.e. `out = v*R + T`, with the translation (m[9],m[10],m[0xb]) ADDED directly.
+;    Multi-influence is the weight-sum of the same affine maps. No `v - bindpos`,
+;    no bind matrix is read anywhere.
+; ---------------------------------------------------------------------------
+
+; ---------------------------------------------------------------------------
+; 4. THE "WORLD" MATRICES ARE BIND-RELATIVE DELTAS (identity at bind).
+;    In FUN_1001f340 the local matrix's translation is overwritten before the
+;    concat (the "bone-connect correction"). For the zero-weight / unconnected
+;    branch the algebra is exactly:
+;
+;        fVar  = (M_local * bindpos) - bindpos      ; per axis (m[9..0xb] = -t)
+;        local.t = -fVar = bindpos - R*bindpos + t
+;
+;    so the local affine is
+;
+;        v |-> R*(v - bindpos) + bindpos + t
+;
+;    ("rotate about the bone's bind position, then add the animated translation").
+;    At bind (identity quaternions, t = 0) every local -> identity, and the root's
+;    parent is the identity (local_8b4[0] = &local_ac = {1,0,0,0, 0,1,0,0,
+;    0,0,1,0}); hence every world -> identity. So world(node) is a *delta from the
+;    bind pose*, not an absolute bone transform, and is meant to be applied to the
+;    BIND-POSE (file, model-space) geometry directly. This is exactly why the
+;    model-space refboxes above (Riddick_B05 arms y -25.4..6.4, z 32.8..52.5)
+;    render correctly with NO rebase and NO bind-inverse.
+; ---------------------------------------------------------------------------
+
+; ---------------------------------------------------------------------------
+; 5. THE VERTEX ACCESSOR DOES NOT TRANSFORM.
+;    FUN_1007ee20(mesh, variant) returns *(listobj + 0x18) -- the raw per-variant
+;    position buffer (streamed from the MOS file via FUN_1007c6c0 when not
+;    resident). It performs no coordinate change.
+; ---------------------------------------------------------------------------
+
+; ---------------------------------------------------------------------------
+; CONSEQUENCE (observation vs inference):
+;   * Observation: +0x14 aliases +0x30 (proven by FUN_1001de10); the skin matrix
+;     == the FK world matrix (proven by FUN_10022f90/FUN_100238a0); the skinning
+;     applies v*R+T with no bind subtraction (proven by FUN_100254e0).
+;   * Inference (algebra derived, not run): world == identity at bind, and
+;     world == the bind->animated delta in general -- checked for the
+;     zero-weight/unconnected local branch.
+;   * CAVEAT: the weighted/connected local branch (connect != -1, weight != 0)
+;     applies a weight-blended bind-offset correction whose exact algebra was not
+;     expanded; it is still a bind-offset (bind-relative) correction, not a
+;     bind-inverse.
+;   => ADR-0440 "not claimed" #1 answered; ADR-0440 tension dissolved. See ADR-0441.
+# ==============================================================================

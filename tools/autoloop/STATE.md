@@ -2,6 +2,63 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 34 — 2026-10-16 16:42 (scheduled loop)
+- **Unit:** GH **#60** step 1 (RE, read-only) — resolve the ADR-0440 "Next probe":
+  does the draw's `poseDesc+0x14` matrix list alias the FK output `+0x30`/`+0x34`,
+  and is there a load-time vertex rebase or a bind-inverse step? Result: **both
+  halves answered; the ADR-0440 (a)/(b) dichotomy was false.**
+- Finding 1 (aliasing RESOLVED): `FUN_1001de10` (the descriptor array (re)sizer,
+  called by the FK builder `FUN_10021650`) **caches the FK arrays' data pointers**:
+  `poseDesc+0x30 = *(*(poseDesc+0x14)+0x18)` (world) and
+  `poseDesc+0x34 = *(*(poseDesc+0x0c)+0x18)` (local); on any length change both are
+  re-initialised to identity (12 floats) and the `+0x1c` weight list is zeroed. The
+  draw (`FUN_1002dcc0`) consumes exactly `*(*(poseDesc+0x14)+0x18) + bone*0x30`, so
+  **the skin matrix list IS the FK output** (`*(poseDesc+0x30)`), bit-identical.
+- Finding 2 (no bind-inverse): the skinning's per-bone fetch
+  `FUN_10022f90(provider, bone)` returns `matrices[palette[bone]]` (or `matrices
+  [bone]`) — a raw 0x30-byte fetch, no arithmetic. `provider` is the `FUN_100238a0`
+  bundle `{+0x00 world array, +0x04 palette, +0x08 n}`. Option "(b) a bind-inverse
+  between the FK output and the consumed list" is **dead**.
+- Finding 3 (plain affine): the single-influence branch of `FUN_100254e0` is
+  `out = v·R + T` (translation added directly); multi-influence is the weight-sum of
+  the same maps. **No bind subtraction anywhere.**
+- Finding 4 (decisive): `FUN_1001f340` overwrites the local translation to
+  `bindpos − R·bindpos + t` ⇒ local affine `v ↦ R·(v − bindpos) + bindpos + t`
+  (rotate about the bone's bind position). At bind (identity quats, t=0) every local
+  → identity and the root parent is identity, so **every world → identity**: the
+  "world" matrices are **bind-relative deltas**, applied directly to the
+  **model-space file geometry**. Hence there is *neither* a load-time rebase *nor* a
+  bind-inverse — and the model-space `Riddick_B05` refboxes render correctly.
+- Finding 5: the vertex accessor `FUN_1007ee20(mesh,variant)` returns the raw
+  per-variant position buffer (`*(listobj+0x18)`; streamed via `FUN_1007c6c0` when
+  non-resident) — no transform.
+- Change (docs/tool, no C++/asset): wake-34 addendum in
+  `docs/rea/reference/MXR_SkeletonInstance_WorldMatrices.txt`; new
+  `docs/adr/0441-fk-world-matrices-are-bind-relative-deltas.md`; the ADR-0440
+  "Next probe" in `docs/rea/mos-xmd-format.md` answered + closed; new
+  `tools/autoloop/extract_pseudo.py` (focus a `rea function --format json` capture
+  to its pseudocode — handles the utf-8-BOM / utf-16 captures the loop produces).
+- Evidence: `rea function MXR.dll` on `0x1001de10`, `0x100254e0`, `0x10022f90`,
+  `0x1007ee20` → `tools/autoloop/logs/wake34_func_*.json|.pseudo.txt`; plus the
+  wake-33 `FUN_1001f340` capture. Provider Ghidra 12.1.4 (MXR.dll sha256 `06424f55…`).
+  No C++/asset changed → no `build-all.ps1`/CTest; `verify_reported_fixes`,
+  `verify_hook_init`, `scenario_tests.py --check`, `test_mos_xmd`,
+  `validate_addresses` all PASS. Moved the stray untracked `mxr` REA dump (a
+  duplicate of the wake-20 `CreateMatrixIW` xrefs query) into
+  `tools/autoloop/logs/wake20_stray_mxr_xrefs.json` (gitignored).
+- Blocker: none — #60 step 1 is now fully answered. Caveat (inference, not
+  exhaustive): the **weighted/connected** local branch (`connect != −1`,
+  `weight != 0`) applies a weight-blended bind-offset correction whose exact algebra
+  was not expanded (verified identity-at-bind for the zero-weight/unconnected
+  branch only). No runtime read was taken (that is still GH #34).
+- **Next:** the offline skinned native hand recipe is now pinned — FK from `NODES` +
+  a `.xsa` pose → per-bone bind→animated **deltas**, applied to the model-space
+  `.xmd` geometry, with **no** per-cluster bind transform to find. Concretely:
+  drive the ADR-0436 native draw from `tools/xmd_pose.py`-style deltas for a
+  rest/animated hand (bounded, offline, testable without the game), or land the
+  GH #34 runtime read of the `poseDesc+0x14` list.
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 33 — 2026-10-16 16:21 (scheduled loop)
 - **Unit:** GH **#60** step 1 (RE, read-only) — identify the owner class + builder
   of the live per-bone matrix array and decide `world·bind_inverse` vs raw

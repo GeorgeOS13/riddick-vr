@@ -263,12 +263,28 @@ world** matrices — **no bind-inverse** — writing world to `*(poseDesc+0x30)+
 0x30` and local to `*(poseDesc+0x34)+node*0x30`. Pseudocode:
 `docs/rea/reference/MXR_SkeletonInstance_WorldMatrices.txt`.
 
-**Next probe (corrected):** the draw reads the per-node 0x30-byte matrix list at
-`poseDesc+0x14`, which is **not resolved** to alias `+0x30`/`+0x34`; and the
-shipped skinned geometry is authored in **model space** (`Riddick_B05` arm
-clusters `y −25.4..6.4`, `z 32.8..52.5`). So locate either the load-time rebase
-of the mesh vertex buffer to bone-local space, or the bind-inverse step between
-the FK output and the consumed list.
+**Answered (ADR-0441):** `FUN_1001de10` (the descriptor's array (re)sizer, called
+by `FUN_10021650`) **caches the FK arrays' data pointers**:
+`poseDesc+0x30 = *(*(poseDesc+0x14)+0x18)` (world) and
+`poseDesc+0x34 = *(*(poseDesc+0x0c)+0x18)` (local). So the list the draw reads at
+`poseDesc+0x14` **does alias `+0x30`** — the skinning consumes the FK output
+bit-identically. The skinning's per-bone fetch `FUN_10022f90(provider, bone)` is a
+raw `0x30`-byte palette-indexed fetch (no math), and `FUN_100254e0` applies it as a
+plain affine `v·R + T` with **no bind subtraction**. Finally, `FUN_1001f340`
+overwrites the local translation to `bindpos − R·bindpos + t` (rotate about the
+bone's bind position); at bind every world → identity. **The "world" matrices are
+therefore bind-relative deltas (identity at bind), applied directly to the
+model-space file geometry** — there is *neither* a load-time vertex rebase *nor* a
+bind-inverse. The ADR-0440 (a)/(b) dichotomy was false. Pseudocode:
+`docs/rea/reference/MXR_SkeletonInstance_WorldMatrices.txt` (wake-34 addendum);
+ADR-0441.
+
+**Consequence for the offline skinned native hand (#46/#58/#60):** FK from `NODES`
++ a `.xsa` pose (the engine's own parent-walk), producing per-bone bind→animated
+deltas, applied to the model-space `.xmd` geometry — **no per-cluster bind
+transform exists to find** (confirming the negative in ADR-0424/0428/0429). Because
+the delta is identity at bind, the file mesh *is* the rest-pose model, so the
+current rigid draw (ADR-0436) is a valid baseline.
 
 ## Related container: the `.xtc` texture packs (ADR-0431, GH #61)
 The shipped textures are *not* loose files; they live in
