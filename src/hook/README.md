@@ -37,6 +37,20 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   only with the **procedural** hand; on the native path they floated as stray
   blocks. Re-anchoring them to the native frame is future work. See ADR-0436.
 
+## Native hand pose source (GH #58)
+- `tools/xmd_bake.py` bakes an optional **posed** variant of each skinned
+  cluster (`native_hand_mesh_data.h`, `NativeHandMesh::posed_vertices`) from a
+  shipped first-person `.xsa` clip. The pose is the ADR-0441 recipe evaluated
+  offline by `tools/xmd_fk.py`: forward kinematics over the `NODES` skeleton
+  (bind-relative deltas) plus the influence-weighted skin blend. Canonical clip:
+  `FPSMelee.xsa::Mel_ShaUnEquip` last key ("hands returned to rest"), pinned by
+  `KEYFRAMETIMES` index; re-bake any other clip with
+  `--anim/--sequence/--pose-key`. See ADR-0443.
+- `DrawNativeHand` selects the posed arrays + posed AABB when
+  `[VR] NativeHandPose` is set and a pose exists, otherwise the bind geometry.
+  The pose is an evidence-backed but **unvalidated** VR fit — the placement is
+  still the provisional ADR-0427 mapping and headset tuning remains.
+
 ## Native hand diffuse texture (GH #61)
 - `native_hand_texture.h` + generated `native_hand_texture_data.h`: the real
   Riddick skin/scar diffuse (`Riddick_ArmScar_D`) baked from the shipped

@@ -4,6 +4,35 @@
   "coordinate_system": "engine model space (Z-up), unconverted",
   "rotations_available": false,
   "rotations_note": "NODES stores bind-pose translations only; bone rotations are not in the .xmd at all (KEYS is a string metadata map; animation lives in the .xsa/.xag groups or the engine's live skeleton) and must be supplied by the caller",
+  "pose": {
+    "source": "FPSMelee.xsa:Mel_ShaUnEquip@key17=0.333400s",
+    "clip_sha256": "d6fbb681e7101e1676292c1c9c0bdd93fc165de0ec6353171cac464af0c6ef7e",
+    "clip_size": 21068,
+    "time_seconds": 0.3333999812602997,
+    "posed_meshes": [
+      "Riddick_LeftArm",
+      "Riddick_RightArm"
+    ],
+    "unposed_meshes": [
+      "Pa2_Hand",
+      "Pa2_Hand_Detail"
+    ],
+    "notes": {
+      "Riddick_LeftArm": [
+        "8 nodes have a movement slot past the clip's movement window (10)"
+      ],
+      "Riddick_RightArm": [
+        "8 nodes have a movement slot past the clip's movement window (10)"
+      ],
+      "Pa2_Hand": [
+        "unskinned cluster (no NODES skeleton): pose skipped"
+      ],
+      "Pa2_Hand_Detail": [
+        "unskinned cluster (no NODES skeleton): pose skipped"
+      ]
+    },
+    "recipe": "tools/xmd_fk.py (ADR-0441) -- FK(clip) deltas + influence-weighted skinning, offline"
+  },
   "meshes": [
     {
       "name": "Riddick_LeftArm",
@@ -199,6 +228,7 @@
   "totals": {
     "meshes": 4,
     "vertices": 1548,
-    "triangles": 2610
+    "triangles": 2610,
+    "posed_vertices": 870
   }
 }

@@ -55,6 +55,12 @@ struct VRConfig {
     // baked.
     int nativeHandTexture = 1;
     int nativeHandTextureVFlip = 0;
+    // GH #58: draw the *posed* native mesh variant baked offline from a shipped
+    // first-person .xsa clip (ADR-0443) instead of the bind T-pose geometry.
+    // Default OFF: the baked pose (FPSMelee "hands at rest") is an evidence-
+    // backed but unvalidated VR fit; tune/compare on a headset. Ignored when no
+    // posed variant exists for a mesh.
+    int nativeHandPose = 0;
     // GH #62: front-of-HMD block/guard envelope (head-local metres; +Y up,
     // -Z forward). Block is a hand *pose* held in front of the face, never a
     // low hold. Both the guard pose and the strike-suppression gate share these

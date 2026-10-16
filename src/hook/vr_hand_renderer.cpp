@@ -735,11 +735,14 @@ bool VRHandRenderer::EnsureNativeHandTexture() {
 //
 // Geometry comes from native_hand_mesh_data.h (baked from the shipped .xmd by
 // tools/xmd_bake.py); the model-space -> hand-local mapping is the provisional,
-// INI-tunable placement in native_hand_pose.h (ADR-0427). GH #61 adds the real
-// skin/scar diffuse (native_hand_texture.h, baked from Models.xtc), modulated
-// over the existing two-sided lambert so the hand reads as Riddick's arm; when
-// the texture is unavailable the flat skin tone is kept. Deliberately built on
-// the already-loaded immediate-mode GL entry points, matching the rest of this
+// INI-tunable placement in native_hand_pose.h (ADR-0427). GH #58 adds an
+// optional *posed* variant of the same topology, baked offline from a shipped
+// first-person .xsa clip (ADR-0443) and selected with NativeHandPose -- its
+// placement is derived from the posed AABB. GH #61 adds the real skin/scar
+// diffuse (native_hand_texture.h, baked from Models.xtc), modulated over the
+// fixed-function lighting so the hand reads as Riddick's arm; when the texture
+// is unavailable the flat skin tone is kept. Deliberately built on the
+// already-loaded immediate-mode GL entry points, matching the rest of this
 // renderer: it mutates no state that RenderHands does not already restore.
 bool VRHandRenderer::DrawNativeHand(HandSide side) {
     if (!g_vrConfig.nativeHands) {
@@ -755,9 +758,18 @@ bool VRHandRenderer::DrawNativeHand(HandSide side) {
         return false;
     }
 
+    // GH #58: prefer the offline-posed variant (ADR-0443) when enabled and baked;
+    // the placement is then derived from the *posed* AABB so the mesh anchors on
+    // its own geometry. Falls back to the bind mesh/pose when absent.
+    const bool posed = g_vrConfig.nativeHandPose != 0 && mesh->has_pose() &&
+                       mesh->posed_vertices != nullptr;
+    const NativeHandVertex* verts = posed ? mesh->posed_vertices : mesh->vertices;
+    const float* bmin = posed ? mesh->posed_bounds_min : mesh->bounds_min;
+    const float* bmax = posed ? mesh->posed_bounds_max : mesh->bounds_max;
+
     const float metersPerUnit = GetWorldScale() * g_vrConfig.nativeHandScale;
     NativeHandPlacement placement = ComputeNativeHandPlacement(
-        mesh->bounds_min, mesh->bounds_max, side == HandSide::Left, metersPerUnit);
+        bmin, bmax, side == HandSide::Left, metersPerUnit);
     if (!placement.valid) {
         return false;
     }
@@ -810,7 +822,7 @@ bool VRHandRenderer::DrawNativeHand(HandSide side) {
             if (vi >= mesh->vertex_count) {
                 continue;
             }
-            const NativeHandVertex& v = mesh->vertices[vi];
+            const NativeHandVertex& v = verts[vi];
             float localPos[3];
             float localNormal[3];
             MapNativeHandPoint(placement, v.position, localPos);

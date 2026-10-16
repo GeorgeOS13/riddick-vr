@@ -21,15 +21,22 @@ clusters from ``Riddick_B05.xmd`` (the in-game body arms, surface
   * ``Pa2_Hand_Detail``   Pa2_Hand_01.xmd cluster 1 (540 verts, untextured)
 
 Coordinate system: the engine's raw model-space floats (Z-up), unconverted.
-Skinning caveat: ``.xmd`` stores bind-pose node **translations** only (no
-rotations anywhere in the file — ``KEYS`` is a string metadata map, ADR-0421),
-so a consumer that poses the mesh must supply the bone animation from the
-engine (or the ``.xsa``/``.xag`` groups). Note (ADR-0424) that the baked
-geometry is **not** universally the ``NODES`` bind pose: sibling clusters on
-shared bones agree, but the Riddick arm clusters carry a large baked reference
-pose disjoint from the body, so a skinned consumer also needs a per-cluster
-reference transform (GH #59). The C++ asset therefore carries the geometry
-**rigidly** today.
+
+Geometry: the baked positions **are** the ``NODES`` bind pose — the offline FK
+evaluator (``tools/xmd_fk.py``, ADR-0441/0442) proves the influence-weighted
+blend equals the file geometry to ~1e-14 over the whole shipped corpus, so there
+is no per-cluster reference transform and no bind-inverse. (The Riddick arms
+merely look like a separate reference pose because the bind pose itself holds
+the arms out along +/-Y.) ``.xmd`` stores no bone rotations (``KEYS`` is a string
+metadata map, ADR-0421).
+
+GH #58: ``--pose`` additionally bakes a **posed** variant of every skinned
+cluster from a shipped first-person ``.xsa`` clip. The pose is the ADR-0441
+recipe evaluated offline (``tools/xmd_fk.py``): forward kinematics over the
+``NODES`` skeleton from the clip's rotation/movement window slots, then the
+influence-weighted skin blend. The canonical pose is the first-person melee
+"hands returned to rest" end frame (``FPSMelee.xsa::Mel_ShaUnEquip``, last key);
+it is a reproducible, re-bakeable choice, not a validated VR fit.
 
 Usage::
 
@@ -37,6 +44,8 @@ Usage::
                              --manifest docs/rea/reference/native_hand_mesh.json
     python tools/xmd_bake.py --cpp src/hook/native_hand_mesh_data.h --verify
     python tools/xmd_bake.py --model <file.xmd> --cluster 1 --name Foo --cpp - --json
+    python tools/xmd_bake.py --model <file.xmd> --cluster 1 --name Foo --cpp - \
+                             --anim <clip.xsa> --sequence Mel_ShaUnEquip --pose-key 17
 """
 
 from __future__ import annotations
@@ -50,6 +59,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mos_xmd import GeometryError, Xmd, XmdError  # noqa: E402
 import xmd_export  # noqa: E402
+import xmd_fk  # noqa: E402
+import xsa_anim  # noqa: E402
 
 DEFAULT_GAME_DIR = r"C:\Program Files (x86)\Starbreeze Studios\Riddick EFBB"
 MODELS_SUBDIR = os.path.join("Content", "Models")
@@ -69,6 +80,18 @@ HAND_SET = [
     ("Characters/Pa2/Pa2_Hand_01.xmd", 0, "Pa2_Hand"),
     ("Characters/Pa2/Pa2_Hand_01.xmd", 1, "Pa2_Hand_Detail"),
 ]
+
+# GH #58: canonical first-person arm pose. The engine's first-person arms are
+# driven by the ``FPS*.xsa`` clips in ``Content/Anim/Main``; the melee
+# "unequip" clip returns the hands to rest, so its last key is the most neutral
+# shipped first-person frame. Pinned by KEYFRAMETIMES index (not a float) so the
+# bake is deterministic. This is a reproducible choice, not a validated VR fit:
+# re-run the tool with --anim/--sequence/--pose-key to bake any other clip.
+POSE_SPEC = {
+    "clip": os.path.join("Content", "Anim", "Main", "FPSMelee.xsa"),
+    "sequence": "Mel_ShaUnEquip",
+    "key": 17,  # last KEYFRAMETIMES slot of that sequence's time window
+}
 
 
 def _sha256(path: str) -> str:
@@ -91,15 +114,19 @@ def _cf(v: float) -> str:
     return s + "f"
 
 
-def bake_mesh(model_path: str, cluster: int, name: str, rel_path: str) -> dict:
-    """Decode one cluster into a portable mesh record (no C++ yet)."""
+def bake_mesh(model_path: str, cluster: int, name: str, rel_path: str,
+              pose=None) -> dict:
+    """Decode one cluster into a portable mesh record (no C++ yet).
+
+    ``pose`` is an optional :func:`load_pose` result; when given, every skinned
+    cluster gets a posed variant evaluated with the ADR-0441 recipe."""
     x = Xmd(model_path)
     mesh = xmd_export.decode_cluster(x, cluster)
     sk = x.skeleton()
     bones = mesh.bones_used()
     infos = x.cluster_infos()
     surface_index = infos[cluster].surface_index if cluster < len(infos) else None
-    return {
+    rec = {
         "name": name,
         "source": rel_path,
         "source_sha256": _sha256(model_path),
@@ -122,13 +149,83 @@ def bake_mesh(model_path: str, cluster: int, name: str, rel_path: str) -> dict:
         "bones_used": bones,
         "skeleton_nodes": len(sk.nodes) if sk else 0,
         "surfaces": x.surface_names(),
+        "pose_source": "",
+        "posed_positions": None,
+        "posed_normals": None,
+        "posed_bounds_min": list(mesh.bounds_min),
+        "posed_bounds_max": list(mesh.bounds_max),
+        "pose_notes": [],
+        "pose_clip_sha256": "",
+        "pose_clip_size": 0,
+        "pose_time": None,
     }
+    if pose is not None:
+        _apply_pose(rec, x, mesh, sk, pose)
+    return rec
 
 
-def _emit_vertices(out: list[str], ident: str, rec: dict) -> None:
-    positions = rec["positions"]
-    normals = rec["normals"]
-    uv = rec["uv"]
+def _apply_pose(rec: dict, x, mesh, sk, pose) -> None:
+    """Evaluate ``pose`` on one cluster and store the posed vertex arrays."""
+    anim, seq, t, source, clip_sha256, clip_size = pose
+    rec["pose_source"] = source
+    rec["pose_clip_sha256"] = clip_sha256
+    rec["pose_clip_size"] = clip_size
+    rec["pose_time"] = t
+    if mesh.skin is None or sk is None:
+        rec["pose_notes"] = ["unskinned cluster (no NODES skeleton): pose skipped"]
+        return
+    _seq, deltas, notes = xmd_fk.sample_sequence(sk, anim, seq, t)
+    worlds = xmd_fk.world_matrices(sk, deltas)
+    posed = [tuple(p) for p in
+             xmd_fk.skin_positions(mesh.positions, mesh.skin, worlds)]
+    if len(mesh.normals) == len(mesh.positions):
+        posed_normals = [tuple(n) for n in
+                         xmd_fk.skin_normals(mesh.normals, mesh.skin, worlds)]
+    else:
+        posed_normals = [tuple(n) for n in mesh.normals]
+    rep = xmd_fk.skin_report(mesh.positions, mesh.skin, worlds)
+    notes = list(notes)
+    if rep["displacement_max"] <= 0.0:
+        notes.append("pose is the bind pose (no displacement)")
+    rec["posed_positions"] = posed
+    rec["posed_normals"] = posed_normals
+    rec["posed_bounds_min"] = [min(p[i] for p in posed) for i in range(3)]
+    rec["posed_bounds_max"] = [max(p[i] for p in posed) for i in range(3)]
+    rec["pose_notes"] = notes
+
+
+def load_pose(spec: dict, game_dir: str, override=None) -> dict:
+    """Resolve the canonical/cli pose spec into a bake descriptor.
+
+    ``spec`` carries ``clip`` (relative to the game root), ``sequence`` and
+    ``key`` (a KEYFRAMETIMES index). ``override`` may replace any of them."""
+    spec = dict(spec)
+    if override:
+        spec.update({k: v for k, v in override.items() if v is not None})
+    clip_rel = spec["clip"]
+    clip_path = clip_rel if os.path.isabs(clip_rel) else os.path.join(game_dir,
+                                                                     clip_rel)
+    if not os.path.isfile(clip_path):
+        raise XmdError(f"pose clip not found: {clip_path}")
+    anim = xsa_anim.AnimSet(clip_path)
+    if not anim.has_anim:
+        raise XmdError(f"pose clip has no COMPRESSEDANIMATIONSET2: {clip_path}")
+    seq = anim.sequence_by_name(spec["sequence"])
+    if seq is None:
+        raise XmdError(f"sequence {spec['sequence']!r} not found in {clip_path} "
+                       f"(have: {', '.join(anim.sequence_names())})")
+    key = int(spec["key"])
+    if not 0 <= key < len(anim.keyframe_times):
+        raise XmdError(f"pose key {key} outside KEYFRAMETIMES "
+                       f"(0..{len(anim.keyframe_times) - 1})")
+    t = anim.keyframe_times[key]
+    source = "%s:%s@key%d=%.6fs" % (os.path.basename(clip_path), seq.name,
+                                    key, t)
+    return (anim, seq, t, source, _sha256(clip_path), os.path.getsize(clip_path))
+
+
+def _emit_vertices(out: list[str], ident: str, positions: list,
+                   normals: list, uv: list) -> None:
     has_normals = len(normals) == len(positions)
     out.append(f"inline constexpr NativeHandVertex {ident}_Vertices[] = {{")
     for i, p in enumerate(positions):
@@ -170,8 +267,18 @@ def render_header(records: list[dict]) -> str:
             out.append(f"//   {rec['source']}")
             out.append(f"//     sha256 {rec['source_sha256']}  size {rec['source_size']}")
     out.append("//")
-    out.append("// Bind pose only; bone rotations are not stored in .xmd (see")
-    out.append("// docs/adr/0420-native-hand-mesh-asset.md).")
+    out.append("// Bind pose: .xmd stores only bind-pose node translations (KEYS is a")
+    out.append("// string metadata map, ADR-0421). The file geometry IS the NODES bind pose")
+    out.append("// (tools/xmd_fk.py --check, ADR-0441) -- see docs/adr/0420/0443.")
+    posed = [rec for rec in records if rec["posed_positions"] is not None]
+    if posed:
+        first = posed[0]
+        out.append("//")
+        out.append("// Posed variant (GH #58, ADR-0443): FK(clip) applied as bind-relative")
+        out.append("// deltas + influence-weighted skinning, evaluated offline by")
+        out.append("// tools/xmd_fk.py. Clip provenance:")
+        out.append(f"//   {first['pose_source']}")
+        out.append(f"//     sha256 {first['pose_clip_sha256']}  size {first['pose_clip_size']}")
     out.append("#pragma once")
     out.append("")
     out.append('#include "native_hand_mesh.h"')
@@ -185,22 +292,37 @@ def render_header(records: list[dict]) -> str:
                    f"({rec['vertices']} verts, {rec['triangles']} tris, "
                    f"{rec['uvs']} uvs, {len(rec['bones_used'])} bones, "
                    f"surface {rec['surface_index']})")
-        _emit_vertices(out, ident, rec)
+        _emit_vertices(out, ident, rec["positions"], rec["normals"], rec["uv"])
+        if rec["posed_positions"] is not None:
+            out.append(f"// {rec['name']} posed: {rec['pose_source']}")
+            _emit_vertices(out, ident + "_Posed", rec["posed_positions"],
+                           rec["posed_normals"], rec["uv"])
         _emit_indices(out, ident, rec["indices"])
     out.append("inline constexpr NativeHandMesh kMeshes[] = {")
     for i, rec in enumerate(records):
         ident = f"kMesh{i}"
         mn, mx = rec["bounds_min"], rec["bounds_max"]
+        pmn, pmx = rec["posed_bounds_min"], rec["posed_bounds_max"]
         surface = rec["surface_index"]
         surface = -1 if surface is None else surface
+        if rec["posed_positions"] is not None:
+            posed_ptr = ident + "_Posed_Vertices"
+            pose_src = '"%s"' % rec["pose_source"].replace("\\", "\\\\")
+        else:
+            posed_ptr = "nullptr"
+            pose_src = '""'
         out.append(
             '    { "%s", "%s", %d, %d, %s_Vertices, %d, %s_Indices, %d,'
             % (rec["name"], rec["source"].replace("\\", "\\\\"), rec["cluster"],
                surface, ident, rec["vertices"], ident,
                len(rec["indices"])))
-        out.append("      { %s, %s, %s }, { %s, %s, %s } },"
+        out.append("      { %s, %s, %s }, { %s, %s, %s },"
                    % (_cf(mn[0]), _cf(mn[1]), _cf(mn[2]),
                       _cf(mx[0]), _cf(mx[1]), _cf(mx[2])))
+        out.append("      %s, %s," % (posed_ptr, pose_src))
+        out.append("      { %s, %s, %s }, { %s, %s, %s } },"
+                   % (_cf(pmn[0]), _cf(pmn[1]), _cf(pmn[2]),
+                      _cf(pmx[0]), _cf(pmx[1]), _cf(pmx[2])))
     out.append("};")
     out.append("")
     out.append("inline constexpr int kMeshCount = "
@@ -220,28 +342,44 @@ def render_manifest(records: list[dict], generated_from: str) -> dict:
             "bounds_min", "bounds_max", "skinned", "influences", "bone_space",
             "bones_used", "skeleton_nodes", "surfaces")}
 
+    posed = [rec for rec in records if rec["posed_positions"] is not None]
     return {
         "tool": "tools/xmd_bake.py",
         "generated_from": generated_from,
         "coordinate_system": xmd_export.COORDINATE_SYSTEM,
         "rotations_available": False,
         "rotations_note": xmd_export.ROTATIONS_NOTE,
+        "pose": {
+            "source": posed[0]["pose_source"] if posed else "",
+            "clip_sha256": posed[0]["pose_clip_sha256"] if posed else "",
+            "clip_size": posed[0]["pose_clip_size"] if posed else 0,
+            "time_seconds": posed[0]["pose_time"] if posed else None,
+            "posed_meshes": [rec["name"] for rec in posed],
+            "unposed_meshes": [rec["name"] for rec in records
+                               if rec["posed_positions"] is None],
+            "notes": {rec["name"]: rec["pose_notes"] for rec in records
+                      if rec["pose_notes"]},
+            "recipe": "tools/xmd_fk.py (ADR-0441) -- FK(clip) deltas + "
+                      "influence-weighted skinning, offline",
+        },
         "meshes": [summary(rec) for rec in records],
         "totals": {
             "meshes": len(records),
             "vertices": sum(rec["vertices"] for rec in records),
             "triangles": sum(rec["triangles"] for rec in records),
+            "posed_vertices": sum(len(rec["posed_positions"] or [])
+                                  for rec in records),
         },
     }
 
 
-def resolve_set(game_dir: str, spec) -> list[dict]:
+def resolve_set(game_dir: str, spec, pose=None) -> list[dict]:
     records: list[dict] = []
     for rel, cluster, name in spec:
         path = os.path.join(game_dir, MODELS_SUBDIR, rel)
         if not os.path.isfile(path):
             raise XmdError(f"model not found: {path}")
-        records.append(bake_mesh(path, cluster, name, rel))
+        records.append(bake_mesh(path, cluster, name, rel, pose=pose))
     return records
 
 
@@ -263,10 +401,35 @@ def main(argv=None) -> int:
                     help="write a JSON manifest here")
     ap.add_argument("--verify", action="store_true",
                     help="re-bake and compare against --cpp (no write)")
+    ap.add_argument("--anim", metavar="FILE",
+                    help="GH #58: bake a posed variant from this .xsa clip "
+                         "(absolute, or relative to --game)")
+    ap.add_argument("--sequence", metavar="NAME",
+                    help="clip sequence to pose from (with --anim)")
+    ap.add_argument("--pose-key", type=int, metavar="N",
+                    help="KEYFRAMETIMES index to sample (with --anim)")
+    ap.add_argument("--no-pose", action="store_true",
+                    help="skip the canonical pose (bind geometry only)")
     ap.add_argument("--json", action="store_true", help="print the manifest")
     args = ap.parse_args(argv)
 
     try:
+        pose = None
+        if args.anim:
+            pose = load_pose(
+                {"clip": args.anim,
+                 "sequence": args.sequence or POSE_SPEC["sequence"],
+                 "key": POSE_SPEC["key"] if args.pose_key is None else args.pose_key},
+                args.game)
+        elif args.sequence or args.pose_key is not None:
+            ap.error("--sequence/--pose-key need --anim")
+        elif not args.no_pose:
+            try:
+                pose = load_pose(POSE_SPEC, args.game)
+            except XmdError as e:
+                print(f"WARNING: canonical pose unavailable ({e}); "
+                      f"baking bind geometry only", file=sys.stderr)
+
         if args.model:
             clusters = args.cluster or [0]
             if len(clusters) > 1:
@@ -274,10 +437,10 @@ def main(argv=None) -> int:
             rel = os.path.relpath(os.path.abspath(args.model),
                                   os.path.join(args.game, MODELS_SUBDIR))
             name = args.name or f"{os.path.splitext(os.path.basename(args.model))[0]}_{clusters[0]}"
-            records = [bake_mesh(args.model, clusters[0], name, rel)]
+            records = [bake_mesh(args.model, clusters[0], name, rel, pose=pose)]
             generated_from = "explicit --model"
         else:
-            records = resolve_set(args.game, HAND_SET)
+            records = resolve_set(args.game, HAND_SET, pose=pose)
             generated_from = f"canonical hand set from {args.game}"
 
         header = render_header(records)

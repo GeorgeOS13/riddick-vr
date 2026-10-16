@@ -60,6 +60,12 @@ NativeHandRoll=0
 ; set to 1 if the texture reads vertically mirrored.
 NativeHandTexture=1
 NativeHandTextureVFlip=0
+; --- Native hand pose (GH #58) ---
+; 1 = draw the offline-posed mesh variant baked from a shipped first-person .xsa
+; clip (FK + influence-weighted skinning; ADR-0443) instead of the bind T-pose
+; geometry. 0 = bind (default). The baked pose is an evidence-backed but
+; unvalidated VR fit -- compare both on a headset before enabling it.
+NativeHandPose=0
 ; --- Front-of-HMD block/guard window (GH #62) ---
 ; Head-local hand window (metres relative to the HMD: +Y up, -Z forward into the
 ; view). Block = both fists held in front of the face within this window; a low

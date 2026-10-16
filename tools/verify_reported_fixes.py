@@ -134,6 +134,23 @@ def main():
             "viewmodel_suppressor_tests.cpp" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8"),
             "GH #66: engine viewmodel suppression must be off-by-default, intercept RndrGL draws, and be unit-tested")
 
+    # GH #58: the native hand path must be able to consume an offline-baked
+    # posed variant of the mesh (FK(clip) + influence-weighted skinning,
+    # ADR-0443), selected by an INI flag and defaulting to the bind geometry.
+    mesh_header = (ROOT / "src/hook/native_hand_mesh.h").read_text(encoding="utf-8")
+    baker = (ROOT / "tools/xmd_bake.py").read_text(encoding="utf-8")
+    require("posed_vertices" in mesh_header and "pose_source" in mesh_header and
+            "has_pose()" in mesh_header and
+            "nativeHandPose = 0" in (ROOT / "src/hook/vr_config.h").read_text(encoding="utf-8") and
+            "NativeHandPose" in config and
+            "mesh->has_pose()" in hands and
+            "mesh->posed_vertices" in hands and
+            "mesh->posed_bounds_min" in hands and
+            "load_pose" in baker and "POSE_SPEC" in baker and
+            "xmd_fk.skin_positions" in baker and "pose-key" in baker,
+            "GH #58: the native hand mesh must support an offline-baked posed "
+            "variant selected by NativeHandPose")
+
     print("[issue-fixes] source invariants passed (#40, #43-47, #52-54)")
     return 0
 

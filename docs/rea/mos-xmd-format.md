@@ -295,6 +295,17 @@ exporting a posed OBJ. Its `--check` confirms ADR-0441 over the shipped corpus:
 bind with worst drift **1.42e-14** (0 problems) — i.e. the file geometry *is* the
 bind pose everywhere, with no bind-inverse and no load-time rebase.
 
+**Pose source pinned (ADR-0443, GH #58):** the first-person arms are driven by
+the `FPS*.xsa` clips in `Content/Anim/Main` (`FPSAssault/FPSPistol/FPSMini/
+FPSGrenade/FPSMelee`), whose rotation windows cover `Riddick_B05`'s `NODES`
+rotation slots `0..69` with no mapping notes — i.e. they key the *same* Riddick
+skeleton the baked hand mesh is skinned to (no separate first-person arm model
+ships). `tools/xmd_bake.py --anim/--sequence/--pose-key` now applies that recipe
+at bake time and emits a **posed** variant of each skinned cluster into
+`native_hand_mesh_data.h`; the draw path selects it under `[VR] NativeHandPose`
+(default off). Canonical pose: `FPSMelee.xsa::Mel_ShaUnEquip` last key (hands
+returned to rest, the most neutral shipped first-person frame).
+
 ## Related container: the `.xtc` texture packs (ADR-0431, GH #61)
 The shipped textures are *not* loose files; they live in
 `Content/{GUI,Models,Levels}.xtc` (plus

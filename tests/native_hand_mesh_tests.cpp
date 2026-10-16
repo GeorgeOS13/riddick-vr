@@ -117,6 +117,47 @@ int main() {
                 return Fail("declared bounds disagree with vertices", mesh.name);
             }
         }
+
+        // GH #58: an optional posed variant must share the topology, stay
+        // finite, and declare its own (posed) bounds that agree with its
+        // vertices. Absent poses are represented by a null pointer + "" source.
+        if (mesh.has_pose()) {
+            if (mesh.posed_vertices == nullptr) {
+                return Fail("has_pose without posed vertices", mesh.name);
+            }
+            if (!mesh.pose_source || mesh.pose_source[0] == '\0') {
+                return Fail("posed mesh without a pose source", mesh.name);
+            }
+            float pmn[3] = { 1e30f, 1e30f, 1e30f };
+            float pmx[3] = { -1e30f, -1e30f, -1e30f };
+            for (unsigned int v = 0; v < mesh.vertex_count; ++v) {
+                const auto& vert = mesh.posed_vertices[v];
+                for (int c = 0; c < 3; ++c) {
+                    if (!Finite(vert.position[c]) || !Finite(vert.normal[c])) {
+                        return Fail("non-finite posed vertex data", mesh.name);
+                    }
+                    if (vert.position[c] < pmn[c]) pmn[c] = vert.position[c];
+                    if (vert.position[c] > pmx[c]) pmx[c] = vert.position[c];
+                }
+                float normal_len = Length3(vert.normal);
+                if (std::fabs(normal_len - 1.0f) > 0.01f) {
+                    return Fail("non-unit posed normal", mesh.name);
+                }
+            }
+            for (int c = 0; c < 3; ++c) {
+                if (mesh.posed_bounds_min[c] > mesh.posed_bounds_max[c]) {
+                    return Fail("inverted posed bounds", mesh.name);
+                }
+                if (std::fabs(mesh.posed_bounds_min[c] - pmn[c]) > 1e-3f ||
+                    std::fabs(mesh.posed_bounds_max[c] - pmx[c]) > 1e-3f) {
+                    return Fail("declared posed bounds disagree with vertices",
+                                mesh.name);
+                }
+            }
+        } else if (mesh.posed_vertices != nullptr ||
+                   (mesh.pose_source && mesh.pose_source[0] != '\0')) {
+            return Fail("posed fields set without has_pose", mesh.name);
+        }
     }
 
     // Frozen counts guard against silent asset drift.
@@ -143,6 +184,35 @@ int main() {
                 std::fabs(low->bounds_max[c] - high->bounds_max[c]) > 1e-4f) {
                 return Fail("Pa2 hand LODs disagree on bounds", "Pa2_Hand");
             }
+        }
+    }
+
+    // GH #58: the Riddick arm clusters carry a baked pose; the unskinned Pa2
+    // hands do not. The posed geometry must actually differ from the bind pose
+    // (a no-op pose would mean the clip failed to drive the arm bones).
+    const char* kArms[] = { "Riddick_LeftArm", "Riddick_RightArm" };
+    for (const char* arm : kArms) {
+        const NativeHandMesh* mesh = FindNativeHandMesh(arm);
+        if (!mesh || !mesh->has_pose()) {
+            return Fail("expected a baked pose", arm);
+        }
+        float max_delta = 0.0f;
+        for (unsigned int v = 0; v < mesh->vertex_count; ++v) {
+            for (int c = 0; c < 3; ++c) {
+                float d = std::fabs(mesh->posed_vertices[v].position[c] -
+                                    mesh->vertices[v].position[c]);
+                if (d > max_delta) max_delta = d;
+            }
+        }
+        if (max_delta < 1.0f) {
+            return Fail("posed geometry barely differs from bind", arm);
+        }
+    }
+    const char* kUnskinned[] = { "Pa2_Hand", "Pa2_Hand_Detail" };
+    for (const char* unskinned : kUnskinned) {
+        const NativeHandMesh* mesh = FindNativeHandMesh(unskinned);
+        if (mesh && mesh->has_pose()) {
+            return Fail("unskinned cluster should not carry a pose", unskinned);
         }
     }
 

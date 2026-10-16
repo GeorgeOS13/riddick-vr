@@ -2,6 +2,81 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 36 — 2026-10-16 17:22 (scheduled loop)
+- **Unit:** GH **#58** (→ #46/#64) — pin the **first-person arm pose source** and
+  make the offline pose *drawable*: bake a posed variant of the native hand
+  asset from the engine's own first-person clips and select it behind an INI
+  flag. No game process, no runtime read (GH #34 still open).
+- Finding 1 (pose source RESOLVED): the first-person arms are driven by the
+  `FPS*.xsa` clips in `Content/Anim/Main` (`FPSAssault`/`FPSPistol`/`FPSMini`/
+  `FPSGrenade`/`FPSMelee`). Decisive cross-check: `Riddick_B05`'s 70-node
+  `NODES` skeleton uses rotation slots `0..69`, and every `FPS*` rotation window
+  covers them (`FPSPistol`/`FPSAssault` = 76, others 71-72); posing the model
+  from `FPSPistol:Pis_MhStd_Dwn` resolves **all** slots with **no mapping
+  notes**. No separate first-person arm model exists under
+  `Content/Models/Characters/Riddick/` — the clips key the same Riddick skeleton
+  the baked arm clusters are skinned to (cluster 1 bones
+  `[1,8,9,12,13,14,16,17,18,38..52]`, cluster 2 `[9,17..19,21,53..67]`).
+- Finding 2 (canonical frame): the clips are all actions (aim/hit/equip/throw);
+  the most neutral shipped frame is the **melee unequip end** —
+  `FPSMelee:Mel_ShaUnEquip` last key (`KEYFRAMETIMES[17] = 0.3334 s`) moves the
+  left arm 10.47 and the right 12.01 model units, vs 27.3/34.9 for
+  `Pis_MhStd_Dwn` and 32.6/42.2 for `Min_StdClo`.
+- Change (code/asset/tests/docs):
+  - `tools/xmd_bake.py`: `--anim/--sequence/--pose-key` (+ `--no-pose`).
+    `load_pose()` resolves the canonical `POSE_SPEC` (pinned by KEYFRAMETIMES
+    **index**, so the bake is deterministic) and `_apply_pose()` evaluates the
+    ADR-0441 recipe via `tools/xmd_fk.py` (`sample_sequence` → `world_matrices`
+    → `skin_positions`/`skin_normals`) for every **skinned** cluster. The header
+    gains `<ident>_Posed_Vertices[]`, the posed AABB and the clip provenance
+    (name/sha256/size/time); the manifest gains a `pose` block +
+    `totals.posed_vertices` + per-mesh `pose_notes`.
+  - `src/hook/native_hand_mesh.h`: optional `posed_vertices` / `pose_source` /
+    `posed_bounds_min|max` + `has_pose()`. Also corrected the ADR-0424 "large
+    baked reference pose" note — ADR-0441/0442 prove the file geometry *is* the
+    bind pose (the arms merely rest spread along ±Y).
+  - `src/hook/native_hand_mesh_data.h` (regenerated): 4 meshes / 1548 verts /
+    2610 tris + **870 posed vertices**; `Pa2_Hand*` are unskinned → correctly
+    unposed. `--verify` confirms the committed header is a fresh bake.
+  - `src/hook/vr_config.{h,cpp}`: `nativeHandPose` (`[VR] NativeHandPose`,
+    default **0**) + the INI log line.
+  - `vr_hand_renderer.cpp` `DrawNativeHand`: selects the posed arrays **and**
+    the posed AABB when `NativeHandPose` is on and a pose exists; bind geometry
+    otherwise (unchanged default).
+  - `tests/native_hand_mesh_tests.cpp`: posed topology/finite/unit-normal/bounds
+    checks, both arms must carry a pose that differs >1 unit from bind, the
+    unskinned Pa2 clusters must not.
+  - `tools/test_xmd_bake.py`: **+4** tests (emitted pose == `xmd_fk`'s skinning
+    of the same clip/key to 1e-9, ≥1-unit displacement, unskinned skip, CLI +
+    `--verify` + bad sequence/key error paths, `--no-pose`).
+  - `riddick_vr.ini`, `tools/riddick_vr.ini.example`, `src/hook/README.md`,
+    `tools/verify_reported_fixes.py` (new #58 invariant),
+    `docs/rea/mos-xmd-format.md`, `docs/adr/0443-first-person-arm-pose-source.md`.
+- Evidence (read-only, 2004 EFBB):
+  - `python tools/xmd_bake.py --cpp src/hook/native_hand_mesh_data.h
+    --manifest docs/rea/reference/native_hand_mesh.json` → 4 meshes / 1548 verts
+    / 2610 tris / 870 posed; provenance in the header
+    `FPSMelee.xsa:Mel_ShaUnEquip@key17=0.333400s`, clip sha256
+    `d6fbb681…c6ef7e` size 21068; `--verify` → OK.
+  - `tools/build-all.ps1 -Config Release` OK (x86 `opengl32.dll` + x64 host);
+    CTest **9/9 PASS** on x86 **and** x64 (`native_hand_mesh_asset` now covers
+    the pose); all 8 `tools/test_*.py` + `validate_addresses` +
+    `verify_hook_init` + `verify_reported_fixes` + `scenario_tests.py --check`
+    PASS.
+- Blocker: none for landing. Caveat (not claimed): the pose is **static** and
+  **unvalidated** — `NativeHandPose` defaults off; the placement is still the
+  provisional ADR-0427 AABB/basis mapping (the bind pose carries no bone
+  *orientation*, so no authoritative hand-bone frame can be derived offline);
+  `.xsa` sampling stays the nlerp/lerp approximation (ADR-0422); the
+  QUATERNIONS-pool movement slot is reported as zero translation. Player-visible
+  #64/#61/#65/#62/#63 still need a headset pass.
+- **Next:** headset A/B `NativeHandPose=0/1` (one key) together with the
+  placement knobs, or land the **GH #34** runtime read of the live `poseDesc`
+  matrix vector and cross-check it against `xmd_fk` (the offline and runtime
+  paths are now independently comparable). Re-bake another clip/weapon pose with
+  `--anim/--sequence/--pose-key` if the melee-rest frame is not the right fit.
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 35 — 2026-10-16 17:00 (scheduled loop)
 - **Unit:** GH **#58** (→ #46/#60) — take wake 34's "Next" and make the offline FK
   recipe *executable*: land `tools/xmd_fk.py`, the offline forward-kinematics +
