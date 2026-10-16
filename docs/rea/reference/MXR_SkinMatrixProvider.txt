@@ -1,0 +1,152 @@
+# MXR_SkinMatrixProvider
+# provider: ghidra 12.1.4
+# subject : MXR.dll sha256=06424f55f5a0f85eb09b5fbd69491c7f6a88de808c26c513e8dac180f3c2052d
+# evidence_id: ev_f48b29729e4e6926c71edb83af317ec7816c69198a732056a08f03220f1d465f (xrefs of the provider slot)
+# NOTE: this is the *builder* of the matrix provider that
+#       CXR_Model_TriangleMesh::Cluster_TransformBones_V_N_TgU_TgV
+#       (FUN_100254e0, ADR-0428) consumes as its second argument.
+#       It is called from the model draw method FUN_1002dcc0 (the same function
+#       that calls FUN_100254e0 / FUN_10024ca0).
+#
+# CONCLUSION (see ADR-0429): the draw-side provider is a transient 0x10-byte
+#   selector { float* matrices; u8* palette; u32 count; 0 } built once per
+#   skinned cluster draw.  It carries NO bind/reference/inverse matrix:
+#     - `matrices` is supplied by the caller (the live model/skeleton instance),
+#     - `palette`  is the mesh's own BONEMATRIXMAP bytes (mesh+0x24, after the
+#       leading u32 count) -- the same `matrix_bones` block that mos_xmd.py decodes
+#       (ADR-0423/ADR-0426),
+#     - `count`    is that block's u32 count (the mesh's bone-palette length).
+#   So the vertex transform is  v' = sum_k w_k * M(palette[bone_k])  where every
+#   M comes from the live matrix array.  Where that array is built (and whether
+#   bind_inverse is multiplied in) is upstream of this function.
+# Ghidra pseudocode, not original source. Read-only artefact of REA analysis.
+# ------------------------------------------------------------------------------
+
+; ---------------------------------------------------------------------------
+; FUN_100238a0(mesh, matrices, count_cap, desc)  -- MXR.dll 0x100238a0
+; builds the per-cluster skin matrix provider and stores it at desc+0x0C.
+; returns 1 on success, 0 on allocation failure.
+; ---------------------------------------------------------------------------
+
+undefined4 FUN_100238a0(int param_1,int param_2,int param_3,int param_4)
+
+{
+  int iVar1;
+  int *piVar2;
+  int iVar3;
+
+  piVar2 = DAT_1017222c;
+  iVar1 = FUN_1007eda0(param_1);              // mesh+0x24 -> u32 (palette length)
+  if ((iVar1 == 0) || (param_2 == 0)) {       // no palette OR no matrices supplied
+    piVar2 = (int *)(**(code **)(*piVar2 + 0x30))(0x10);   // alloc 0x10 bytes
+    if (piVar2 != (int *)0x0) {
+      piVar2[3] = 0;                          // +0x0C = 0
+      iVar1 = *(int *)(param_1 + 0x2c);       // mesh+0x2c (bone/node count)
+      if (param_3 < *(int *)(param_1 + 0x2c)) {
+        iVar1 = param_3;                      // count = min(mesh+0x2c, cap)
+      }
+      piVar2[2] = iVar1;                      // +0x08 = count
+      piVar2[1] = 0;                          // +0x04 = palette = NULL  (direct index)
+      *piVar2 = param_2;                      // +0x00 = matrices
+      *(int **)(param_4 + 0xc) = piVar2;      // desc+0x0C = provider
+      return CONCAT31((int3)((uint)piVar2 >> 8),1);
+    }
+  }
+  else {                                      // palette present and matrices supplied
+    piVar2 = (int *)(**(code **)(*piVar2 + 0x30))(0x10);
+    if (piVar2 != (int *)0x0) {
+      piVar2[3] = 0;
+      *piVar2 = param_2;                      // +0x00 = matrices
+      iVar3 = FUN_1007fa90(param_1);          // mesh+0x24 -> u8* palette bytes
+      piVar2[2] = iVar1;                      // +0x08 = count = palette length
+      piVar2[1] = iVar3;                      // +0x04 = palette bytes
+      *(int **)(param_4 + 0xc) = piVar2;      // desc+0x0C = provider
+      return CONCAT31((int3)((uint)iVar3 >> 8),1);
+    }
+  }
+  return 0;
+}
+
+; ---------------------------------------------------------------------------
+; The two mesh accessors used above (both walk mesh+0x28 to the root mesh first):
+; ---------------------------------------------------------------------------
+
+int __fastcall FUN_1007fa90(int param_1)      // -> u8* palette bytes (mesh+0x24 + 4)
+{
+  int iVar1; uint uVar2;
+  iVar1 = *(int *)(param_1 + 0x28);
+  while (-1 < iVar1) {
+    param_1 = FUN_10079ad0(*(void **)(param_1 + 8),iVar1);
+    iVar1 = *(int *)(param_1 + 0x28);
+  }
+  uVar2 = *(uint *)(param_1 + 0xac);
+  if ((((uVar2 & 1) != 0) &&
+      (((*(int **)(param_1 + 0x24) == (int *)0x0 || (**(int **)(param_1 + 0x24) == 0)) &&
+       ((uVar2 & 0x8000) != 0)))) && (((uVar2 & 0x4000) != 0 && (*(int *)(param_1 + 0x94) != 0)))) {
+    FUN_1007ecd0();
+  }
+  if (*(int *)(param_1 + 0x24) != 0) {
+    return *(int *)(param_1 + 0x24) + 4;      // skip the leading u32 count
+  }
+  return 0;
+}
+
+undefined4 __fastcall FUN_1007eda0(int param_1)   // -> u32 palette length (mesh+0x24 u32)
+{
+  int iVar1; uint uVar2; undefined4 uVar3;
+  iVar1 = *(int *)(param_1 + 0x28);
+  while (-1 < iVar1) {
+    param_1 = FUN_10079ad0(*(void **)(param_1 + 8),iVar1);
+    iVar1 = *(int *)(param_1 + 0x28);
+  }
+  if (*(undefined4 **)(param_1 + 0x24) == (undefined4 *)0x0) { uVar3 = 0; }
+  else { uVar3 = **(undefined4 **)(param_1 + 0x24); }   // first u32 = count
+  ... /* same lazy-Deform guard as above */
+  return uVar3;
+}
+
+; FUN_1007fa40(mesh) (ADR-0428) = *(int*)(mesh+0x20) + 0x18  -> influence pool.
+; So mesh+0x24 = { u32 count; u8 palette[count] } == the file's BONEMATRIXMAP /
+; `matrix_bones` block (ADR-0423/ADR-0426).
+
+; ---------------------------------------------------------------------------
+; The getter FUN_10022f90(provider, bone) (ADR-0428), unchanged:
+;   provider+0x00 = float* matrices (0x30 B == 12 floats == 3x4 affine per bone)
+;   provider+0x04 = u8* palette   (NULL -> bone is used directly)
+; ---------------------------------------------------------------------------
+
+int __thiscall FUN_10022f90(void *this,int param_1)
+{
+  if (*(int *)((int)this + 4) != 0) {
+    return (uint)*(byte *)(*(int *)((int)this + 4) + param_1) * 0x30 + *(int *)this;
+  }
+  return param_1 * 0x30 + *(int *)this;
+}
+
+; ---------------------------------------------------------------------------
+; Call site inside the model draw method FUN_1002dcc0 (LAB_1002f3e0, the skinned
+; cluster path taken when (mesh[0x2b] & 0x4000) != 0 i.e. "has bone deform"):
+;
+;   if ((local_84 != NULL) &&                        // local_84 == matrices
+;       (uVar5 = FUN_100238a0(pfVar6, local_84, local_94, 0x1016a7d0),  // build provider into desc
+;        (char)uVar5 == '\0')) break;
+;   ...
+;   FUN_10024ca0(pfVar6, DAT_1016a7dc);   // or FUN_100254e0(pfVar6, DAT_1016a7dc)
+;   DAT_1016a7dc = 0;
+;
+; where DAT_1016a7dc == desc+0x0C == *(int*)(0x1016a7d0 + 0x0C);  desc (0x1016a7d0)
+; is the per-model render descriptor zeroed by FUN_10103a50 (0x28 bytes:
+; params[0..9] + two shorts; params[6] = -1).
+;
+; The matrices pointer local_84 and the count cap local_94 are not the mesh's:
+; the draw reads them from the model object before the cluster loop:
+;
+;   local_a0 = param_1[0x2c];                         // param_1 = draw arg #1
+;   iVar15   = *(int *)(local_a0 + 0x14);
+;   local_84 = (int *)*(int *)(iVar15 + 0x18);        // -> live per-bone matrix array
+;   local_94 = *(int *)(iVar15 + 4);                  // -> its entry count
+;
+; So the live matrix array is a field (+0x18) of the object at
+; *(model+0x2c)+0x14. Building that array (and any world*bind_inverse composition)
+; is upstream of FUN_100238a0 and of FUN_1002dcc0.
+# ------------------------------------------------------------------------------

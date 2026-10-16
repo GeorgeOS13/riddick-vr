@@ -2,6 +2,54 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 22 — 2026-10-16 09:58 (scheduled loop)
+- **Unit:** GH #59→#46 — close ADR-0428's "Next probe": decompile the **builder**
+  of the draw-side skin matrix *provider* and decide whether a skinned native hand
+  can be reconstructed offline or needs the live matrices (#34).
+- Finding 1 (real evidence, read-only; Ghidra 12.1.4 via `rea`): the provider is a
+  transient **`0x10`-byte** object built **per skinned cluster** by
+  **`FUN_100238a0(mesh, matrices, countCap, desc)`** (`0x100238a0`, called from the
+  model draw `FUN_1002dcc0` at `LAB_1002f3e0`, the `mesh[0x2b]&0x4000` path) and
+  stored at `desc+0x0C` (`desc` = global `0x1016a7d0`; `desc+0x0C` = `DAT_1016a7dc`):
+  `+0x00 float* matrices = param_2` (caller-supplied, **live**), `+0x04 u8* palette
+  = FUN_1007fa90(mesh) = (mesh+0x24)+4` (the mesh's `BONEMATRIXMAP` bytes; `NULL`
+  when the mesh has none), `+0x08 u32 count = FUN_1007eda0(mesh) = *(u32*)(mesh+0x24)`,
+  `+0x0C = 0`. So `mesh+0x24 = {u32 n; u8 palette[n]}`.
+- Finding 2 (decisive, #59): **`FUN_100238a0` composes no transform and reads no
+  bind/reference/inverse matrix** — it only selects `matrices[palette[bone]]`
+  (`FUN_10022f90`, ADR-0428, unchanged; `NULL` palette → direct `bone`). The
+  `matrices` array is a **live** field of the model instance, read in `FUN_1002dcc0`
+  before the cluster loop: `local_a0 = param_1[0x2c]; iVar15 = *(int*)(local_a0+0x14);
+  matrices = *(int*)(iVar15+0x18); count = *(int*)(iVar15+4)`. So #59's per-cluster
+  reference/bind-inverse is resolved **upstream** of the `.xmd` draw path: if it
+  exists it is baked where that live array is built (candidate owner:
+  `CXR_SkeletonInstance`, RTTI `0x10142fc8`), which is exactly a runtime / engine
+  concern (#34), not an `.xmd` field.
+- Finding 3: `FUN_1007fa90`/`FUN_1007eda0`/`FUN_1007fa40` first walk `mesh+0x28` up
+  the mesh-parent chain (`FUN_10079ad0`) before reading `+0x24`/`+0x20`; `+0x20` =
+  influence-pool block (`FUN_1007fa40` = `*(mesh+0x20)+0x18`).
+- Change (docs only):
+  - `docs/rea/reference/MXR_SkinMatrixProvider.txt` (new): `FUN_100238a0` +
+    `FUN_1007fa90`/`FUN_1007eda0` + `FUN_10022f90` pseudocode and the `FUN_1002dcc0`
+    field chain.
+  - `docs/adr/0429-xmd-skin-matrix-provider-builder.md` (new) — the finding, the
+    decision, and an explicit "not claimed" list.
+  - `docs/rea/mos-xmd-format.md`: `BONEDEFORM` runtime-shape note (`+0x24 =
+    {u32 n; u8[n]}`), a new "skin matrix provider" subsection, Next-steps retargeted
+    at the live-array builder.
+- Evidence: `rea xrefs` on `0x1016a7dc`/`0x1016a7d0`, `rea function` on
+  `0x100238a0`/`0x1007fa90`/`0x1007eda0`/`0x1007fa40`/`0x1002f4f9`/`0x1002d890`;
+  all `wake22_*` under `tools/autoloop/logs/`. No C++/asset changed → no
+  `build-all.ps1`/CTest rerun; `test_mos_xmd.py`, `test_xmd_export.py`,
+  `test_xmd_bake.py`, `test_xmd_pose.py`, `test_xsa_anim.py`, `validate_addresses.py`,
+  `verify_hook_init.py`, `verify_reported_fixes.py`, `scenario_tests.py --check` PASS.
+- Blocker: none for landing. **Next:** find the builder of the live per-bone array
+  (`*(model[0x2c])+0x14` field `+0x18`; candidate `CXR_SkeletonInstance`) and check
+  whether it composes `world·bind_inverse`; if so a skinned hand needs either the
+  runtime array (#34) or an offline `bind_inverse × .xsa` pose. Rigid draw
+  (ADR-0427) stays the honest default meanwhile.
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 21 — 2026-10-16 09:05 (scheduled loop)
 - **Note on numbering:** the 08:27 run (which labelled itself "wake 20") pursued
   this same `#59` draw-side track but ended with only RE artefacts and no state

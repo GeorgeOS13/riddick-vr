@@ -86,6 +86,9 @@ names `VERTEXFRAMES`, `TVERTEXFRAMES`, `BONEDEFORM`, `SKELETON`, `NODEINDICES`.
    the runtime skinning consumer; `FUN_10081b10` (`MXR_CreateMatrixIW.txt`) packs
    ≤4 indices/vertex into mesh `+0x30` with 3 weights/vertex at `+0x34`. The
    `matrix_map_id` is a **per-cluster id**, not a shared palette key (ADR-0426).
+   **Runtime shape (ADR-0429):** the draw-side skin provider reads `mesh+0x24` as
+   `{u32 n; u8 palette[n]}` — `FUN_1007eda0(mesh)` = `n`, `FUN_1007fa90(mesh)` =
+   the palette bytes (`+4`) — so the runtime palette is exactly this file block.
 - `VERTEXFRAMES` positions are byte-packed (not plain float3 arrays); the
   reader sizes the list then fills it in `CTriangleMeshCore::Read`. The precise
   packing (likely per-frame deltas) is the remaining decode target.
@@ -208,6 +211,10 @@ transform, not one global `NODES` bind. `docs/adr/0424-xmd-cluster-reference-pos
    `BONEMATRIXMAP` palette/id is **not** it either (it is a bone-index palette
    plus a per-cluster id — ADR-0426), so the remaining candidate is a runtime
    per-cluster matrix in the model/skin class (built from the live skeleton).
+   **Resolved (ADR-0428/ADR-0429):** that matrix is not stored anywhere on the
+   `.xmd` draw path — the provider just selects a matrix out of a **live** array
+   owned by the model instance; a correct skinned draw needs runtime access
+   (GH #34) or an offline `bind_inverse × .xsa` pose reconstruction.
 
 ## Draw-side skinning (ADR-0428) — the per-cluster transform does not exist here
 `CXR_Model_TriangleMesh::Cluster_TransformBones_V_N_TgU_TgV` =
@@ -223,5 +230,24 @@ bind/reference/inverse matrix is read from the mesh at all. So the hunt for a
 reference lives inside the matrix *provider*. Pseudocode:
 `docs/rea/reference/MXR_ClusterTransformBones.txt`.
 
-**Next probe (two functions):** `FUN_10022f90` (does it return `world` or
-`world·bind_inverse`?) and its caller `0x1002dcc0` (which object is the provider).
+## The skin matrix provider (ADR-0429) - a palette selector, not a bind-inverse
+The provider consumed by `FUN_100254e0` is built per skinned cluster by
+**`FUN_100238a0(mesh, matrices, countCap, desc)`** (`0x100238a0`, called from
+`FUN_1002dcc0`) as a transient **`0x10`-byte** object stored at `desc+0x0C`
+(`desc` = global `0x1016a7d0`, so `desc+0x0C` = `DAT_1016a7dc`):
+
+- `+0x00 float* matrices` = **`param_2`** — a **live** per-bone 3x4 array;
+- `+0x04 u8* palette` = **`FUN_1007fa90(mesh)`** = `(mesh+0x24) + 4`, i.e. the
+  file's **`BONEMATRIXMAP`/`matrix_bones`** bytes (`NULL` when the mesh has none);
+- `+0x08 u32 count` = **`FUN_1007eda0(mesh)`** = `*(u32*)(mesh+0x24)` (the palette
+  length; no-palette branch: `min(*(mesh+0x2c), countCap)`).
+
+So `mesh+0x24` is `{u32 n; u8 palette[n]}`, and the provider reads **no** bind/
+reference/inverse matrix — it only selects `matrices[palette[bone]]`. The matrices
+themselves come from the **model instance** (in `FUN_1002dcc0`:
+`local_84 = *(int*)(*(int*)(model[0x2c] + 0x14) + 0x18)`), not from the mesh.
+Pseudocode/field chain: `docs/rea/reference/MXR_SkinMatrixProvider.txt`.
+
+**Next probe:** the builder of that live per-bone array (field `+0x18` of
+`*(model[0x2c])+0x14`, candidate `CXR_SkeletonInstance`) — does it compose
+`world·bind_inverse`, or must the native path read it at runtime (GH #34)?
