@@ -94,7 +94,7 @@ offline source of per-bone **rotations** (ADR-0422). Layout:
 ```
 QUATERNIONS        count * 4 x i16     -> /32767  (CXR_Anim_Quatint16, unit)
 MOVES              count * 3 x f32     (translation, model units)
-TRACKINDICES       count * u16
+TRACKINDICES       count * u16         (per-key index into TRACKS)
 QUATERNIONINDICES  count * u16         (per-key-slot index pool)
 KEYFRAMETIMES      count * f32         (keyframe times)
 TRACKS             count * { u16 start; u16 flags }   (CXR_Anim_CompressedTrack)
@@ -102,9 +102,21 @@ DATAKEYS           variable            (opaque)
 SEQUENCES          variable, version 0x103
 ```
 
+`SEQUENCES` records are read by `CXR_Anim_Sequence::Read` (`FUN_100774f0`,
+`.\XRAnimCompressed.cpp`), whose eight tail words (u16,u16,u8,u8,u16,u16,u16,u16
+at object `+0x20..+0x2e`) give each clip a **key window**
+`[track_start, track_start + rotation_count + movement_count)` into
+`TRACKINDICES` and a **time window** `[time_start, time_start + time_count)`
+into `KEYFRAMETIMES`; over all 313 shipped sets the non-empty windows tile their
+pools exactly. Skeleton-side binding is by **slot**: `CXR_Skeleton::Read`
+(`FUN_100219d0`) finalises through `FUN_1001ff60`, which caps rotation slots at
+`0x80` (128) and movement slots at `0x20` (32) from each `.xmd` `NODES` record's
+`rotation_slot`/`movement_slot` (ADR-0418, 34-byte records).
+
 Decoded read-only by `tools/xsa_anim.py` (`--inventory <Content> --check` →
-313/313 ok). `.xag` files are animation **graphs** (states/actions/layers) and
-contain no `COMPRESSEDANIMATIONSET2`. See
+313/313 ok; `--sequences` prints the per-clip windows). `.xag` files are
+animation **graphs** (states/actions/layers) and contain no
+`COMPRESSEDANIMATIONSET2`. See
 `docs/adr/0422-xsa-compressed-animation-set.md`.
 
 ## Next steps (for the loop/next agent)

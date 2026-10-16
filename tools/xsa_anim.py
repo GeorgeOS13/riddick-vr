@@ -37,7 +37,8 @@ x86) with Ghidra 12.1.4 via ``rea`` (see
       SEQUENCES          variable-length records  (CXR_Anim_Sequence, v0x103)
 
   SEQUENCE record (version ``0x103``), from ``CXR_Anim::ReadCompressed``
-  ``FUN_1001a5e0`` + ``FUN_100774f0``::
+  ``FUN_1001a5e0`` (base read) + ``CXR_Anim_Sequence::Read`` ``FUN_100774f0``
+  (which reads the eight tail words straight into the object at ``+0x20``)::
 
       u32  version            = 0x103
       u16  field_a
@@ -45,15 +46,38 @@ x86) with Ghidra 12.1.4 via ``rea`` (see
       str  name               (u32 length + bytes, padded to 4)
       str  name2              (u32 length + bytes, padded to 4)
       u16  version2           = 0x100
-      u16  f20; u16 f22
-      u8   f24; u8 f25
-      u16  f26; u16 f28; u16 f2a; u16 f2c
+      u16  track_start        (+0x20)  first TRACKINDICES slot of this sequence
+      u16  track_mid          (+0x22)  always track_start + rotation_count
+      u8   rotation_count     (+0x24)
+      u8   movement_count     (+0x25)
+      u16  time_start         (+0x26)  first KEYFRAMETIMES slot
+      u16  time_count         (+0x28)
+      u16  extra_a            (+0x2a)
+      u16  extra_c            (+0x2c)
+
+  Each sequence therefore owns two contiguous windows: its **key window**
+  ``[track_start, track_start + rotation_count + movement_count)`` into
+  ``TRACKINDICES`` and its **time window** ``[time_start, time_start +
+  time_count)`` into ``KEYFRAMETIMES``.  Over every one of the **313** shipped
+  animation sets the non-empty windows tile their pools **exactly once**
+  (enforced by :func:`window_tiling_problems` from :meth:`AnimSet.validate`) and
+  ``track_mid == track_start + rotation_count`` holds for every sequence.
+
+  ``TRACKINDICES`` values are indices into ``TRACKS`` (``max < TRACKS.count``
+  over the whole corpus), so the per-sequence key window says *which tracks are
+  keyed by that clip*; each ``TRACKS[i].start`` then points into
+  ``QUATERNIONINDICES``.  The skeleton side binds animation tracks to bones by
+  **slot**: ``CXR_Skeleton`` (read by ``FUN_100219d0``, finalised by
+  ``FUN_1001ff60``) caps the rotation-slot count at ``0x80`` (128) and the
+  movement-slot count at ``0x20`` (32), and every ``.xmd`` ``NODES`` record
+  carries the ``rotation_slot`` / ``movement_slot`` a bone listens on
+  (``tools/mos_xmd.py``, ADR-0418).
 
 The parser is dependency-free and strictly read-only: it never writes next to
 the game install and never launches the game.
 
 Usage:
-    python tools/xsa_anim.py <file.xsa> [--json] [--tracks] [--tree]
+    python tools/xsa_anim.py <file.xsa> [--json] [--tracks] [--sequences] [--tree]
     python tools/xsa_anim.py <file.xsa> --quaternions N
     python tools/xsa_anim.py --inventory <dir> [--json]
     python tools/xsa_anim.py <file.xsa> --check
@@ -148,7 +172,54 @@ class Sequence:
     def as_dict(self):
         return {"version": self.version, "field_a": self.field_a,
                 "field_b": self.field_b, "name": self.name, "name2": self.name2,
-                "version2": self.version2, "fields": list(self.fields)}
+                "version2": self.version2, "fields": list(self.fields),
+                "track_start": self.track_start, "track_mid": self.track_mid,
+                "rotation_count": self.rotation_count,
+                "movement_count": self.movement_count,
+                "time_start": self.time_start, "time_count": self.time_count,
+                "key_window": list(self.key_window),
+                "time_window": list(self.time_window)}
+
+    # -- sequence-table fields (CXR_Anim_Sequence::Read, FUN_100774f0) -----
+    @property
+    def track_start(self) -> int:
+        """First ``TRACKINDICES`` slot owned by this sequence."""
+        return self.fields[0]
+
+    @property
+    def track_mid(self) -> int:
+        """End of the rotation part == ``track_start + rotation_count``."""
+        return self.fields[1]
+
+    @property
+    def rotation_count(self) -> int:
+        """Rotation entries in this sequence's key window."""
+        return self.fields[2]
+
+    @property
+    def movement_count(self) -> int:
+        """Movement entries in this sequence's key window."""
+        return self.fields[3]
+
+    @property
+    def time_start(self) -> int:
+        """First ``KEYFRAMETIMES`` slot used by this sequence."""
+        return self.fields[4]
+
+    @property
+    def time_count(self) -> int:
+        return self.fields[5]
+
+    @property
+    def key_window(self) -> tuple:
+        """``(lo, hi)`` into ``TRACKINDICES`` (empty windows are allowed)."""
+        return (self.track_start,
+                self.track_start + self.rotation_count + self.movement_count)
+
+    @property
+    def time_window(self) -> tuple:
+        """``(lo, hi)`` into ``KEYFRAMETIMES`` (empty windows are allowed)."""
+        return (self.time_start, self.time_start + self.time_count)
 
 
 def _u16(b: bytes, off: int) -> int:
@@ -161,6 +232,31 @@ def _u32(b: bytes, off: int) -> int:
 
 def _align(off: int, align: int) -> int:
     return (off + align - 1) // align * align
+
+
+def window_tiling_problems(name: str, windows, total: int) -> list:
+    """Validate that ``windows`` tile ``[0, total)`` exactly once per slot.
+
+    Empty windows (``lo == hi``) are ignored, matching the shipped corpus where
+    several sequences carry a zero-length key/time window. Returns a list of
+    human-readable problems (empty == the windows are an exact partition).
+    """
+    problems = []
+    cover = [0] * total
+    for lo, hi in windows:
+        if lo < 0 or hi > total or hi < lo:
+            return [f"{name} window {lo}..{hi} out of range (count {total})"]
+        for k in range(lo, hi):
+            cover[k] += 1
+    gaps = [k for k, c in enumerate(cover) if c == 0]
+    dup = [k for k, c in enumerate(cover) if c > 1]
+    if gaps:
+        problems.append(f"{name} tiling leaves {len(gaps)} uncovered slot(s) "
+                        f"(first {gaps[0]})")
+    if dup:
+        problems.append(f"{name} tiling covers {len(dup)} slot(s) twice "
+                        f"(first {dup[0]})")
+    return problems
 
 
 def decode_quaternions(b: bytes, off: int, count: int):
@@ -358,13 +454,38 @@ class AnimSet:
                     f"{seq.data_size}")
         elif seq is not None and seq.data_size:
             problems.append(f"SEQUENCES has {seq.data_size} bytes but count 0")
+
+        # Sequence table (CXR_Anim_Sequence::Read, FUN_100774f0): each sequence
+        # owns a contiguous TRACKINDICES key window [track_start,
+        # track_start + rotation_count + movement_count) and a contiguous
+        # KEYFRAMETIMES time window [time_start, time_start + time_count); the
+        # non-empty windows tile their pools exactly (proven over all 313
+        # shipped animation sets). TRACKINDICES values index TRACKS.
+        for i, s in enumerate(self.sequences):
+            if s.track_mid != s.track_start + s.rotation_count:
+                problems.append(
+                    f"sequence {i} track_mid {s.track_mid} != track_start "
+                    f"{s.track_start} + rotation_count {s.rotation_count}")
+        problems.extend(window_tiling_problems(
+            "TRACKINDICES", [s.key_window for s in self.sequences],
+            len(self.track_indices)))
+        problems.extend(window_tiling_problems(
+            "KEYFRAMETIMES", [s.time_window for s in self.sequences],
+            len(self.keyframe_times)))
+        if self.tracks and self.track_indices:
+            mti = max(self.track_indices)
+            if mti >= len(self.tracks):
+                problems.append(f"TRACKINDICES max {mti} >= TRACKS count "
+                                f"{len(self.tracks)}")
         return problems
 
 
 def report_file(path: str, want_json: bool, with_tracks: bool,
-                quaternions: int | None = None, with_tree: bool = False):
+                quaternions: int | None = None, with_tree: bool = False,
+                with_sequences: bool = False):
     a = AnimSet(path)
-    rec = a.as_dict(with_tracks=with_tracks or quaternions is not None)
+    rec = a.as_dict(with_tracks=with_tracks or quaternions is not None
+                    or with_sequences)
     if not want_json:
         s = rec["summary"]
         print(f"== {os.path.basename(path)}  ({len(a.xmd.data)} bytes)")
@@ -397,6 +518,15 @@ def report_file(path: str, want_json: bool, with_tracks: bool,
         if with_tree:
             for line in a.xmd.tree_lines():
                 print("   " + line)
+        if with_sequences:
+            print("   #  name                    key[lo:hi)     rot  mov  "
+                  "time[lo:hi)")
+            for i, s in enumerate(a.sequences):
+                klo, khi = s.key_window
+                tlo, thi = s.time_window
+                print("   %-3d %-22s [%4d,%4d)  %4d %4d  [%4d,%4d)"
+                      % (i, s.name, klo, khi, s.rotation_count,
+                         s.movement_count, tlo, thi))
     return rec
 
 
@@ -458,6 +588,8 @@ def main(argv=None) -> int:
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--tracks", action="store_true",
                     help="print the per-track (start, flags) table")
+    ap.add_argument("--sequences", action="store_true",
+                    help="print the per-sequence key/time window table")
     ap.add_argument("--quaternions", type=int, metavar="N",
                     help="print pooled rotation N as a float quaternion")
     ap.add_argument("--tree", action="store_true",
@@ -496,7 +628,8 @@ def main(argv=None) -> int:
     if not args.path:
         ap.error("provide a .xsa path or --inventory DIR")
     rec = report_file(args.path, args.json, args.tracks,
-                      quaternions=args.quaternions, with_tree=args.tree)
+                      quaternions=args.quaternions, with_tree=args.tree,
+                      with_sequences=args.sequences)
     if args.json:
         print(json.dumps(rec, indent=2))
     return 0

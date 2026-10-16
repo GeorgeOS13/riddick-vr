@@ -2,6 +2,61 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 13 — 2026-10-16 03:35 (scheduled loop)
+- **Unit:** GH #58 → #46 — pin the `.xsa` **`SEQUENCES` table** (each clip's key
+  and time windows) and the **skeleton animation-slot space**, i.e. the first
+  half of Wake 12's "Next" (the track→node side of the mapping).
+- Finding (real evidence, read-only; Ghidra 12.1.4 via `rea`):
+  - `CXR_Anim_Sequence::Read` = **`FUN_100774f0`** (`.\XRAnimCompressed.cpp`)
+    stores its eight tail words straight into the object: `+0x20` u16
+    `track_start`, `+0x22` u16 `track_mid` (= `track_start + rotation_count`),
+    `+0x24` u8 `rotation_count`, `+0x25` u8 `movement_count`, `+0x26` u16
+    `time_start`, `+0x28` u16 `time_count`, `+0x2a` u16, `+0x2c` u16. Base read
+    is `CXR_Anim::ReadCompressed` `FUN_1001a5e0` (inner version `0x103`).
+  - So every clip owns a **key window** `[track_start, track_start +
+    rotation_count + movement_count)` into `TRACKINDICES` and a **time window**
+    `[time_start, time_start + time_count)` into `KEYFRAMETIMES`. Over all 313
+    shipped sets the non-empty windows are **exact partitions** (313/313 each)
+    and `track_mid == track_start + rotation_count` (3,232/3,232).
+  - Skeleton side: `CXR_Skeleton::Read` = **`FUN_100219d0`** (`.\XRSkeleton.cpp`)
+    reads `NODES` (0x20 stride) / `NODEINDICES` (u16) / `ATTACHPOINTS` then calls
+    **`FUN_1001ff60`**, which enforces **rotation slots ≤ 0x80 (128)** and
+    **movement slots ≤ 0x20 (32)** from each node's i16 `+0x1c`/`+0x1e` — the
+    same `rotation_slot`/`movement_slot` pinned on `.xmd` `NODES` in ADR-0418.
+  - `max(TRACKINDICES) < TRACKS.count` and `max(TRACKS[i].start) <
+    QUATERNIONINDICES.count` in **312/312** sets with tracks → `TRACKINDICES`
+    values index `TRACKS`; `TRACKS` is a per-key-block table (cutscene clips run
+    to **1,333** `TRACKS` > the 128-slot cap), so the clip→bone binding goes via
+    the skeleton slot space.
+  - `EvalRot` in `XRAnimCompressed.cpp` (**`FUN_10076680`**) unconditionally
+    throws `"WTF is this used for?"` → the compressed class does not evaluate
+    rotations; `COMPRESSEDANIMATIONSET2` is storage, the runtime path is the
+    uncompressed `CXR_Anim_SequenceTracks::ReadData` (`FUN_1001b730`).
+- Change:
+  - `tools/xsa_anim.py`: `Sequence.track_start/track_mid/rotation_count/
+    movement_count/time_start/time_count` + `key_window`/`time_window`,
+    new `window_tiling_problems`, `validate()` now checks `track_mid`,
+    `TRACKINDICES`/`KEYFRAMETIMES` window tiling and `max(TRACKINDICES) <
+    len(TRACKS)`, new `--sequences` CLI, expanded docstring.
+  - `tools/test_xsa_anim.py`: fixture made shipping-consistent; **+5** tests
+    (14 total): key-window gap/overlap, time-window gap, `track_mid` mismatch,
+    `TRACKINDICES` out of range.
+  - `docs/adr/0422-xsa-compressed-animation-set.md`: seq-table field table,
+    skeleton slot finding, new evidence table rows, honest "still open".
+  - `docs/rea/mos-xmd-format.md` `.xsa` section (windows + slot binding).
+- Evidence: `xsa_anim.py --inventory <game>\Content --check` → **313/313 `ok`,
+  0 FAIL**, 0 sequence-window tiling violations, 0 `TRACKINDICES` range
+  violations. `test_xsa_anim.py` (14) PASS; `test_mos_xmd.py`,
+  `test_xmd_export.py`, `test_xmd_bake.py`, `validate_addresses.py`,
+  `verify_hook_init.py`, `verify_reported_fixes.py`, `scenario_tests.py --check`
+  all PASS. No C++ changed → no `build-all.ps1`/CTest rerun.
+- Blocker: none. **Next:** resolve the `TRACKS`-block → `NODES`-slot mapping
+  end-to-end and the 7 `max(QUATERNIONINDICES) >= QUATERNIONS.count` sets
+  (`Grenade.xsa` et al., likely a per-clip pool re-base), then bake a rest/idle
+  pose and wire `VRHandRenderer` behind a config flag (procedural overlay kept as
+  fallback).
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 12 — 2026-10-16 02:25 (scheduled loop)
 - **Unit:** GH #58 → #46 — pin the `.xsa` **animation-set** payload
   (`COMPRESSEDANIMATIONSET2`) to the shipped `MXR.dll` loader so per-bone

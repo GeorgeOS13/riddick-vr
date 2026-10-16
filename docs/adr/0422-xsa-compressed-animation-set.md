@@ -87,9 +87,14 @@ SEQUENCES record (0x103):
     str  name               (u32 length + bytes, padded to 4)
     str  name2              (u32 length + bytes, padded to 4)
     u16  version2           = 0x100
-    u16  f20; u16 f22
-    u8   f24; u8 f25
-    u16  f26; u16 f28; u16 f2a; u16 f2c
+    u16  track_start        (+0x20)  first TRACKINDICES slot of this clip
+    u16  track_mid          (+0x22)  == track_start + rotation_count
+    u8   rotation_count     (+0x24)
+    u8   movement_count     (+0x25)
+    u16  time_start         (+0x26)  first KEYFRAMETIMES slot
+    u16  time_count         (+0x28)
+    u16  extra_a            (+0x2a)
+    u16  extra_c            (+0x2c)
 ```
 
 For each fixed-size chunk `data_size == element_size * node.count` exactly.
@@ -111,8 +116,12 @@ keys, bit `0x8000` = single/static key.
 | sequences (`SEQUENCES`) | **3,232** |
 | keyframe times | **105,801** |
 | **track `start` out of range** | **0 / 110,046** |
+| `TRACKINDICES` max >= `TRACKS` count | **0 / 313** |
 | fixed-chunk tiling violations | **0** |
 | `SEQUENCES` tiling violations | **0** |
+| sequence key windows (`TRACKINDICES`) not an exact partition | **0 / 313** |
+| sequence time windows (`KEYFRAMETIMES`) not an exact partition | **0 / 313** |
+| `track_mid != track_start + rotation_count` | **0 / 3,232** |
 | pooled quaternion unit-norm \|norm-1\| | max **3.0e-5** (min norm 0.99997, max 1.00003) |
 
 The **2.7M** quaternions all being unit length is the direct proof of the
@@ -130,18 +139,90 @@ The **2.7M** quaternions all being unit length is the direct proof of the
 - `tools/xsa_anim.py` is the tool layer; the C++ consumer and the
   track→skeleton-node mapping are the remaining steps.
 
+## Update (Wake 13) - the `SEQUENCES` table and the skeleton slot space
+
+### Finding - `CXR_Anim_Sequence::Read` (`FUN_100774f0`, `.\XRAnimCompressed.cpp`)
+After the base read (`CXR_Anim::ReadCompressed`, `FUN_1001a5e0`, inner version
+`0x103`) the reader stores eight tail words straight into the object:
+`+0x20` u16, `+0x22` u16, `+0x24` u8, `+0x25` u8, `+0x26` u16, `+0x28` u16,
+`+0x2a` u16, `+0x2c` u16 (exactly the `<HHBBHHHH` tail `tools/xsa_anim.py`
+already decoded). Corpus-derived roles:
+
+| field | role | evidence (312/313 or 313/313 sets) |
+|---|---|---|
+| `+0x20 track_start` | first `TRACKINDICES` slot of the clip | `sum(rotation_count + movement_count) == TRACKINDICES.count` for **312/312** sets with tracks |
+| `+0x22 track_mid` | `== track_start + rotation_count` | **313/313** sets |
+| `+0x24 rotation_count` | rotation entries in this clip's key window | windows tile `TRACKINDICES` exactly (**313/313**) |
+| `+0x25 movement_count` | movement entries in this clip's key window | as above |
+| `+0x26 time_start` | first `KEYFRAMETIMES` slot | windows tile `KEYFRAMETIMES` exactly (**313/313**) |
+| `+0x28 time_count` | time keys in the clip | as above |
+
+Both window families are validated as **exact partitions** by the new
+`window_tiling_problems` helper inside `AnimSet.validate()` (empty windows,
+which several shipped clips carry, are ignored).
+
+### Finding - the animation track space is the *skeleton* slot space
+* `CXR_Skeleton::Read` = `FUN_100219d0` (`.\XRSkeleton.cpp`) reads `NODES`
+  (32-byte stride), `NODEINDICES` (u16) and `ATTACHPOINTS`, then calls
+  `FUN_1001ff60`, which walks every node's i16 at `+0x1c`/`+0x1e` and enforces
+  **max rotation slot < 0x80 (128)** and **max movement slot < 0x20 (32)**
+  (`"Too many rotation-slots used."` / `"Too many movement-slots used."`).
+  These are the same `rotation_slot` / `movement_slot` fields pinned on `.xmd`
+  `NODES` records in ADR-0418.
+* Over the shipped corpus `max(TRACKINDICES) < TRACKS.count` in **312/312** sets
+  and `max(TRACKS[i].start) < QUATERNIONINDICES.count` in **312/312** sets, so
+  `TRACKINDICES` values index `TRACKS` and `TRACKS[i].start` indexes
+  `QUATERNIONINDICES`. `TRACKS` therefore is a **per-key-block table**, not a
+  bone-slot array: cutscene clips carry up to **1,333** `TRACKS` while the
+  engine caps a skeleton at 128 rotation slots, so the clip→bone binding must go
+  through the skeleton slot space rather than the raw track ordinal.
+* The `EvalRot` entry in `XRAnimCompressed.cpp` (`FUN_10076680`) unconditionally
+  throws (`"WTF is this used for?"`), i.e. the compressed class does not
+  implement rotation evaluation itself - `COMPRESSEDANIMATIONSET2` is a storage
+  format; the runtime path is the uncompressed `CXR_Anim_SequenceTracks`
+  (`CXR_Anim_SequenceTracks::ReadData` = `FUN_1001b730`, whose 0x20-byte track
+  records carry the slot words at `+0x1c`/`+0x1e`).
+
+### Change
+`tools/xsa_anim.py`: `Sequence.track_start/track_mid/rotation_count/
+movement_count/time_start/time_count` + `key_window`/`time_window`;
+`window_tiling_problems`; `validate()` now checks `track_mid`,
+`TRACKINDICES`/`KEYFRAMETIMES` window tiling and `max(TRACKINDICES) <
+len(TRACKS)`; new `--sequences` CLI. `tools/test_xsa_anim.py`: the fixture is now
+shipping-consistent and 5 new tests cover the new invariants (14 total).
+
+### Evidence (commands)
+- `rea function MXR.dll 0x100774f0` -> `CXR_Anim_Sequence::Read`
+- `rea function MXR.dll 0x100219d0` -> `CXR_Skeleton::Read` (NODES/NODEINDICES/
+  ATTACHPOINTS -> `FUN_1001ff60`)
+- `rea function MXR.dll 0x1001ff60` -> rotation/movement slot finaliser (caps
+  0x80/0x20)
+- `rea function MXR.dll 0x1001b730` -> `CXR_Anim_SequenceTracks::ReadData`
+- `rea function MXR.dll 0x10076680` -> `EvalRot` stub (`"WTF is this used for?"`)
+- `python tools/xsa_anim.py --inventory <game>\Content --check` -> **313/313 ok,
+  0 FAIL**
+- `python tools/test_xsa_anim.py` -> PASS (14 tests)
+
+### Still open
+`rotation_count`/`movement_count` are proven to *partition* `TRACKINDICES`, but
+the meaning of the individual `TRACKINDICES` entries (which of the two pool
+words each key consumes, and how a `TRACKS` block binds to a `NODES` slot) is the
+next step; the data is consistent with "per-key owning track index", and
+`rotation_slot == node index` for used `.xmd` nodes supplies the slot order.
+
 ## Unknowns / follow-ups
-- **Track → skeleton-node mapping is not yet pinned.** `TRACKS[i].start` is a
-  valid `QUATERNIONINDICES` slot (proven), and the `.xmd` skeleton
-  `NODES`/`NODEINDICES` gives the bones (ADR-0418), but how a track binds to a
-  bone (and how many keys its block spans) is unresolved; the second `TRACKS`
-  word is a flag word, not a count (`0x8000` marks single-key tracks).
-- `QUATERNIONINDICES` is a per-key-slot index pool that `TRACKS.start` indexes,
-  but its exact relationship to `QUATERNIONS` (and to `TRACKINDICES`) is open:
-  e.g. `Grenade.xsa` has a **1-entry** `QUATERNIONS` pool yet
-  `QUATERNIONINDICES` values up to 23, so it is not a plain 1:1 pool index.
-  Cracking it (plus the fixed-size key-block length) is what turns the pool into
-  a posed skeleton.
+- **Track -> skeleton-node resolution is not yet end-to-end.** `TRACKS[i].start`
+  is a valid `QUATERNIONINDICES` slot (proven, 312/312) and the skeleton's
+  rotation/movement slot space is pinned (above), but the exact
+  `TRACKS`-block -> `NODES`-slot mapping for cutscene clips (`TRACKS` up to
+  1,333) is unresolved; the second `TRACKS` word is a flag word
+  (`0x8000` marks single-key tracks), not a count.
+- `Grenade.xsa` carries a **1-entry** `QUATERNIONS` pool while
+  `QUATERNIONINDICES` reaches 23 (one of **7** sets where
+  `max(QUATERNIONINDICES) >= QUATERNIONS.count`), so the pool index is *not*
+  always a plain 1:1 `QUATERNIONS` index; the other 305 sets are consistent with
+  1:1. Cracking the 7 exceptions (per-clip pool re-base?) is what turns the pool
+  into a posed skeleton.
 - `DATAKEYS` (`CXR_Anim_DataKey::Read`) records are variable-length; the parser
   exposes their size/count but does not decode the fields.
 - Only sequence version `0x103` is shipped; `FUN_1001a5e0` also defines
@@ -160,12 +241,15 @@ The **2.7M** quaternions all being unit length is the direct proof of the
 - `python tools/test_xsa_anim.py` → PASS
 
 ## Files
-- `tools/xsa_anim.py` - `AnimSet`, `Track`, `Sequence`, `decode_quaternions`/
-  `decode_moves`/`decode_tracks`/`decode_sequences`, `AnimSet.validate()`,
-  `--inventory`/`--check`/`--tracks`/`--quaternions` CLI.
+- `tools/xsa_anim.py` - `AnimSet`, `Track`, `Sequence` (named
+  sequence-table fields + `key_window`/`time_window`), `window_tiling_problems`,
+  `decode_quaternions`/`decode_moves`/`decode_tracks`/`decode_sequences`,
+  `AnimSet.validate()`, `--inventory`/`--check`/`--tracks`/`--sequences`/
+  `--quaternions` CLI.
 - `tools/test_xsa_anim.py` - synthetic-container tests (round-trip, tiling,
   non-unit quaternion, unknown flags, track range, missing chunk, sequence
-  tiling, unsupported sequence version).
+  tiling, unsupported sequence version, sequence key/time window gap/overlap,
+  `track_mid` mismatch, `TRACKINDICES` range).
 - `docs/rea/mos-xmd-format.md` - `.xsa` animation-set section (cross-ref).
 - `.github/workflows/vr-worker.yml` - runs the new test next to the `.xmd` tests.
 - `docs/adr/0421-xmd-keys-metadata-map.md` - "rotations" follow-up now points here.

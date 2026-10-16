@@ -29,8 +29,8 @@ def _string(s: str) -> bytes:
     return out
 
 
-def _seq_record(name, name2="", a=1, b=0x40, f20=0, f22=0x44, f24=0x44,
-                f25=3, f26=0, f28=0, f2a=0, f2c=1, version=0x103,
+def _seq_record(name, name2="", a=1, b=0x40, f20=0, f22=2, f24=2,
+                f25=1, f26=0, f28=2, f2a=0, f2c=0, version=0x103,
                 version2=0x100) -> bytes:
     out = struct.pack("<IHH", version, a, b)
     out += _string(name) + _string(name2)
@@ -63,6 +63,13 @@ def _default_chunks():
     quats = [(0, 0, 0, 32767), (11585, 0, 0, 30652), (0, 16384, 0, 28378)]
     moves = [(0.0, 0.0, 0.0), (1.5, -2.0, 3.25)]
     tracks = [(0, 0x8000), (1, 0x0000), (2, 0x8001)]
+    # Two sequences whose key windows tile TRACKINDICES [0,4) and whose time
+    # windows tile KEYFRAMETIMES [0,3), exactly as every shipped set does:
+    #   cut01 -> keys [0,3) = rot 2 + mov 1, times [0,2)
+    #   cut02 -> keys [3,4) = rot 1 + mov 0, times [2,3)
+    seqs = (_seq_record("cut01", f20=0, f22=2, f24=2, f25=1, f26=0, f28=2)
+            + _seq_record("cut02   ", f20=3, f22=4, f24=1, f25=0, f26=2,
+                          f28=1))
     return {
         "DIRECTORYHEADER": (b"", 0),
         "QUATERNIONS": (_quats_payload(quats), len(quats)),
@@ -72,7 +79,7 @@ def _default_chunks():
         "KEYFRAMETIMES": (_f32_payload([0.0, 0.5, 1.0]), 3),
         "TRACKS": (_tracks_payload(tracks), len(tracks)),
         "DATAKEYS": (b"", 0),
-        "SEQUENCES": (_seq_record("cut01") + _seq_record("cut02   "), 2),
+        "SEQUENCES": (seqs, 2),
     }
 
 
@@ -134,6 +141,14 @@ def test_anim_roundtrip(tmp_dir):
     assert a.tracks[2].has_movement and a.tracks[2].is_single
     assert a.sequence_names() == ["cut01", "cut02   "], a.sequence_names()
     assert a.sequences_consumed == len(_default_chunks()["SEQUENCES"][0])
+    # Sequence-table windows (CXR_Anim_Sequence::Read, FUN_100774f0).
+    assert [(s.key_window, s.time_window) for s in a.sequences] == \
+        [((0, 3), (0, 2)), ((3, 4), (2, 3))], \
+        [(s.key_window, s.time_window) for s in a.sequences]
+    s0 = a.sequences[0]
+    assert (s0.track_start, s0.track_mid, s0.rotation_count,
+            s0.movement_count) == (0, 2, 2, 1)
+    assert s0.track_mid == s0.track_start + s0.rotation_count
     problems = a.validate()
     assert problems == [], problems
     s = a.summary()
@@ -212,13 +227,67 @@ def test_rejects_untested_sequence_version(tmp_dir):
     raise AssertionError("non-0x103 sequence version was accepted")
 
 
+def test_detects_sequence_time_window_gap(tmp_dir):
+    chunks = _default_chunks()
+    chunks["SEQUENCES"] = (
+        _seq_record("a", f20=0, f22=2, f24=2, f25=1, f26=0, f28=1)
+        + _seq_record("b", f20=3, f22=4, f24=1, f25=0, f26=2, f28=1), 2)
+    a = _decode(_anim_container(chunks))
+    problems = a.validate()
+    assert any("KEYFRAMETIMES tiling leaves" in p for p in problems), problems
+
+
+def test_detects_sequence_key_window_gap(tmp_dir):
+    chunks = _default_chunks()
+    chunks["SEQUENCES"] = (
+        _seq_record("a", f20=0, f22=1, f24=1, f25=1, f26=0, f28=2)
+        + _seq_record("b", f20=3, f22=4, f24=1, f25=0, f26=2, f28=1), 2)
+    a = _decode(_anim_container(chunks))
+    problems = a.validate()
+    assert any("TRACKINDICES tiling leaves" in p for p in problems), problems
+
+
+def test_detects_sequence_key_window_overlap(tmp_dir):
+    chunks = _default_chunks()
+    chunks["SEQUENCES"] = (
+        _seq_record("a", f20=0, f22=2, f24=2, f25=1, f26=0, f28=2)
+        + _seq_record("b", f20=2, f22=3, f24=1, f25=0, f26=2, f28=1), 2)
+    a = _decode(_anim_container(chunks))
+    problems = a.validate()
+    assert any("TRACKINDICES tiling covers" in p for p in problems), problems
+
+
+def test_detects_sequence_track_mid_mismatch(tmp_dir):
+    chunks = _default_chunks()
+    chunks["SEQUENCES"] = (
+        _seq_record("a", f20=0, f22=5, f24=2, f25=1, f26=0, f28=2)
+        + _seq_record("b", f20=3, f22=4, f24=1, f25=0, f26=2, f28=1), 2)
+    a = _decode(_anim_container(chunks))
+    problems = a.validate()
+    assert any("track_mid" in p for p in problems), problems
+
+
+def test_detects_track_index_out_of_range(tmp_dir):
+    chunks = _default_chunks()
+    chunks["TRACKINDICES"] = (_u16_payload([0, 1, 9, 0]), 4)
+    a = _decode(_anim_container(chunks))
+    problems = a.validate()
+    assert any("TRACKINDICES max 9 >= TRACKS count 3" in p
+               for p in problems), problems
+
+
 def main() -> int:
     tests = (test_anim_roundtrip, test_non_anim_container_is_ok,
              test_detects_quaternion_tiling, test_detects_non_unit_quaternion,
              test_detects_unknown_track_flags,
              test_detects_track_start_out_of_range, test_detects_missing_chunk,
              test_detects_sequence_tiling,
-             test_rejects_untested_sequence_version)
+             test_rejects_untested_sequence_version,
+             test_detects_sequence_time_window_gap,
+             test_detects_sequence_key_window_gap,
+             test_detects_sequence_key_window_overlap,
+             test_detects_sequence_track_mid_mismatch,
+             test_detects_track_index_out_of_range)
     with tempfile.TemporaryDirectory() as d:
         for t in tests:
             t(d)
