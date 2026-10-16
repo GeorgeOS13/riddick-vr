@@ -55,6 +55,11 @@ private:
     // (disabled, no GL entry points, or no baked asset) so DrawNativeHand falls
     // back to its flat skin-tone tint under the GL lighting.
     bool EnsureNativeHandTexture();
+    void VerifyNativeHandTexture();
+    GLuint UploadNativeHandTexture();
+    void SetNativeHandTextureParams();
+    void LogNativeHandGlStateOnce();
+    void SanitizeTextureStateForHands();
 
     // Geometry utility primitives (colors multiplied by active hand fade)
     void DrawBeveledBox(float x0, float y0, float z0, float x1, float y1, float z1, float r, float g, float b);
@@ -79,6 +84,11 @@ private:
     GLuint m_nativeHandTexture = 0;
     bool m_nativeTextureTried = false;
     bool m_nativeTextureReady = false;
+    uint32_t m_currentFrameIndex = 0;
+    uint32_t m_lastTexCheckFrame = 0xFFFFFFFFu;
+    uint32_t m_lastClobberLogFrame = 0xFFFFFFFFu;
+    bool m_glStateLogged = false;
+    int m_prevActiveUnit = 0x84C0;
 };
 
 } // namespace RiddickVR
