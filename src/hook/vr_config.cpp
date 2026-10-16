@@ -127,8 +127,16 @@ void LoadVRConfig() {
         cfg.meleeClickHoldMs = ReadInt(iniPath, "MeleeClickHoldMs", cfg.meleeClickHoldMs);
         if (cfg.meleeClickHoldMs < 0) cfg.meleeClickHoldMs = 0;
         if (cfg.meleeClickHoldMs > 250) cfg.meleeClickHoldMs = 250;
-        VR_LOG_INFO("Combat input config: head_local_velocity=%d melee_click_hold_ms=%d",
-            cfg.headLocalVelocity, cfg.meleeClickHoldMs);
+        // GH #62: guard pose hysteresis.
+        cfg.guardEngageMs = ReadInt(iniPath, "GuardEngageMs", cfg.guardEngageMs);
+        if (cfg.guardEngageMs < 0) cfg.guardEngageMs = 0;
+        if (cfg.guardEngageMs > 500) cfg.guardEngageMs = 500;
+        cfg.guardReleaseMs = ReadInt(iniPath, "GuardReleaseMs", cfg.guardReleaseMs);
+        if (cfg.guardReleaseMs < 0) cfg.guardReleaseMs = 0;
+        if (cfg.guardReleaseMs > 1000) cfg.guardReleaseMs = 1000;
+        cfg.guardSteadySpeed = ClampF(ReadFloat(iniPath, "GuardSteadySpeed", cfg.guardSteadySpeed), 0.3f, 4.0f);
+        VR_LOG_INFO("Combat input config: head_local_velocity=%d melee_click_hold_ms=%d guard_engage_ms=%d guard_release_ms=%d guard_steady=%.2f",
+            cfg.headLocalVelocity, cfg.meleeClickHoldMs, cfg.guardEngageMs, cfg.guardReleaseMs, cfg.guardSteadySpeed);
         // GH #66: per-draw engine viewmodel suppression (default off; the
         // signature is provisional and must be confirmed on a headset).
         cfg.suppressEngineViewmodel = ReadInt(iniPath, "SuppressEngineViewmodel", cfg.suppressEngineViewmodel) ? 1 : 0;

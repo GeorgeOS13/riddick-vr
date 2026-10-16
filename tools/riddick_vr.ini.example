@@ -95,6 +95,11 @@ StrikeCrossVx=1.10      ; dual cross-slash: opposing |Vx| swing
 HeadLocalVelocity=1
 ; GH #65: ms (0-250) a melee click stays held; 0 = legacy instant down+up.
 MeleeClickHoldMs=60
+; GH #62: guard pose hold time to engage (ms), survive-pose-loss time (ms), and
+; the hand speed (m/s) below which the hands count as steady.
+GuardEngageMs=40
+GuardReleaseMs=80
+GuardSteadySpeed=1.4
 ; --- Engine viewmodel suppression (GH #66, approach 2) ---
 ; 1 = skip the engine's own first-person arms/hands at the draw level so only
 ; the VR/native hands are visible (the duplicate-hands fix). Default 0.

@@ -8118,39 +8118,28 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     bool inFrontOfFace = (leftLocal.z >= guardEnv.zMin && leftLocal.z <= guardEnv.zMax) &&
                          (rightLocal.z >= guardEnv.zMin && rightLocal.z <= guardEnv.zMax);
     bool handsClose = fabsf(leftLocal.x - rightLocal.x) < guardEnv.maxHandSpan;
-    bool handsSteady = (rSpeed < 1.4f && lSpeed < 1.4f);
+    bool handsSteady = (rSpeed < g_vrConfig.guardSteadySpeed && lSpeed < g_vrConfig.guardSteadySpeed);
     bool notPunching = (now - s_melee.lastPunchTime > 120) && (now - s_melee.lastFinisherTime > 120); // GH #31
 
     bool guardPoseDetected = !isClimbingActive && !s_twoHandedStabilizationActive &&
                              chinLevel && inFrontOfFace && handsClose && handsSteady && notPunching;
 
-    // Temporal Hysteresis & Debouncing:
-    // Require guard pose to hold for ~40ms to engage
-    if (guardPoseDetected) {
-        s_melee.guardPoseReleaseTimer = 0;
-        if (s_melee.guardPoseHoldTimer == 0) {
-            s_melee.guardPoseHoldTimer = now;
-        } else if (now - s_melee.guardPoseHoldTimer >= 40) {
-            s_physicalBlockEngaged = true;
-        }
-    } else {
-        s_melee.guardPoseHoldTimer = 0;
-        if (s_physicalBlockEngaged) {
-            // If throwing an actual directional punch, release block instantly (0ms)
-            bool isThrowingPunch = (rVel.z < -1.15f || lVel.z < -1.15f) || (fabsf(rVel.x) > 1.30f || fabsf(lVel.x) > 1.30f) || (rVel.y < -1.25f || lVel.y < -1.25f);
-            if (isThrowingPunch) {
-                s_physicalBlockEngaged = false;
-                s_melee.guardPoseReleaseTimer = 0;
-            } else {
-                // When hands drop naturally, require 80ms release buffer to eliminate jitter
-                if (s_melee.guardPoseReleaseTimer == 0) {
-                    s_melee.guardPoseReleaseTimer = now;
-                } else if (now - s_melee.guardPoseReleaseTimer >= 80) {
-                    s_physicalBlockEngaged = false;
-                    s_melee.guardPoseReleaseTimer = 0;
-                }
-            }
-        }
+    // Temporal hysteresis & debouncing (GH #62, combat_guard.h): engage after
+    // GuardEngageMs, release after GuardReleaseMs, or instantly on a real punch.
+    // The timers stay in s_melee so the existing resets keep working.
+    {
+        const bool isThrowingPunch = (rVel.z < -1.15f || lVel.z < -1.15f) || (fabsf(rVel.x) > 1.30f || fabsf(lVel.x) > 1.30f) || (rVel.y < -1.25f || lVel.y < -1.25f);
+        GuardPoseState guardState;
+        guardState.holdStart = s_melee.guardPoseHoldTimer;
+        guardState.releaseStart = s_melee.guardPoseReleaseTimer;
+        guardState.engaged = s_physicalBlockEngaged;
+        GuardPoseTiming guardTiming;
+        guardTiming.engageMs = static_cast<unsigned>(g_vrConfig.guardEngageMs);
+        guardTiming.releaseMs = static_cast<unsigned>(g_vrConfig.guardReleaseMs);
+        guardTiming.steadySpeed = g_vrConfig.guardSteadySpeed;
+        s_physicalBlockEngaged = UpdateGuardPose(guardState, guardPoseDetected, isThrowingPunch, now, guardTiming);
+        s_melee.guardPoseHoldTimer = guardState.holdStart;
+        s_melee.guardPoseReleaseTimer = guardState.releaseStart;
     }
 
     // 6. Tactical Weapon Reload Gestures (F.E.A.R. / Riddick VR Style)

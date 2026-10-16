@@ -90,6 +90,11 @@ struct VRConfig {
     // GH #65: milliseconds a melee mouse click stays held before release (0 =
     // legacy instant down+up, which the engine's polled input often misses).
     int meleeClickHoldMs = 60;
+    // GH #62: guard pose hysteresis (ms) and the hand speed limit (m/s) below
+    // which the hands count as steady. Defaults are the old hard-coded values.
+    int guardEngageMs = 40;
+    int guardReleaseMs = 80;
+    float guardSteadySpeed = 1.4f;
     // GH #66 (approach 2): suppress the engine's own first-person viewmodel
     // (arms/hands) at the draw level, since approach 1 (the RPG `noviewmodel`
     // bit) was falsified in ADR-0438. Default OFF: the pass signature is a
