@@ -95,6 +95,13 @@ struct VRConfig {
     int guardEngageMs = 40;
     int guardReleaseMs = 80;
     float guardSteadySpeed = 1.4f;
+    // GH #52: two-trigger combat stance thresholds (trigger 0..1, hold in ms).
+    // Defaults are the old constants. MeleeRequiresStance=1 ignores swings
+    // outside the stance (exploration mode); default 0 keeps swings always live.
+    float stanceEnterTrigger = 0.85f;
+    float stanceExitTrigger = 0.60f;
+    int stanceHoldMs = 100;
+    int meleeRequiresStance = 0;
     // GH #66 (approach 2): suppress the engine's own first-person viewmodel
     // (arms/hands) at the draw level, since approach 1 (the RPG `noviewmodel`
     // bit) was falsified in ADR-0438. Default OFF: the pass signature is a

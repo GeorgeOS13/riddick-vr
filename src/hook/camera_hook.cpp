@@ -3977,8 +3977,12 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // input mapping section. Default (southpaw=0): dom=right, off=left.
     const RiddickVRControllerInput& domCtrl = g_vrConfig.southpaw ? vrState.leftController : vrState.rightController;
     const RiddickVRControllerInput& offCtrl = g_vrConfig.southpaw ? vrState.rightController : vrState.leftController;
+    CombatStanceThresholds stanceThresholds;
+    stanceThresholds.enter = g_vrConfig.stanceEnterTrigger;
+    stanceThresholds.exit = g_vrConfig.stanceExitTrigger;
+    stanceThresholds.holdMs = static_cast<uint32_t>(g_vrConfig.stanceHoldMs);
     CombatStanceIntent combatStance = UpdateCombatStance(s_combatStance,
-        vrState.leftController, vrState.rightController, static_cast<uint32_t>(now));
+        vrState.leftController, vrState.rightController, static_cast<uint32_t>(now), stanceThresholds);
     if (combatStance.entered) {
         VR_LOG_INFO("Combat Stance: COMBAT MODE entered (both triggers held)");
         HapticRequest(0, 0.35f, kHapticUi);
@@ -4435,6 +4439,21 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             lVel, rVel, leftLocal, rightLocal,
             vrState.leftController.grip, vrState.rightController.grip,
             vrState.leftController.trigger, vrState.rightController.trigger);
+
+        // GH #52: optional gate. With MeleeRequiresStance=1 a classified swing
+        // outside the two-trigger stance is dropped (exploration mode).
+        if (g_vrConfig.meleeRequiresStance && !combatStance.active && meleeCounters.isMeleeStrike) {
+            static DWORD s_lastStanceRejectLog = 0;
+            if (now - s_lastStanceRejectLog > 1000) {
+                s_lastStanceRejectLog = now;
+                VR_LOG_INFO("MELEE STRIKE REJECTED (exploration; MeleeRequiresStance=1)");
+            }
+            meleeCounters.isMeleeStrike = false;
+            meleeCounters.dualCrossSlash = false;
+            meleeCounters.isForwardPunch = false;
+            meleeCounters.isHookPunch = false;
+            meleeCounters.isUppercutPunch = false;
+        }
 
         if (meleeCounters.dualRifleStrip) {
             s_melee.lastPunchTime = now;

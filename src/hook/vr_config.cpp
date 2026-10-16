@@ -135,8 +135,17 @@ void LoadVRConfig() {
         if (cfg.guardReleaseMs < 0) cfg.guardReleaseMs = 0;
         if (cfg.guardReleaseMs > 1000) cfg.guardReleaseMs = 1000;
         cfg.guardSteadySpeed = ClampF(ReadFloat(iniPath, "GuardSteadySpeed", cfg.guardSteadySpeed), 0.3f, 4.0f);
-        VR_LOG_INFO("Combat input config: head_local_velocity=%d melee_click_hold_ms=%d guard_engage_ms=%d guard_release_ms=%d guard_steady=%.2f",
-            cfg.headLocalVelocity, cfg.meleeClickHoldMs, cfg.guardEngageMs, cfg.guardReleaseMs, cfg.guardSteadySpeed);
+        // GH #52: combat stance thresholds; exit is kept below enter.
+        cfg.stanceEnterTrigger = ClampF(ReadFloat(iniPath, "StanceEnterTrigger", cfg.stanceEnterTrigger), 0.20f, 1.0f);
+        cfg.stanceExitTrigger = ClampF(ReadFloat(iniPath, "StanceExitTrigger", cfg.stanceExitTrigger), 0.05f, 1.0f);
+        if (cfg.stanceExitTrigger >= cfg.stanceEnterTrigger) cfg.stanceExitTrigger = cfg.stanceEnterTrigger - 0.05f;
+        cfg.stanceHoldMs = ReadInt(iniPath, "StanceHoldMs", cfg.stanceHoldMs);
+        if (cfg.stanceHoldMs < 0) cfg.stanceHoldMs = 0;
+        if (cfg.stanceHoldMs > 1000) cfg.stanceHoldMs = 1000;
+        cfg.meleeRequiresStance = ReadInt(iniPath, "MeleeRequiresStance", cfg.meleeRequiresStance) ? 1 : 0;
+        VR_LOG_INFO("Combat input config: head_local_velocity=%d melee_click_hold_ms=%d guard_engage_ms=%d guard_release_ms=%d guard_steady=%.2f stance=[%.2f,%.2f,%dms] melee_requires_stance=%d",
+            cfg.headLocalVelocity, cfg.meleeClickHoldMs, cfg.guardEngageMs, cfg.guardReleaseMs, cfg.guardSteadySpeed,
+            cfg.stanceEnterTrigger, cfg.stanceExitTrigger, cfg.stanceHoldMs, cfg.meleeRequiresStance);
         // GH #66: per-draw engine viewmodel suppression (default off; the
         // signature is provisional and must be confirmed on a headset).
         cfg.suppressEngineViewmodel = ReadInt(iniPath, "SuppressEngineViewmodel", cfg.suppressEngineViewmodel) ? 1 : 0;

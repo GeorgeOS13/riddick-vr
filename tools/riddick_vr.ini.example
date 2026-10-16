@@ -100,6 +100,12 @@ MeleeClickHoldMs=60
 GuardEngageMs=40
 GuardReleaseMs=80
 GuardSteadySpeed=1.4
+; GH #52: combat stance trigger thresholds (enter/exit, 0-1) and hold time (ms);
+; MeleeRequiresStance=1 ignores swings outside the stance (0 = swings always live).
+StanceEnterTrigger=0.85
+StanceExitTrigger=0.60
+StanceHoldMs=100
+MeleeRequiresStance=0
 ; --- Engine viewmodel suppression (GH #66, approach 2) ---
 ; 1 = skip the engine's own first-person arms/hands at the draw level so only
 ; the VR/native hands are visible (the duplicate-hands fix). Default 0.
