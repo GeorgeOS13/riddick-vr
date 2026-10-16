@@ -1822,7 +1822,12 @@ static MeleeCounterIntent UpdateMeleeCounters(MeleeState& st, DWORD now,
             bool isHookPunch = (fabsf(rVel.x) > 1.35f && rVel.z < -0.15f) || (fabsf(lVel.x) > 1.35f && lVel.z < -0.15f);
             bool isUppercutPunch = ((rVel.y > 1.35f && rightLocal.y < -0.10f) || (lVel.y > 1.35f && leftLocal.y < -0.10f)) &&
                                    (rVel.z < -0.20f || lVel.z < -0.20f);
-            bool isMeleeStrike = (dualCrossSlash || isForwardPunch || isHookPunch || isUppercutPunch) && !inGuardVolume;
+            // GH #65: do NOT suppress strikes inside the guard volume -- a jab
+            // thrown while blocking is a legitimate forward punch. A guard
+            // *raise* (Vy > 0 with Vz ~ 0) still matches none of the strike
+            // conditions, preserving the ADR-0403 intent.
+            (void)inGuardVolume;
+            bool isMeleeStrike = (dualCrossSlash || isForwardPunch || isHookPunch || isUppercutPunch);
 
             // 5a. Physical Parry / Counter-Disarm Thrust (ADR 0018)
             // In Starbreeze engine: Left Click while Right Click (Block) is held executes Counter-Disarm!
@@ -4306,7 +4311,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     DWORD finisherAtEntry = s_melee.lastFinisherTime;
 
     // 5. Physical Melee Combat Gestures (Jabs, Hooks, Uppercuts, Ulak Cross-Slashes, Shiv Executions, Counter-Parries)
-    if (combatStance.active && !isClimbingActive && (now - s_melee.lastPunchTime > 260)) {
+    // GH #65: melee strikes are driven by controller swing velocity, NOT the
+    // both-trigger combat chord, so a punch fires even in exploration mode.
+    if (!isClimbingActive && (now - s_melee.lastPunchTime > 260)) {
         // GH #17 step 9: counter/disarm + strike-gate detection delegated to
         // UpdateMeleeCounters (explicit MeleeState, no behavior change).
         MeleeCounterIntent meleeCounters = UpdateMeleeCounters(s_melee, now,
