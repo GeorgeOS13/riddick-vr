@@ -70,3 +70,17 @@ GuardYMax=0.32      ; highest hand height that counts as a block
 GuardZMin=-0.60     ; farthest forward the guard may be held
 GuardZMax=-0.12     ; nearest to the face (smaller magnitude = closer)
 GuardMaxHandSpan=0.50   ; max |leftX - rightX| shield width (m)
+; --- Swing-driven strike thresholds (GH #65) ---
+; A punch/hook/uppercut fires on controller *velocity* (not a both-trigger
+; chord). Units: velocities in m/s, positions in head-local metres (+Y up,
+; -Z forward). Defaults are the committed first pass; lower a magnitude to make
+; that strike easier, raise it to make it stiffer. Raising the hands into guard
+; (upward, ~zero forward) is never a strike by construction.
+StrikeForwardVz=-1.20   ; forward jab: hand Vz below this (m/s, negative)
+StrikeForwardMaxZ=-0.10 ; ...and the hand ahead of the view plane (z < this)
+StrikeHookVx=1.35       ; hook: |hand Vx| above this
+StrikeHookVz=-0.15      ; ...and travelling forward (Vz below this)
+StrikeUppercutVy=1.35   ; uppercut: hand Vy above this
+StrikeUppercutMaxY=-0.10 ; ...starting below the view (y < this)
+StrikeUppercutVz=-0.20  ; ...with some forward travel
+StrikeCrossVx=1.10      ; dual cross-slash: opposing |Vx| swing

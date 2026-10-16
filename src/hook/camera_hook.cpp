@@ -6,6 +6,7 @@
 #include "vr_action_map.h"
 #include "combat_stance.h"
 #include "combat_guard.h"
+#include "combat_strike.h"
 #include "dialogue_navigation.h"
 #include "gesture_tap.h"
 #include <algorithm>
@@ -64,6 +65,21 @@ static GuardEnvelope GetGuardEnvelope() {
     env.zMax = g_vrConfig.guardZMax;
     env.maxHandSpan = g_vrConfig.guardMaxHandSpan;
     return env;
+}
+
+// GH #65: melee strike thresholds, sourced from the INI (see combat_strike.h).
+// The classifier is shared + unit-tested (`combat_strike_thresholds`).
+static StrikeThresholds GetStrikeThresholds() {
+    StrikeThresholds t;
+    t.forwardVz = g_vrConfig.strikeForwardVz;
+    t.forwardMaxZ = g_vrConfig.strikeForwardMaxZ;
+    t.hookVx = g_vrConfig.strikeHookVx;
+    t.hookVz = g_vrConfig.strikeHookVz;
+    t.uppercutVy = g_vrConfig.strikeUppercutVy;
+    t.uppercutMaxY = g_vrConfig.strikeUppercutMaxY;
+    t.uppercutVz = g_vrConfig.strikeUppercutVz;
+    t.crossVx = g_vrConfig.strikeCrossVx;
+    return t;
 }
 
 
@@ -1804,30 +1820,41 @@ static MeleeCounterIntent UpdateMeleeCounters(MeleeState& st, DWORD now,
                                                float leftTrigger, float rightTrigger) {
     MeleeCounterIntent out;
     (void)now;
-            bool dualCrossSlash = (rVel.x < -1.1f && lVel.x > 1.1f) || (rVel.x > 1.1f && lVel.x < -1.1f);
 
-            // ADR 0403 / GH #62: Discriminate deliberate directional punch strikes from raising arms into Boxer Guard.
-            // Raising arms upward (Vy > 0) into guard position must NEVER trigger an attack or cancel guard.
-            // The gate uses the SAME front-of-HMD envelope as the block pose (#62): the old loose volume reached
-            // y = -0.42 m and z = -0.05 m (below/inside the view), so a swing thrown from a raised guard was masked
-            // by `!inGuardVolume` and never fired. A fast swing now only has to leave the strict chin-to-forehead
-            // window to register, while slowly raising the hands into that window (no punch velocity) is still ignored.
+            // ADR 0403 / GH #62 / GH #65: discriminate deliberate directional
+            // punch strikes from *raising* the arms into Boxer Guard. Raising
+            // arms upward (Vy > 0) into guard must NEVER trigger an attack or
+            // cancel guard, and a fast swing thrown from a raised guard must
+            // still fire. The guard-volume computation below is retained only so
+            // the block pose and the strike gate share the ADR-0434 front-of-HMD
+            // envelope; since GH #65 the strike decision itself is velocity
+            // driven (see combat_strike.h) and is deliberately NOT suppressed
+            // inside the volume -- a jab thrown while blocking is a legitimate
+            // forward punch.
             const GuardEnvelope guardVolume = GetGuardEnvelope();
             bool inGuardVolume = InGuardEnvelope(guardVolume,
                                                  leftLocal.y, leftLocal.z,
                                                  rightLocal.y, rightLocal.z,
                                                  leftLocal.x - rightLocal.x);
 
-            bool isForwardPunch = (rVel.z < -1.20f && rightLocal.z < -0.10f) || (lVel.z < -1.20f && leftLocal.z < -0.10f);
-            bool isHookPunch = (fabsf(rVel.x) > 1.35f && rVel.z < -0.15f) || (fabsf(lVel.x) > 1.35f && lVel.z < -0.15f);
-            bool isUppercutPunch = ((rVel.y > 1.35f && rightLocal.y < -0.10f) || (lVel.y > 1.35f && leftLocal.y < -0.10f)) &&
-                                   (rVel.z < -0.20f || lVel.z < -0.20f);
-            // GH #65: do NOT suppress strikes inside the guard volume -- a jab
-            // thrown while blocking is a legitimate forward punch. A guard
+            // GH #65: the punch/hook/uppercut classifiers are a shared,
+            // INI-tunable, unit-tested threshold set (`combat_strike.h`,
+            // `Strike*` keys). Do NOT suppress strikes inside the guard volume --
+            // a jab thrown while blocking is a legitimate forward punch. A guard
             // *raise* (Vy > 0 with Vz ~ 0) still matches none of the strike
             // conditions, preserving the ADR-0403 intent.
+            const StrikeThresholds strikeThresholds = GetStrikeThresholds();
+            const StrikeIntent strike = ClassifyStrike(strikeThresholds,
+                                                       StrikeVelocity{lVel.x, lVel.y, lVel.z},
+                                                       StrikeVelocity{rVel.x, rVel.y, rVel.z},
+                                                       leftLocal.y, leftLocal.z,
+                                                       rightLocal.y, rightLocal.z);
             (void)inGuardVolume;
-            bool isMeleeStrike = (dualCrossSlash || isForwardPunch || isHookPunch || isUppercutPunch);
+            bool dualCrossSlash = strike.dualCrossSlash;
+            bool isForwardPunch = strike.forwardPunch;
+            bool isHookPunch = strike.hookPunch;
+            bool isUppercutPunch = strike.uppercutPunch;
+            bool isMeleeStrike = strike.strike;
 
             // 5a. Physical Parry / Counter-Disarm Thrust (ADR 0018)
             // In Starbreeze engine: Left Click while Right Click (Block) is held executes Counter-Disarm!

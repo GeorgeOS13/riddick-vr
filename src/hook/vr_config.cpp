@@ -109,12 +109,25 @@ void LoadVRConfig() {
         // never make the guard pose unreachable.
         if (cfg.guardYMin > cfg.guardYMax) cfg.guardYMin = cfg.guardYMax;
         if (cfg.guardZMin > cfg.guardZMax) cfg.guardZMax = cfg.guardZMin;
-        VR_LOG_INFO("VR config loaded from %s (snap=%.0f move_dz=%.2f comfort=%d seated=%d scale=%.2f paw=%d native_hands=%d native_tex=%d native_rot=[%.0f,%.0f,%.0f] guard_y=[%.2f,%.2f] guard_z=[%.2f,%.2f] guard_span=%.2f)",
+        // GH #65: melee strike velocity thresholds (m/s) and per-side hand
+        // positions (head-local metres). Clamped so a typo cannot make strikes
+        // impossible (e.g. a positive forward threshold) or fire on idle hands.
+        cfg.strikeForwardVz = ClampF(ReadFloat(iniPath, "StrikeForwardVz", cfg.strikeForwardVz), -8.0f, -0.20f);
+        cfg.strikeForwardMaxZ = ClampF(ReadFloat(iniPath, "StrikeForwardMaxZ", cfg.strikeForwardMaxZ), -0.60f, 0.0f);
+        cfg.strikeHookVx = ClampF(ReadFloat(iniPath, "StrikeHookVx", cfg.strikeHookVx), 0.10f, 8.0f);
+        cfg.strikeHookVz = ClampF(ReadFloat(iniPath, "StrikeHookVz", cfg.strikeHookVz), -8.0f, 0.0f);
+        cfg.strikeUppercutVy = ClampF(ReadFloat(iniPath, "StrikeUppercutVy", cfg.strikeUppercutVy), 0.10f, 8.0f);
+        cfg.strikeUppercutMaxY = ClampF(ReadFloat(iniPath, "StrikeUppercutMaxY", cfg.strikeUppercutMaxY), -0.60f, 0.20f);
+        cfg.strikeUppercutVz = ClampF(ReadFloat(iniPath, "StrikeUppercutVz", cfg.strikeUppercutVz), -8.0f, 0.0f);
+        cfg.strikeCrossVx = ClampF(ReadFloat(iniPath, "StrikeCrossVx", cfg.strikeCrossVx), 0.10f, 8.0f);
+        VR_LOG_INFO("VR config loaded from %s (snap=%.0f move_dz=%.2f comfort=%d seated=%d scale=%.2f paw=%d native_hands=%d native_tex=%d native_rot=[%.0f,%.0f,%.0f] guard_y=[%.2f,%.2f] guard_z=[%.2f,%.2f] guard_span=%.2f strike=[fwdVz=%.2f hookVx=%.2f upperVy=%.2f crossVx=%.2f])",
             iniPath, cfg.snapAngleDeg, cfg.moveDeadzone, cfg.comfortEnabled,
             cfg.seated, cfg.worldScale, cfg.southpaw, cfg.nativeHands,
             cfg.nativeHandTexture, cfg.nativeHandYaw, cfg.nativeHandPitch,
             cfg.nativeHandRoll, cfg.guardYMin, cfg.guardYMax,
-            cfg.guardZMin, cfg.guardZMax, cfg.guardMaxHandSpan);
+            cfg.guardZMin, cfg.guardZMax, cfg.guardMaxHandSpan,
+            cfg.strikeForwardVz, cfg.strikeHookVx, cfg.strikeUppercutVy,
+            cfg.strikeCrossVx);
     } else {
         VR_LOG_INFO("VR config: no riddick_vr.ini found, using defaults");
     }

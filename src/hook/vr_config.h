@@ -64,6 +64,19 @@ struct VRConfig {
     float guardZMin = -0.60f;
     float guardZMax = -0.12f;
     float guardMaxHandSpan = 0.50f;
+    // GH #65: melee strike velocity thresholds (m/s) + per-side hand positions
+    // (head-local metres, +Y up, -Z forward). Strikes are swing-driven; these
+    // are the classifier's sensitivities. Defaults reproduce the e858809 first
+    // pass exactly (see combat_strike.h); tune them on a headset instead of
+    // rebuilding.
+    float strikeForwardVz = -1.20f;
+    float strikeForwardMaxZ = -0.10f;
+    float strikeHookVx = 1.35f;
+    float strikeHookVz = -0.15f;
+    float strikeUppercutVy = 1.35f;
+    float strikeUppercutMaxY = -0.10f;
+    float strikeUppercutVz = -0.20f;
+    float strikeCrossVx = 1.10f;
 };
 
 extern VRConfig g_vrConfig;

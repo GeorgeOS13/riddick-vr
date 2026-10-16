@@ -61,4 +61,16 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   INI (`GuardYMin/GuardYMax/GuardZMin/GuardZMax/GuardMaxHandSpan`); unit-tested
   by `combat_guard_envelope` (`tests/combat_guard_tests.cpp`). See ADR-0434.
 
+## Swing-driven strike thresholds (GH #65)
+- `combat_strike.h`: header-only, dependency-free `StrikeThresholds` +
+  `ClassifyStrike` (forward jab / hook / uppercut / dual cross-slash and the
+  combined `strike` gate) over per-hand velocity (m/s) and head-local position
+  (`+Y` up, `-Z` forward).
+- The classifier is shared with `camera_hook.cpp` (`GetStrikeThresholds()`) and
+  driven by the INI (`StrikeForwardVz/StrikeForwardMaxZ/StrikeHookVx/StrikeHookVz/
+  StrikeUppercutVy/StrikeUppercutMaxY/StrikeUppercutVz/StrikeCrossVx`), so strike
+  sensitivity can be tuned on a headset without a rebuild. Raising the hands into
+  guard (`Vy>0`, `Vz~0`) matches no strike condition (ADR-0403). Unit-tested by
+  `combat_strike_thresholds` (`tests/combat_strike_tests.cpp`). See ADR-0437.
+
 

@@ -2,6 +2,51 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 30 — 2026-10-16 14:54 (scheduled loop)
+- **Unit:** GH **#65** (punch/attack on swing) — do the issue's *remaining* work:
+  expose the strike velocity thresholds in the INI. Extracted the inline
+  punch/hook/uppercut/cross-slash classifiers out of `UpdateMeleeCounters` into
+  a shared, dependency-free, unit-tested header so sensitivity is headset-tunable
+  without a rebuild.
+- Finding (read-only, `src/hook/camera_hook.cpp`): after `e858809` the four
+  strike booleans still used hard-coded numbers
+  (`forwardVz < -1.20 && handZ < -0.10`, `|hookVx| > 1.35 && Vz < -0.15`,
+  `uppercutVy > 1.35 && handY < -0.10 && Vz < -0.20`, `crossVx 1.10`), so any
+  tuning required a rebuild; the issue explicitly asks for INI exposure.
+- Change (code/tests/docs):
+  - `src/hook/combat_strike.h` (new, header-only): `StrikeThresholds` (8 numbers,
+    defaults = the e858809 first pass), `StrikeVelocity`, `StrikeIntent`, and
+    `ClassifyStrike(...)` returning the four classifiers + the combined `strike`
+    gate. Comparisons are strict (`<`/`>`) as before.
+  - `camera_hook.cpp`: `GetStrikeThresholds()` from `g_vrConfig`; the classifier
+    block now calls `ClassifyStrike(...)`. Kept the guard-volume computation
+    (ADR-0434 / GH #62 shared-envelope source invariant) and the ADR-0403 note —
+    strikes are deliberately **not** suppressed inside the guard volume.
+  - `vr_config.{h,cpp}`: 8 INI keys `StrikeForwardVz/StrikeForwardMaxZ/
+    StrikeHookVx/StrikeHookVz/StrikeUppercutVy/StrikeUppercutMaxY/
+    StrikeUppercutVz/StrikeCrossVx`, each clamped (a typo cannot make strikes
+    impossible/fire on idle); INI log line extended.
+  - `tests/combat_strike_tests.cpp` (new) + CTest `combat_strike_thresholds`:
+    defaults, strict boundaries, per-hand symmetry, combined OR gate, the
+    **ADR-0403 guard-raise regression** (raising both hands into guard is never a
+    strike), and that tuning the struct changes the outcome (the INI path).
+  - `CMakeLists.txt`, `riddick_vr.ini`, `tools/riddick_vr.ini.example`,
+    `src/hook/README.md`, `tools/verify_reported_fixes.py` (new #65 invariant),
+    `docs/adr/0437-swing-driven-strike-thresholds.md` (new).
+- Evidence: `build-all.ps1 -Config Release` OK (x86 `opengl32.dll` + x64 host);
+  CTest **8/8 PASS** on x86 **and** x64 (new `combat_strike_thresholds`);
+  `verify_reported_fixes`, `scenario_tests.py --check`, `validate_addresses`,
+  `verify_hook_init`, `test_mos_xmd`, `test_mos_xtc`, `test_xmd_bake`,
+  `test_xmd_export`, `test_xmd_pose`, `test_xsa_anim`, `test_xtc_bake` all PASS.
+- Blocker: **not validated in-headset** — whether the defaults feel right on a
+  real Quest swing (and never fire on a guard raise) is a hardware step; this
+  wake only makes the numbers tunable and pins their semantics. Rigid overlay
+  path unchanged (native hand skinned draw = GH #58/#60).
+- **Next:** headset pass on `Strike*` (and the #62 `Guard*` window / #64
+  `NativeHand*` knobs); then the remaining player-visible items #63 (suppress the
+  engine FP viewmodel — RE still needs the draw gate) and #61 UV validation.
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 29 — 2026-10-16 14:44 (scheduled loop)
 - **Unit:** GH **#64** (native hands flat/2D, out of place, stray procedural
   blocks) — make the native draw read as **solid lit 3D**, remove the floating

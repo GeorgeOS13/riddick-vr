@@ -21,6 +21,7 @@ def main():
     action_map = (ROOT / "src/hook/vr_action_map.h").read_text(encoding="utf-8")
     stance = (ROOT / "src/hook/combat_stance.h").read_text(encoding="utf-8")
     guard_header = (ROOT / "src/hook/combat_guard.h").read_text(encoding="utf-8")
+    strike_header = (ROOT / "src/hook/combat_strike.h").read_text(encoding="utf-8")
     dialogue = (ROOT / "src/hook/dialogue_navigation.h").read_text(encoding="utf-8")
     config = (ROOT / "src/hook/vr_config.cpp").read_text(encoding="utf-8")
     pose_header = (ROOT / "src/hook/native_hand_pose.h").read_text(encoding="utf-8")
@@ -73,6 +74,14 @@ def main():
                                           "guardZMax", "guardMaxHandSpan")) and
             "combat_guard_tests.cpp" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8"),
             "GH #62: the block guard must be a shared, INI-tunable front-of-HMD envelope")
+    require("struct StrikeThresholds" in strike_header and "ClassifyStrike" in strike_header and
+            '#include "combat_strike.h"' in camera and
+            "ClassifyStrike(strikeThresholds," in camera and
+            "GetStrikeThresholds()" in camera and
+            all(f"strike{name}" in config for name in
+                ("ForwardVz", "HookVx", "UppercutVy", "CrossVx")) and
+            "combat_strike_tests.cpp" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8"),
+            "GH #65: strikes must be swing-classified by shared, INI-tunable thresholds")
     require("using VRArmIK::ClampWristOrientation" in hands and "MIN_ELBOW_ANGLE" in ik_header and
             "arm_ik_tests.cpp" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8") and
             "DrawArmSegment(shoulder, elbow" in hands and "m_lastIkFrame" in hand_header and
