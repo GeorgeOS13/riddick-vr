@@ -826,10 +826,27 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
             GLint dstW = m_eyeWidth;
             GLint dstH = m_eyeHeight;
 
-            // GH #43/#44: cinema screen for menus/cinematics (2D frames),
-            // full-bleed immersion for 3D gameplay. Menus often render 3D
-            // backgrounds, so an OS cursor also forces cinema mode.
-            bool isCinema = !OpenGLProxy::Has3DThisFrame() || OpenGLProxy::HasMenuCursor();
+            // GH #43/#44: cinema screen for genuine menus/cinematics (2D frames),
+            // full-bleed immersion for 3D gameplay. Menus can render 3D
+            // backgrounds, so an OS cursor marks "menu" -- but only if it is
+            // *sustained*. A cursor that merely flashes during gameplay must not
+            // flip the whole view to a letterboxed cinema screen (that is the
+            // "black bars while playing" symptom). Engage after ~0.75s of a
+            // visible cursor, release after ~1s of it being hidden.
+            static int s_cursorVisibleFrames = 0;
+            static int s_cursorHiddenFrames = 0;
+            static bool s_cursorMenu = false;
+            if (OpenGLProxy::HasMenuCursor()) {
+                if (s_cursorVisibleFrames < 100000) ++s_cursorVisibleFrames;
+                s_cursorHiddenFrames = 0;
+            } else {
+                if (s_cursorHiddenFrames < 100000) ++s_cursorHiddenFrames;
+                s_cursorVisibleFrames = 0;
+            }
+            if (!s_cursorMenu && s_cursorVisibleFrames >= 45) s_cursorMenu = true;
+            if (s_cursorMenu && s_cursorHiddenFrames >= 60) s_cursorMenu = false;
+
+            bool isCinema = !OpenGLProxy::Has3DThisFrame() || s_cursorMenu;
             m_sharedState.cinemaMode = isCinema;
             {
                 static bool s_lastCinema = false;
