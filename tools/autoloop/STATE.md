@@ -2,6 +2,70 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 14 — 2026-10-16 03:37 (scheduled loop)
+- **Unit:** GH #58 → #46 — pin the `.xmd` `BONEDEFORM` **bone-index space**
+  (the "node index vs `NODEINDICES` position" question left open by Wakes 8–10 /
+  ADR-0417 / ADR-0419).
+- Finding (real evidence, read-only; corpus-wide):
+  - An influence's `bone` byte is a **`matrix_bones` palette index** whenever
+    the trailing `matrix_bones` block is **non-empty** (skeleton node =
+    `matrix_bones[bone]`); only an **empty** palette means the byte is a node
+    index directly. `matrix_map_id` is `-1` for all 692 map-less clusters **and
+    also** for **33** clusters that carry a palette, so the palette *length
+    alone* decides the space (raw tail bytes confirmed: `… ff ff ff ff 18 00 00
+    00 <24 palette bytes>`, id `-1`, count 24).
+  - Decisive (`Riddick_B05.xmd` cluster 1, left arm): raw `0..23` remap through
+    `matrix_bones` to nodes `{38..52, 16, 14, 13, 12, 9, 8, 1, 17, 18}` = the
+    left-arm chain (12 shoulder → 13 → 14 elbow → 16 wrist) **plus five finger
+    chains** (38..52, bind `y ≈ -20.4..-24.9`). Grouped by dominant remapped
+    bone the fingertip geometry (`y -24..-25.4`) falls on the finger bones;
+    read as direct node indices it would bind to pelvis/leg bones (`z 0..32`)
+    while the geometry is at `z 45..52` — impossible. The unskinned shadow body
+    (cluster 6) has an empty palette and uses nodes `0..69` directly.
+  - Corpus (631 models / 4662 clusters / **3103 skinned**): **2411 paletted**
+    (`len==max_bone+1` in 2402; 9 have unused entries) / **692 direct**;
+    `max_bone >= len(palette)` **0**, palette entry `>= NODES.count` **0**,
+    duplicate palette entries **0**, direct `max_bone >= NODES.count` **0**;
+    max palette length **24**. `matrix_map_id` (paletted): `-6:1 -5:2 -4:6
+    -3:2 -2:1166 -1:33 0:721 1:292 2:137 3:50 4:1`; (direct) `-1:692`.
+  - **Still open:** the mesh pose ≠ `NODES` bind pose (the arm mesh is
+    `z ≈ 45..52` while the arm bones bind `z 48.8 → 36.8`), so a correct skinned
+    draw still needs the `.xsa` animation pose (ADR-0422) and the pose/base
+    pairing.
+- Change:
+  - `tools/mos_xmd.py`: `BoneDeform.has_palette()/bone_space()/resolve_bone()/
+    resolved_influences_of()/max_resolved_bone()/used_palette_indices()/
+    palette_fully_used()`; `as_dict` carries `bone_space`/`max_resolved_bone`/
+    `matrix_bones`/`palette_fully_used`; `cluster_meshes()` records the same;
+    `validate()` now enforces the **space-correct** invariants (palette index <
+    palette size, resolved node < `NODES.count`, palette entries < `NODES.count`,
+    no duplicates); `geometry_stats()`/`geometry_summary()` add
+    `paletted_bone_clusters`/`direct_bone_clusters`/`palette_unused_clusters`;
+    `--mesh`/`--cluster` print the space + resolved max node + palette; docstring.
+  - `tools/xmd_export.py`: `bones_used()` → resolved **node** indices;
+    `cluster_skin_dict()` adds `bone_space`/`max_bone`/`max_resolved_bone`/
+    `resolved_influences`; manifest records `bone_space`.
+  - `tools/xmd_bake.py`: manifest records `bone_space` + resolved bones.
+  - `tools/test_mos_xmd.py`: matrix-map test made shipping-valid; **+6** tests
+    (palette space, direct space, `-1`-with-palette, index/entry out-of-range,
+    duplicate entries, unused entries). `tools/test_xmd_export.py`: +1 palette
+    manifest/skin round-trip test.
+  - Regenerated `docs/rea/reference/{native_hand_mesh,riddick_b05_export,
+    pa2_hand_01_export}.json`; new `docs/adr/0423-…`; ADR-0417 + ADR-0419 +
+    `docs/rea/mos-xmd-format.md` corrected.
+- Evidence: `mos_xmd.py --inventory <game>\Content\Models --check` → **631/631
+  `ok`, 0 FAIL** (space-correct skin checks). `test_mos_xmd.py` (40) PASS;
+  `test_xmd_export.py`, `test_xmd_bake.py`, `test_xsa_anim.py`,
+  `validate_addresses.py`, `verify_hook_init.py`, `verify_reported_fixes.py`,
+  `scenario_tests.py --check` all PASS. `xmd_bake.py --verify
+  src/hook/native_hand_mesh_data.h` → still matches a fresh bake (geometry
+  bytes unchanged). No C++ changed → no `build-all.ps1`/CTest rerun.
+- Blocker: none. **Next:** pair the resolved bone space with the `.xsa` clip
+  pose (ADR-0422) — resolve the `TRACKS`→rotation-slot binding and the 7
+  `QUATERNIONINDICES` re-base sets, bake a posed arm, then wire
+  `VRHandRenderer` behind a config flag (procedural overlay kept as fallback).
+- Branch: committed on `main` (`ed92d3d`), pushed to `origin/main`.
+
 ## Wake 13 — 2026-10-16 03:35 (scheduled loop)
 - **Unit:** GH #58 → #46 — pin the `.xsa` **`SEQUENCES` table** (each clip's key
   and time windows) and the **skeleton animation-slot space**, i.e. the first
