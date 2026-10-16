@@ -16,10 +16,13 @@ work this wake, then stop. Keep total effort bounded (<= 4 concurrent subagents)
    --oneline -5`. Read `tools/autoloop/STATE.md` (state from prior wakes) and the
    tail of `tools/autoloop/logs/`.
 2. `gh issue list --state open`. **Player-visible priority (do these first):**
-   - **#67 (TOP) Drive the engine's own first-person arms with the controller
-     (F.E.A.R.-VR style)** — hook the FP viewmodel draw + matrix and re-project
-     into head/controller space; stop trying to make the re-baked overlay look
-     right. This is the real fix for the hands.
+   - **#68 (ITERATION VEHICLE) OpenXR simulator harness** — use
+     `python tools/xrsim.py --scenario tools/scenarios/<x>.json` to reproduce and
+     validate player-visible fixes *without* a headset (it sets `RIDDICKVR_SIM=1`
+     so no desktop input). Extend it to cover whatever you are fixing.
+   - **#67 (TOP hand fix) Drive the engine's own first-person arms with the
+     controller (F.E.A.R.-VR style)** — hook the FP viewmodel draw + matrix and
+     re-project into head/controller space.
    - **#64 Native hands look flat/2D, out of place, and leave stray procedural
      blocks** — only fallback work once #67 is underway.
    - **#61 Native hands untextured (grey/white)** — the baked diffuse decodes
@@ -77,13 +80,13 @@ work this wake, then stop. Keep total effort bounded (<= 4 concurrent subagents)
    and stop. Do not spin.
 
 ## Hard rules
-- **NEVER launch the game or anything that injects input.** Do NOT run
-  `tools/semi_play.py`, `tools/self_test_pipeline.py`, `tools/vr-worker.ps1`, or
-  launch `DarkAthena.exe`/`Riddick.exe`/`riddickvr-host.exe`/`opengl32.dll`
-  in a way that reaches a real window. The hook's `SendInput` gesture layer
+- **Input safety.** Never run anything that injects desktop input into the live
+  desktop: NOT `tools/semi_play.py`, NOT `tools/self_test_pipeline.py`, NOT
+  `tools/vr-worker.ps1`. The hook's `SendInput` gesture layer
   (`src/hook/gesture_tap.cpp`) types into the **live desktop** when the game is
-  foreground and will hijack the user's keyboard/mouse. Build and run only
-  headless/offline checks that do not synthesize input.
+  foreground. The ONE allowed exception is the simulator harness
+  `python tools/xrsim.py ...` (#68), which sets `RIDDICKVR_SIM=1` so the hook's
+  SendInput is suppressed — use it to reproduce/validate player-visible fixes.
 - Do NOT modify anything under the game install directory. No writing game assets.
 - Do NOT `git push --force`, delete branches, or rewrite `main`.
 - Only evidence-backed changes. Separate observations from inferences.

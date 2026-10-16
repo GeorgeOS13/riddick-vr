@@ -1,0 +1,490 @@
+{
+  "passed": false,
+  "checks": [
+    {
+      "check": "frame_budget",
+      "ok": false,
+      "detail": "n=180 mean=58.90 max=858.77 over=103 budget=11.11",
+      "group": "frame_budget"
+    },
+    {
+      "check": "both_eyes_non_black",
+      "ok": false,
+      "detail": "L=False R=False -48/-4",
+      "group": "stereo",
+      "frame": 1
+    },
+    {
+      "check": "same_eye_resolution",
+      "ok": true,
+      "detail": " -48/-4",
+      "group": "stereo",
+      "frame": 1
+    },
+    {
+      "check": "no_vertical_disparity",
+      "ok": false,
+      "detail": "dy=-4 -48/-4",
+      "group": "stereo",
+      "frame": 1
+    },
+    {
+      "check": "horizontal_disparity_present",
+      "ok": true,
+      "detail": "dx=-48 -48/-4",
+      "group": "stereo",
+      "frame": 1
+    },
+    {
+      "check": "not_mono_duplicate",
+      "ok": true,
+      "detail": "eyes identical -48/-4",
+      "group": "stereo",
+      "frame": 1
+    },
+    {
+      "check": "both_eyes_non_black",
+      "ok": false,
+      "detail": "L=False R=False -48/-4",
+      "group": "stereo",
+      "frame": 15
+    },
+    {
+      "check": "same_eye_resolution",
+      "ok": true,
+      "detail": " -48/-4",
+      "group": "stereo",
+      "frame": 15
+    },
+    {
+      "check": "no_vertical_disparity",
+      "ok": false,
+      "detail": "dy=-4 -48/-4",
+      "group": "stereo",
+      "frame": 15
+    },
+    {
+      "check": "horizontal_disparity_present",
+      "ok": true,
+      "detail": "dx=-48 -48/-4",
+      "group": "stereo",
+      "frame": 15
+    },
+    {
+      "check": "not_mono_duplicate",
+      "ok": true,
+      "detail": "eyes identical -48/-4",
+      "group": "stereo",
+      "frame": 15
+    },
+    {
+      "check": "both_eyes_non_black",
+      "ok": false,
+      "detail": "L=False R=False -48/-4",
+      "group": "stereo",
+      "frame": 30
+    },
+    {
+      "check": "same_eye_resolution",
+      "ok": true,
+      "detail": " -48/-4",
+      "group": "stereo",
+      "frame": 30
+    },
+    {
+      "check": "no_vertical_disparity",
+      "ok": false,
+      "detail": "dy=-4 -48/-4",
+      "group": "stereo",
+      "frame": 30
+    },
+    {
+      "check": "horizontal_disparity_present",
+      "ok": true,
+      "detail": "dx=-48 -48/-4",
+      "group": "stereo",
+      "frame": 30
+    },
+    {
+      "check": "not_mono_duplicate",
+      "ok": true,
+      "detail": "eyes identical -48/-4",
+      "group": "stereo",
+      "frame": 30
+    },
+    {
+      "check": "both_eyes_non_black",
+      "ok": true,
+      "detail": "L=True R=True 0/0",
+      "group": "stereo",
+      "frame": 45
+    },
+    {
+      "check": "same_eye_resolution",
+      "ok": true,
+      "detail": " 0/0",
+      "group": "stereo",
+      "frame": 45
+    },
+    {
+      "check": "no_vertical_disparity",
+      "ok": true,
+      "detail": "dy=0 0/0",
+      "group": "stereo",
+      "frame": 45
+    },
+    {
+      "check": "horizontal_disparity_present",
+      "ok": false,
+      "detail": "dx=0 0/0",
+      "group": "stereo",
+      "frame": 45
+    },
+    {
+      "check": "not_mono_duplicate",
+      "ok": false,
+      "detail": "eyes identical 0/0",
+      "group": "stereo",
+      "frame": 45
+    },
+    {
+      "check": "both_eyes_non_black",
+      "ok": true,
+      "detail": "L=True R=True 0/0",
+      "group": "stereo",
+      "frame": 60
+    },
+    {
+      "check": "same_eye_resolution",
+      "ok": true,
+      "detail": " 0/0",
+      "group": "stereo",
+      "frame": 60
+    },
+    {
+      "check": "no_vertical_disparity",
+      "ok": true,
+      "detail": "dy=0 0/0",
+      "group": "stereo",
+      "frame": 60
+    },
+    {
+      "check": "horizontal_disparity_present",
+      "ok": false,
+      "detail": "dx=0 0/0",
+      "group": "stereo",
+      "frame": 60
+    },
+    {
+      "check": "not_mono_duplicate",
+      "ok": false,
+      "detail": "eyes identical 0/0",
+      "group": "stereo",
+      "frame": 60
+    },
+    {
+      "check": "both_eyes_non_black",
+      "ok": true,
+      "detail": "L=True R=True 0/0",
+      "group": "stereo",
+      "frame": 75
+    },
+    {
+      "check": "same_eye_resolution",
+      "ok": true,
+      "detail": " 0/0",
+      "group": "stereo",
+      "frame": 75
+    },
+    {
+      "check": "no_vertical_disparity",
+      "ok": true,
+      "detail": "dy=0 0/0",
+      "group": "stereo",
+      "frame": 75
+    },
+    {
+      "check": "horizontal_disparity_present",
+      "ok": false,
+      "detail": "dx=0 0/0",
+      "group": "stereo",
+      "frame": 75
+    },
+    {
+      "check": "not_mono_duplicate",
+      "ok": false,
+      "detail": "eyes identical 0/0",
+      "group": "stereo",
+      "frame": 75
+    },
+    {
+      "check": "both_eyes_non_black",
+      "ok": true,
+      "detail": "L=True R=True 0/0",
+      "group": "stereo",
+      "frame": 90
+    },
+    {
+      "check": "same_eye_resolution",
+      "ok": true,
+      "detail": " 0/0",
+      "group": "stereo",
+      "frame": 90
+    },
+    {
+      "check": "no_vertical_disparity",
+      "ok": true,
+      "detail": "dy=0 0/0",
+      "group": "stereo",
+      "frame": 90
+    },
+    {
+      "check": "horizontal_disparity_present",
+      "ok": false,
+      "detail": "dx=0 0/0",
+      "group": "stereo",
+      "frame": 90
+    },
+    {
+      "check": "not_mono_duplicate",
+      "ok": false,
+      "detail": "eyes identical 0/0",
+      "group": "stereo",
+      "frame": 90
+    },
+    {
+      "check": "both_eyes_non_black",
+      "ok": true,
+      "detail": "L=True R=True 0/0",
+      "group": "stereo",
+      "frame": 105
+    },
+    {
+      "check": "same_eye_resolution",
+      "ok": true,
+      "detail": " 0/0",
+      "group": "stereo",
+      "frame": 105
+    },
+    {
+      "check": "no_vertical_disparity",
+      "ok": true,
+      "detail": "dy=0 0/0",
+      "group": "stereo",
+      "frame": 105
+    },
+    {
+      "check": "horizontal_disparity_present",
+      "ok": false,
+      "detail": "dx=0 0/0",
+      "group": "stereo",
+      "frame": 105
+    },
+    {
+      "check": "not_mono_duplicate",
+      "ok": false,
+      "detail": "eyes identical 0/0",
+      "group": "stereo",
+      "frame": 105
+    },
+    {
+      "check": "both_eyes_non_black",
+      "ok": true,
+      "detail": "L=True R=True 0/0",
+      "group": "stereo",
+      "frame": 120
+    },
+    {
+      "check": "same_eye_resolution",
+      "ok": true,
+      "detail": " 0/0",
+      "group": "stereo",
+      "frame": 120
+    },
+    {
+      "check": "no_vertical_disparity",
+      "ok": true,
+      "detail": "dy=0 0/0",
+      "group": "stereo",
+      "frame": 120
+    },
+    {
+      "check": "horizontal_disparity_present",
+      "ok": false,
+      "detail": "dx=0 0/0",
+      "group": "stereo",
+      "frame": 120
+    },
+    {
+      "check": "not_mono_duplicate",
+      "ok": false,
+      "detail": "eyes identical 0/0",
+      "group": "stereo",
+      "frame": 120
+    },
+    {
+      "check": "both_eyes_non_black",
+      "ok": false,
+      "detail": "L=False R=False -48/-4",
+      "group": "stereo",
+      "frame": 135
+    },
+    {
+      "check": "same_eye_resolution",
+      "ok": true,
+      "detail": " -48/-4",
+      "group": "stereo",
+      "frame": 135
+    },
+    {
+      "check": "no_vertical_disparity",
+      "ok": false,
+      "detail": "dy=-4 -48/-4",
+      "group": "stereo",
+      "frame": 135
+    },
+    {
+      "check": "horizontal_disparity_present",
+      "ok": true,
+      "detail": "dx=-48 -48/-4",
+      "group": "stereo",
+      "frame": 135
+    },
+    {
+      "check": "not_mono_duplicate",
+      "ok": true,
+      "detail": "eyes identical -48/-4",
+      "group": "stereo",
+      "frame": 135
+    },
+    {
+      "check": "both_eyes_non_black",
+      "ok": true,
+      "detail": "L=True R=True 0/0",
+      "group": "stereo",
+      "frame": 150
+    },
+    {
+      "check": "same_eye_resolution",
+      "ok": true,
+      "detail": " 0/0",
+      "group": "stereo",
+      "frame": 150
+    },
+    {
+      "check": "no_vertical_disparity",
+      "ok": true,
+      "detail": "dy=0 0/0",
+      "group": "stereo",
+      "frame": 150
+    },
+    {
+      "check": "horizontal_disparity_present",
+      "ok": false,
+      "detail": "dx=0 0/0",
+      "group": "stereo",
+      "frame": 150
+    },
+    {
+      "check": "not_mono_duplicate",
+      "ok": false,
+      "detail": "eyes identical 0/0",
+      "group": "stereo",
+      "frame": 150
+    },
+    {
+      "check": "both_eyes_non_black",
+      "ok": true,
+      "detail": "L=True R=True 0/0",
+      "group": "stereo",
+      "frame": 165
+    },
+    {
+      "check": "same_eye_resolution",
+      "ok": true,
+      "detail": " 0/0",
+      "group": "stereo",
+      "frame": 165
+    },
+    {
+      "check": "no_vertical_disparity",
+      "ok": true,
+      "detail": "dy=0 0/0",
+      "group": "stereo",
+      "frame": 165
+    },
+    {
+      "check": "horizontal_disparity_present",
+      "ok": false,
+      "detail": "dx=0 0/0",
+      "group": "stereo",
+      "frame": 165
+    },
+    {
+      "check": "not_mono_duplicate",
+      "ok": false,
+      "detail": "eyes identical 0/0",
+      "group": "stereo",
+      "frame": 165
+    },
+    {
+      "check": "both_eyes_non_black",
+      "ok": true,
+      "detail": "L=True R=True 0/0",
+      "group": "stereo",
+      "frame": 180
+    },
+    {
+      "check": "same_eye_resolution",
+      "ok": true,
+      "detail": " 0/0",
+      "group": "stereo",
+      "frame": 180
+    },
+    {
+      "check": "no_vertical_disparity",
+      "ok": true,
+      "detail": "dy=0 0/0",
+      "group": "stereo",
+      "frame": 180
+    },
+    {
+      "check": "horizontal_disparity_present",
+      "ok": false,
+      "detail": "dx=0 0/0",
+      "group": "stereo",
+      "frame": 180
+    },
+    {
+      "check": "not_mono_duplicate",
+      "ok": false,
+      "detail": "eyes identical 0/0",
+      "group": "stereo",
+      "frame": 180
+    },
+    {
+      "group": "interaction",
+      "check": "marker:COMBAT MODE entered",
+      "ok": false,
+      "detail": "fresh log"
+    },
+    {
+      "group": "interaction",
+      "check": "marker:RIOT BATON ARC JAB",
+      "ok": false,
+      "detail": "fresh log"
+    },
+    {
+      "check": "no_green_chroma_glitch",
+      "ok": true,
+      "detail": "0 green px",
+      "group": "comfort"
+    },
+    {
+      "check": "has_content",
+      "ok": true,
+      "detail": "rows=634 cols=1074",
+      "group": "comfort"
+    }
+  ]
+}
