@@ -822,7 +822,11 @@ bool VRHandRenderer::DrawNativeHand(HandSide side) {
     const float r = textured ? 1.0f : 0.55f;
     const float g = textured ? 1.0f : 0.42f;
     const float b = textured ? 1.0f : 0.33f;
-    const float f = (std::clamp)(m_currentFade, 0.0f, 1.0f);
+    // GH #64: native hands must never inherit the overlay's cull-away fade.
+    // The 0.25 fade existed to hide the *procedural* hands when the engine's own
+    // arms dominate; with native hands there is nothing to hide from, and the
+    // fade just made them translucent. Keep them fully opaque.
+    const float f = 1.0f;
     const bool flipV = g_vrConfig.nativeHandTextureVFlip != 0;
 
     s_gl.glBegin(GL_TRIANGLES);
