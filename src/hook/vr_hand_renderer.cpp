@@ -676,7 +676,7 @@ bool VRHandRenderer::DrawNativeHand(HandSide side) {
     // Warm inmate skin tone approximating the RIDDICK_ARMSCAR_D diffuse, with a
     // two-sided lambert term from the baked normals so the mesh reads as a hand
     // rather than a flat grey blob. The real .xtc diffuse texture is not yet
-    // bound (tracked as GH #60); this is the skin-tone fallback.
+    // bound (tracked as GH #61); this is the skin-tone fallback.
     const float r = 0.55f, g = 0.42f, b = 0.33f;
     const float f = (std::clamp)(m_currentFade, 0.0f, 1.0f);
     const float lx = 0.35f, ly = 0.82f, lz = 0.45f; // hand-local light dir
