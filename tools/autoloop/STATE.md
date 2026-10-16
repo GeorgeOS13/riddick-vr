@@ -2,6 +2,77 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 37 — 2026-10-16 17:46 (scheduled loop)
+- **Unit:** GH **#64** (→ #58/#46) — fix the **native-hand placement** so it is
+  side-symmetric and pose-stable, and correct the unsupported "file geometry IS
+  the `NODES` bind pose" record left by wake 36. One concrete, offline-verifiable
+  defect, with the record correction as an honest rider.
+- Finding 1 (placement defect, decisive, from the committed AABBs): ADR-0427
+  derived the arm's long axis as the mesh AABB's **largest extent**. That holds
+  for the file geometry but not for the ADR-0443 **posed** variant: the posed
+  right arm's AABB becomes `x 7.93 / y 7.82 / z 8.25` (nearly cubic), so the
+  largest-extent rule picks **Z**, and the placement becomes `up = model Y`,
+  `backward = -model Z`, anchor `z = 54.61` — the right hand rotated ~90° about
+  the longitudinal axis, mis-anchored, and no longer the mirror of the left
+  (left stays `long_axis = Y`, basis `X(-1,0,0) Y(0,0,1) Z(0,1,0)`, anchor
+  `y = -26.07`). A ~4% extent difference flips the whole frame. Enabled by
+  `NativeHandPose=1` (default off), but shipped code.
+- Finding 2 (record correction, decisive): `tools/xmd_fk.py --check`'s
+  "the file geometry IS the bind pose" claim is a **tautology**. At bind every FK
+  world map is the identity, so the weighted blend equals `position·Σw` and
+  `pose_drift_max ≡ 0` for *any* stored geometry — it tests the recipe, not the
+  content, and cannot detect a cluster stored in a different reference pose.
+  ADR-0424's direct measurement stands and reproduces: `xmd_pose` relations
+  `c1↔c6 = 26.582`, `c2↔c6 = 27.273` (arms vs body) vs `c0↔c6 = 0.931`
+  (legs↔body), arm/body AABBs disjoint. The ADR-0441 recipe stays valid (it
+  mirrors the engine, which applies the same deltas to the stored geometry); only
+  the wording is wrong.
+- Change (code/asset/tests/docs):
+  - `tools/xmd_bake.py`: new `_long_axis()`; bakes `arm_axis` (model axis 0/1/2
+    of the file-geometry long direction) into the record, the emitted
+    initializer and the manifest; docstring corrected.
+  - `src/hook/native_hand_mesh.h`: `int arm_axis` field; the provenance comment
+    rewritten to the measured truth (the ADR-0442 check is tautological;
+    ADR-0424 stands).
+  - `src/hook/native_hand_pose.h`: new
+    `ComputeNativeHandPlacementAlongAxis(min,max,isLeft,long_axis,scale)`;
+    `ComputeNativeHandPlacement` keeps its signature and now selects the largest
+    extent and delegates.
+  - `src/hook/vr_hand_renderer.cpp`: `DrawNativeHand` uses `mesh->arm_axis` when
+    `0..2`, else the legacy heuristic.
+  - `src/hook/native_hand_mesh_data.h` (regenerated; 4 meshes / 1548 verts / 2610
+    tris + 870 posed; `arm_axis 1` on all four).
+  - `tests/native_hand_pose_tests.cpp`: explicit-axis override, out-of-range /
+    zero-extent rejection, and **both arms, bind and posed, mirror-symmetric**
+    (backward is ±model Y, never flipped to Z).
+  - `tests/native_hand_mesh_tests.cpp`: `arm_axis` frozen per mesh + "is the
+    file-geometry long axis".
+  - `tools/test_xmd_bake.py` (+2): baked axis recorded; `_long_axis` ties.
+  - `tools/test_xmd_fk.py` (+1): `test_bind_check_is_tautological` — a geometry
+    shifted >5 units from every bone still yields `pose_drift_max < 1e-12`, so
+    `--check` would not flag it.
+  - `tools/verify_reported_fixes.py`: GH #64 invariant (baked axis + the
+    corrected "BIND-POSE PROVENANCE" note).
+  - `src/hook/README.md`; `docs/adr/0444-native-hand-placement-baked-axis.md`
+    (new); ADR-0443 gets a correction pointer.
+- Evidence (read-only, 2004 EFBB): `python tools/xmd_pose.py --model
+  .../Riddick_B05.xmd` (relations above); `tools/xmd_bake.py --cpp … --manifest …`
+  wrote 4 meshes and `--verify` → OK; `build-all.ps1 -Config Release` OK (x86
+  `opengl32.dll` + x64 host); CTest **9/9 PASS** on x86 **and** x64; all 8
+  `tools/test_*.py` + `validate_addresses` + `verify_hook_init` +
+  `verify_reported_fixes` + `scenario_tests.py --check` PASS.
+- Blocker: none. Caveat (not claimed): `arm_axis` fixes the frame's *stability
+  and symmetry*, not its absolute orientation — no headset was used, so
+  `NativeHandYaw/Pitch/Roll`/scale/offsets still need on-headset tuning;
+  `NativeHands`/`NativeHandPose` stay off by default; ADR-0424's raised
+  reference pose (the missing per-cluster transform, GH #59) is still open.
+- **Next:** headset A/B `NativeHands=1` + `NativeHandPose=0/1` with the placement
+  knobs (the two hands are now mirror-consistent), then land the GH #34 runtime
+  read of the live `poseDesc` matrix vector and cross-check it against `xmd_fk`;
+  or chase the per-cluster reference transform that reconciles ADR-0424's raised
+  arm pose with the `NODES` bind.
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 36 — 2026-10-16 17:22 (scheduled loop)
 - **Unit:** GH **#58** (→ #46/#64) — pin the **first-person arm pose source** and
   make the offline pose *drawable*: bake a posed variant of the native hand
