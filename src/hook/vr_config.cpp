@@ -89,9 +89,14 @@ void LoadVRConfig() {
         cfg.nativeHandOffsetX = ClampF(ReadFloat(iniPath, "NativeHandOffsetX", cfg.nativeHandOffsetX), -1.0f, 1.0f);
         cfg.nativeHandOffsetY = ClampF(ReadFloat(iniPath, "NativeHandOffsetY", cfg.nativeHandOffsetY), -1.0f, 1.0f);
         cfg.nativeHandOffsetZ = ClampF(ReadFloat(iniPath, "NativeHandOffsetZ", cfg.nativeHandOffsetZ), -1.0f, 1.0f);
-        VR_LOG_INFO("VR config loaded from %s (snap=%.0f move_dz=%.2f comfort=%d seated=%d scale=%.2f paw=%d native_hands=%d)",
+        // GH #61: bake texture bind (provisional; the flat skin tone stays the
+        // fallback even when the texture is on but unavailable).
+        cfg.nativeHandTexture = ReadInt(iniPath, "NativeHandTexture", cfg.nativeHandTexture) ? 1 : 0;
+        cfg.nativeHandTextureVFlip = ReadInt(iniPath, "NativeHandTextureVFlip", cfg.nativeHandTextureVFlip) ? 1 : 0;
+        VR_LOG_INFO("VR config loaded from %s (snap=%.0f move_dz=%.2f comfort=%d seated=%d scale=%.2f paw=%d native_hands=%d native_tex=%d)",
             iniPath, cfg.snapAngleDeg, cfg.moveDeadzone, cfg.comfortEnabled,
-            cfg.seated, cfg.worldScale, cfg.southpaw, cfg.nativeHands);
+            cfg.seated, cfg.worldScale, cfg.southpaw, cfg.nativeHands,
+            cfg.nativeHandTexture);
     } else {
         VR_LOG_INFO("VR config: no riddick_vr.ini found, using defaults");
     }

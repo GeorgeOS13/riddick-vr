@@ -43,6 +43,12 @@ struct VRConfig {
     float nativeHandOffsetX = 0.0f;
     float nativeHandOffsetY = 0.0f;
     float nativeHandOffsetZ = 0.0f;
+    // GH #61: bind the baked Riddick skin/scar diffuse (DXT1, baked from
+    // Models.xtc) on the native hand mesh. V-flip is provisional and needs
+    // on-headset validation (like the placement above); 0 = keep the UVs as
+    // baked.
+    int nativeHandTexture = 1;
+    int nativeHandTextureVFlip = 0;
 };
 
 extern VRConfig g_vrConfig;

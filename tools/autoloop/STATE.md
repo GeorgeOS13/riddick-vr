@@ -2,6 +2,52 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 26 — 2026-10-16 12:20 (scheduled loop)
+- **Unit:** GH **#61** (native-hand texture) — close ADR-0432's "Next": **bind
+  the real `Riddick_ArmScar_D` diffuse** on `VRHandRenderer::DrawNativeHand`,
+  shipped as a compile-in DXT1 asset (no 685 MB runtime file I/O).
+- Change (code/tools/docs):
+  - `tools/xtc_bake.py` (new): reads an image's mip out of a `.xtc` via
+    `mos_xtc`, requires a **compressed DXT1** mip, bakes the BC1 blocks
+    **verbatim** into a C++ header plus decoded reference pixels + a full-RGBA
+    checksum; `--cpp/--manifest/--verify/--json`; canonical set =
+    `Riddick_ArmScar_D` **mip 1** (256x512).
+  - `src/hook/native_hand_texture_data.h` (generated, 411 KB): 65536 DXT1
+    block bytes, `sha256 21c57eca…021e`, `rgba_checksum 0x05308AE2`;
+    `docs/rea/reference/native_hand_texture.json`.
+  - `src/hook/bc1.h` (new): `Bc1DecodeBlock`/`Bc1DecodeSurface` — integer 5/6/5
+    expansion + integer palette interpolation, byte-for-byte the same maths as
+    `mos_xtc.bc1_decode`.
+  - `src/hook/native_hand_texture.h` (new): `NativeHandTexture` +
+    `FindNativeHandTexture`, header-only.
+  - `src/hook/vr_hand_renderer.{h,cpp}`: `EnsureNativeHandTexture()` lazily
+    creates one `GL_TEXTURE_2D` (RGBA8 upload, no GL extension), binds it for
+    the native triangles only with `GL_MODULATE` (fade + lambert preserved) and
+    emits `glTexCoord2f`; `GL_TEXTURE_BIT` added to the `glPushAttrib` mask; the
+    flat skin tone stays the fallback. New GL dispatch:
+    `glGenTextures/glBindTexture/glTexImage2D/glTexParameteri/glTexEnvi/
+    glTexCoord2f`.
+  - `src/hook/vr_config.{h,cpp}`: `NativeHandTexture` (default 1),
+    `NativeHandTextureVFlip` (default 0, **provisional**).
+  - `tests/native_hand_texture_tests.cpp` (new) + CTest
+    `native_hand_texture_asset`; `CMakeLists.txt`, `riddick_vr.ini`,
+    `tools/riddick_vr.ini.example`, `src/hook/README.md`,
+    `docs/adr/0433-native-hand-texture-asset.md` (new; 0427/0432 cross-refs),
+    `docs/rea/mos-xmd-format.md`, `.github/workflows/vr-worker.yml`.
+- Evidence: `xtc_bake.py` wrote 1 texture / 65536 block bytes and `--verify` ->
+  OK; `mos_xtc --decode Riddick_ArmScar_D` viewed (skin + stitched scar);
+  `build-all.ps1 -Config Release` OK (x86 `opengl32.dll` + x64 host); CTest
+  **6/6 PASS** on x86 **and** x64 (new test proves the C++ BC1 decoder
+  reproduces the Python reference: full-surface checksum + 8 sample pixels, plus
+  hand-computed blocks and edge-clip no-overrun); `test_xtc_bake.py` (6), all
+  other python verifiers + `scenario_tests.py --check` PASS.
+- Blocker: none. **Next:** headset validation of UV orientation
+  (`NativeHandTextureVFlip`) + ADR-0427 placement; optionally bake mip 0
+  (`--mip 0`) for full res and add the `_N`/`_S` (raw/DXT) maps once the
+  raw/linear channel order is decoded. Keep `NativeHands`/`NativeHandTexture`
+  as fallback-gated flags.
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 25 — 2026-10-16 11:18 (scheduled loop)
 - **Unit:** GH **#61** (native-hand texture) — decode the shipped **`.xtc`
   packed block**: recover the per-image **mip chain** and its **S3TC codec**, so

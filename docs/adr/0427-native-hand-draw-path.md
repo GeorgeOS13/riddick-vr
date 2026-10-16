@@ -116,3 +116,11 @@ The renderer path:
   `src/hook/vr_config.{h,cpp}`, `tests/native_hand_pose_tests.cpp`,
   `CMakeLists.txt`, `tools/riddick_vr.ini.example`, `riddick_vr.ini`
 - cross-refs: ADR-0414..0426, GH #46/#55/#58/#59
+
+## Update (GH #61, ADR-0433)
+The flat skin tone is no longer the only colour: the real `RIDDICK_ARMSCAR_D`
+diffuse is baked from `Content/Models.xtc` (`tools/xtc_bake.py`) and modulated
+over the native triangles by `DrawNativeHand` (DXT1 blocks decoded by
+`src/hook/bc1.h`, `GL_MODULATE`). Gated by the new `[VR] NativeHandTexture`; the
+flat tone remains the fallback. The UV V-flip is provisional and still needs
+on-headset validation, exactly like the placement above.

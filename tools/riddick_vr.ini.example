@@ -46,3 +46,11 @@ NativeHandScale=0.033
 NativeHandOffsetX=0
 NativeHandOffsetY=0
 NativeHandOffsetZ=0
+; --- Native hand texture (GH #61) ---
+; 1 = modulate the real Riddick skin/scar diffuse (DXT1, baked from the game's
+; Content/Models.xtc) over the lit native hand mesh; the flat skin tone stays
+; the fallback when the texture is disabled or unavailable.
+; VFlip is PROVISIONAL (UV orientation is not yet validated on a headset);
+; set to 1 if the texture reads vertically mirrored.
+NativeHandTexture=1
+NativeHandTextureVFlip=0

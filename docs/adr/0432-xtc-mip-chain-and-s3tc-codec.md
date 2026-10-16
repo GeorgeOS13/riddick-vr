@@ -137,6 +137,12 @@ them.
   `VRHandRenderer::DrawNativeHand` (or bake it into a small in-tree texture
   asset, mirroring the ADR-0420 mesh bake).
 
+  **Resolved (ADR-0433, GH #61):** the in-tree texture asset was chosen —
+  `tools/xtc_bake.py` bakes the verbatim DXT1 blocks (mip 1, 256x512) into
+  `src/hook/native_hand_texture_data.h`; `src/hook/bc1.h` decodes them and
+  `DrawNativeHand` binds the result. Validation on a headset (UV V-flip) is
+  still open.
+
 ## Files
 - `tools/mos_xtc.py`, `tools/test_mos_xtc.py`, `docs/rea/mos-xmd-format.md`,
   `docs/adr/0432-xtc-mip-chain-and-s3tc-codec.md`.

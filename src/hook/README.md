@@ -26,3 +26,18 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   frame (unit-tested by `native_hand_pose_mapping`,
   `tests/native_hand_pose_tests.cpp`).
 
+## Native hand diffuse texture (GH #61)
+- `native_hand_texture.h` + generated `native_hand_texture_data.h`: the real
+  Riddick skin/scar diffuse (`Riddick_ArmScar_D`) baked from the shipped
+  `Content/Models.xtc` by `tools/xtc_bake.py`, stored as the engine's own
+  **DXT1/BC1** blocks (no re-encode).
+- `bc1.h` decodes those blocks to RGBA8 (`VRHandRenderer::DrawNativeHand`
+  uploads a fixed-function `GL_TEXTURE_2D` and modulates it under the existing
+  lit colour); unit-tested by `native_hand_texture_asset`
+  (`tests/native_hand_texture_tests.cpp`), which cross-checks the C++ decoder
+  against reference pixels + checksum produced by the independent Python decoder
+  in `tools/mos_xtc.py`.
+- Gated by `[VR] NativeHands` (mesh) and `[VR] NativeHandTexture`; the flat
+  skin tone is retained as the fallback. Only active when `NativeHands` is set.
+
+

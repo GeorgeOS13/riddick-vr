@@ -325,6 +325,13 @@ The three game packs share one layout, parsed by `tools/mos_xtc.py`:
    engine reader is `CTextureContainer_VirtualXTC2::ReadTexture` /
    `GetTextureMipMap` / `CImage::ReadHeader` (ADR-0432).
 
+5. `tools/xtc_bake.py` bakes one **DXT1** mip of an image into a compile-in C++
+   asset (`src/hook/native_hand_texture_data.h`), storing the shipped BC1 blocks
+   verbatim plus decoded reference pixels/checksum; `src/hook/bc1.h` decodes them
+   at runtime and `VRHandRenderer::DrawNativeHand` binds the result (ADR-0433,
+   GH #61). Canonical bake: `Riddick_ArmScar_D` mip 1 (256x512). For an
+   inventory of a single image: `xtc_bake.py --image NAME --mip N --json`.
+
 Caveats: the node `count` field (`+0x28`) is 2-14 higher than the framed-record
 count (e.g. Models says 914, frames 901) - the framing tiles exactly, so the
 framed records are authoritative. `Offline01.xtc` uses a *different*, nested

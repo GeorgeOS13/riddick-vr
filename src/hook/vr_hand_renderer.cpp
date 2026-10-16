@@ -3,10 +3,13 @@
 #include "vr_config.h" // Track C #13: world scale
 #include "native_hand_mesh.h" // GH #46: baked native arm/hand geometry
 #include "native_hand_pose.h" // GH #46: model-space -> hand-local placement
+#include "native_hand_texture.h" // GH #61: baked Riddick skin diffuse (DXT1)
+#include "bc1.h" // GH #61: BC1/DXT1 block decoder
 #include "opengl_proxy.h"
 #include "logging.h"
 #include <cmath>
 #include <algorithm>
+#include <vector>
 
 namespace RiddickVR {
 
@@ -42,6 +45,12 @@ typedef void (APIENTRY *glBlendFunc_t)(GLenum sfactor, GLenum dfactor);
 typedef void (APIENTRY *glRotatef_t)(GLfloat angle, GLfloat x, GLfloat y, GLfloat z);
 typedef void (APIENTRY *glTranslatef_t)(GLfloat x, GLfloat y, GLfloat z);
 typedef void (APIENTRY *glGetIntegerv_t)(GLenum pname, GLint *params);
+typedef void (APIENTRY *glGenTextures_t)(GLsizei n, GLuint *textures);
+typedef void (APIENTRY *glBindTexture_t)(GLenum target, GLuint texture);
+typedef void (APIENTRY *glTexImage2D_t)(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const GLvoid *pixels);
+typedef void (APIENTRY *glTexParameteri_t)(GLenum target, GLenum pname, GLint param);
+typedef void (APIENTRY *glTexEnvi_t)(GLenum target, GLenum pname, GLint param);
+typedef void (APIENTRY *glTexCoord2f_t)(GLfloat s, GLfloat t);
 
 typedef void (APIENTRY *PFNGLUSEPROGRAMPROC)(GLuint program);
 typedef void (APIENTRY *PFNGLBINDBUFFERPROC)(GLenum target, GLuint buffer);
@@ -77,6 +86,12 @@ struct GLDispatch {
     glRotatef_t glRotatef = nullptr;
     glTranslatef_t glTranslatef = nullptr;
     glGetIntegerv_t glGetIntegerv = nullptr;
+    glGenTextures_t glGenTextures = nullptr;
+    glBindTexture_t glBindTexture = nullptr;
+    glTexImage2D_t glTexImage2D = nullptr;
+    glTexParameteri_t glTexParameteri = nullptr;
+    glTexEnvi_t glTexEnvi = nullptr;
+    glTexCoord2f_t glTexCoord2f = nullptr;
 
     PFNGLUSEPROGRAMPROC glUseProgram = nullptr;
     PFNGLBINDBUFFERPROC glBindBuffer = nullptr;
@@ -121,6 +136,12 @@ struct GLDispatch {
         LOAD_GL(glRotatef);
         LOAD_GL(glTranslatef);
         LOAD_GL(glGetIntegerv);
+        LOAD_GL(glGenTextures);
+        LOAD_GL(glBindTexture);
+        LOAD_GL(glTexImage2D);
+        LOAD_GL(glTexParameteri);
+        LOAD_GL(glTexEnvi);
+        LOAD_GL(glTexCoord2f);
         #undef LOAD_GL
 
         typedef PROC (WINAPI *wglGetProcAddress_t)(LPCSTR);
@@ -244,8 +265,11 @@ void VRHandRenderer::RenderHands(const RiddickVRSharedState& state, bool isLeftE
     if (!s_gl.initialized) return;
 
     // 1. Push complete OpenGL pipeline attributes to preserve game render state
+    // GH #61: GL_TEXTURE_BIT also saves/restores the 2D texture binding and the
+    // texture-env mode the native hand texture draw mutates.
     s_gl.glPushAttrib(GL_ENABLE_BIT | GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT |
-                      GL_LIGHTING_BIT | GL_POLYGON_BIT | GL_VIEWPORT_BIT | GL_CURRENT_BIT);
+                      GL_LIGHTING_BIT | GL_POLYGON_BIT | GL_VIEWPORT_BIT | GL_CURRENT_BIT |
+                      GL_TEXTURE_BIT);
 
     // GH #22: save every extra piece of state we mutate below (program,
     // buffer bindings, active matrix mode) so the game render state is
@@ -639,11 +663,70 @@ void VRHandRenderer::DrawTacticalHand(HandSide side, float grip, float trigger, 
     s_gl.glPopMatrix();
 }
 
+// GH #61: create the GL texture for the baked Riddick skin diffuse.
+//
+// Runs at most once per process (the game's GL context is already current when
+// RenderHands is called). Decodes the verbatim DXT1 blocks from
+// native_hand_texture.h with bc1.h, matching the shipped texture exactly, and
+// uploads uncompressed RGBA8 -- no GL extension is required. Returns false
+// (permanently, until the process restarts) when the flag is off, the asset is
+// missing, or the GL entry points are unavailable, so DrawNativeHand keeps its
+// flat skin-tone fallback.
+bool VRHandRenderer::EnsureNativeHandTexture() {
+    if (m_nativeTextureTried) {
+        return m_nativeTextureReady;
+    }
+    m_nativeTextureTried = true;
+
+    if (!g_vrConfig.nativeHandTexture) {
+        return false;
+    }
+    if (!s_gl.glGenTextures || !s_gl.glBindTexture || !s_gl.glTexImage2D ||
+        !s_gl.glTexParameteri) {
+        return false;
+    }
+
+    const NativeHandTexture* tex = FindNativeHandTexture("Riddick_ArmScar_D");
+    if (!tex || !tex->dxt1 || tex->width == 0 || tex->height == 0) {
+        return false;
+    }
+    if (tex->dxt1_bytes < Bc1SurfaceBytes(tex->width, tex->height)) {
+        return false;
+    }
+
+    std::vector<unsigned char> rgba(
+        static_cast<size_t>(tex->width) * tex->height * 4u);
+    Bc1DecodeSurface(tex->dxt1, tex->width, tex->height, rgba.data());
+
+    GLuint id = 0;
+    s_gl.glGenTextures(1, &id);
+    if (id == 0) {
+        return false;
+    }
+    s_gl.glBindTexture(GL_TEXTURE_2D, id);
+    s_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    s_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    s_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    s_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    s_gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, (GLsizei)tex->width,
+                      (GLsizei)tex->height, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                      rgba.data());
+
+    m_nativeHandTexture = id;
+    m_nativeTextureReady = true;
+    VR_LOG_INFO("native hand texture: %s mip %d %ux%u (%u DXT1 bytes) uploaded",
+                tex->name, tex->mip, tex->width, tex->height, tex->dxt1_bytes);
+    return true;
+}
+
 // GH #46: draw the baked native Riddick arm/hand mesh for one hand.
 //
 // Geometry comes from native_hand_mesh_data.h (baked from the shipped .xmd by
 // tools/xmd_bake.py); the model-space -> hand-local mapping is the provisional,
-// INI-tunable placement in native_hand_pose.h (ADR-0427). Deliberately built on
+// INI-tunable placement in native_hand_pose.h (ADR-0427). GH #61 adds the real
+// skin/scar diffuse (native_hand_texture.h, baked from Models.xtc), modulated
+// over the existing two-sided lambert so the hand reads as Riddick's arm; when
+// the texture is unavailable the flat skin tone is kept. Deliberately built on
 // the already-loaded immediate-mode GL entry points, matching the rest of this
 // renderer: it mutates no state that RenderHands does not already restore.
 bool VRHandRenderer::DrawNativeHand(HandSide side) {
@@ -667,19 +750,32 @@ bool VRHandRenderer::DrawNativeHand(HandSide side) {
         return false;
     }
 
+    // GH #61: bind the baked diffuse (no-op fallback when unavailable).
+    const bool textured = EnsureNativeHandTexture() && s_gl.glTexCoord2f != nullptr;
+    if (textured) {
+        s_gl.glEnable(GL_TEXTURE_2D);
+        s_gl.glBindTexture(GL_TEXTURE_2D, m_nativeHandTexture);
+        if (s_gl.glTexEnvi) {
+            // MODULATE so the lit per-vertex colour (fade + lambert) multiplies
+            // the texture instead of replacing it.
+            s_gl.glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+        }
+    }
+
     // Provisional hand-local placement offset (metres), INI-tunable; defaults
     // to zero so the mesh's hand end sits at the tracked controller origin.
     s_gl.glTranslatef(g_vrConfig.nativeHandOffsetX,
                       g_vrConfig.nativeHandOffsetY,
                       g_vrConfig.nativeHandOffsetZ);
 
-    // Warm inmate skin tone approximating the RIDDICK_ARMSCAR_D diffuse, with a
+    // Fallback skin tone approximating the RIDDICK_ARMSCAR_D diffuse, with a
     // two-sided lambert term from the baked normals so the mesh reads as a hand
-    // rather than a flat grey blob. The real .xtc diffuse texture is not yet
-    // bound (tracked as GH #61); this is the skin-tone fallback.
+    // rather than a flat grey blob. When the baked texture is bound the tone
+    // acts as a subtle tint under MODULATE.
     const float r = 0.55f, g = 0.42f, b = 0.33f;
     const float f = (std::clamp)(m_currentFade, 0.0f, 1.0f);
     const float lx = 0.35f, ly = 0.82f, lz = 0.45f; // hand-local light dir
+    const bool flipV = g_vrConfig.nativeHandTextureVFlip != 0;
 
     s_gl.glBegin(GL_TRIANGLES);
     for (unsigned int i = 0; i + 2 < mesh->index_count; i += 3) {
@@ -700,11 +796,22 @@ bool VRHandRenderer::DrawNativeHand(HandSide side) {
             if (m_useAlphaFade) s_gl.glColor4f(r * shade, g * shade, b * shade, f);
             else s_gl.glColor3f(r * shade * f, g * shade * f, b * shade * f);
 
+            if (textured) {
+                const float tu = v.uv[0];
+                const float tv = flipV ? (1.0f - v.uv[1]) : v.uv[1];
+                s_gl.glTexCoord2f(tu, tv);
+            }
             s_gl.glNormal3f(localNormal[0], localNormal[1], localNormal[2]);
             s_gl.glVertex3f(localPos[0], localPos[1], localPos[2]);
         }
     }
     s_gl.glEnd();
+
+    if (textured) {
+        // Keep the interaction-glow boxes and the other hand's primitives
+        // untextured (state is fully restored by glPopAttrib regardless).
+        s_gl.glDisable(GL_TEXTURE_2D);
+    }
     return true;
 }
 

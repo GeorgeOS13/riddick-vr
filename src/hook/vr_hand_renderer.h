@@ -47,6 +47,12 @@ private:
     // the procedural primitives. Only active when VRConfig::nativeHands is set.
     bool DrawNativeHand(HandSide side);
 
+    // GH #61: create (once) the GL texture for the baked Riddick skin diffuse
+    // (native_hand_texture.h). Returns false while the texture is unavailable
+    // (disabled, no GL entry points, or no baked asset) so DrawNativeHand falls
+    // back to its flat skin-tone + lambert shading.
+    bool EnsureNativeHandTexture();
+
     // Geometry utility primitives (colors multiplied by active hand fade)
     void DrawBeveledBox(float x0, float y0, float z0, float x1, float y1, float z1, float r, float g, float b);
     void DrawTaperedCylinder(float z0, float r0, float z1, float r1, int slices, float r, float g, float b);
@@ -66,6 +72,10 @@ private:
     RiddickVRVector3 m_rightArmWrist{};
     bool m_hasLeftElbow = false;
     bool m_hasRightElbow = false;
+    // GH #61: baked native-hand diffuse texture (lazily created on first use).
+    GLuint m_nativeHandTexture = 0;
+    bool m_nativeTextureTried = false;
+    bool m_nativeTextureReady = false;
 };
 
 } // namespace RiddickVR

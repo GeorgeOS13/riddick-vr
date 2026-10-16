@@ -1,0 +1,107 @@
+{
+  "tool": "tools/xtc_bake.py",
+  "generated_from": "canonical hand texture set from C:\\Program Files (x86)\\Starbreeze Studios\\Riddick EFBB",
+  "codec": "DXT1/BC1 (S3TC), decoded by src/hook/bc1.h",
+  "textures": [
+    {
+      "name": "Riddick_ArmScar_D",
+      "source": "Content/Models.xtc",
+      "xtc_sha256": null,
+      "image_record_offset": 32374,
+      "mip": 1,
+      "declared_mip_levels": 11,
+      "width": 256,
+      "height": 512,
+      "codec": "DXT1",
+      "dxt1_bytes": 65536,
+      "dxt1_sha256": "21c57eca0041c8bf0fae2c294af6c74221583205dd9caf51f147aae7acd1021e",
+      "rgba_checksum": 87067362,
+      "samples": [
+        {
+          "x": 0,
+          "y": 0,
+          "rgba": [
+            197,
+            157,
+            131,
+            255
+          ]
+        },
+        {
+          "x": 255,
+          "y": 0,
+          "rgba": [
+            197,
+            158,
+            133,
+            255
+          ]
+        },
+        {
+          "x": 0,
+          "y": 511,
+          "rgba": [
+            207,
+            172,
+            150,
+            255
+          ]
+        },
+        {
+          "x": 255,
+          "y": 511,
+          "rgba": [
+            205,
+            170,
+            148,
+            255
+          ]
+        },
+        {
+          "x": 127,
+          "y": 255,
+          "rgba": [
+            150,
+            74,
+            54,
+            255
+          ]
+        },
+        {
+          "x": 85,
+          "y": 340,
+          "rgba": [
+            202,
+            165,
+            150,
+            255
+          ]
+        },
+        {
+          "x": 170,
+          "y": 102,
+          "rgba": [
+            32,
+            24,
+            16,
+            255
+          ]
+        },
+        {
+          "x": 109,
+          "y": 365,
+          "rgba": [
+            174,
+            141,
+            128,
+            255
+          ]
+        }
+      ]
+    }
+  ],
+  "totals": {
+    "textures": 1,
+    "bytes": 65536
+  }
+}
