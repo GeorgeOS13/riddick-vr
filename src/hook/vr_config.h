@@ -117,6 +117,23 @@ struct VRConfig {
     // depth-only-clear opener (1) or disables the window entirely (0).
     int suppressEngineViewmodel = 0;
     int viewmodelDepthClearWindow = 1;
+    // GH #63/#66: log the per-frame GL pass signature every 300 swaps (0 = off).
+    int viewmodelTrace = 0;
+    // GH #66: window opener. -1 = derive from viewmodelDepthClearWindow;
+    // 0 none, 1 depth-only clear, 2 near-plane drop, 3 either.
+    int viewmodelWindowOpener = -1;
+    float viewmodelNearRatio = 0.5f;
+    // GH #67 (ADR-0447): drive the engine's own viewmodel with the dominant
+    // controller instead of hiding it. Opt-in; ignored while
+    // suppressEngineViewmodel is on.
+    int driveEngineViewmodel = 0;
+    float viewmodelUnitsPerMeter = 30.3f;
+    float viewmodelAnchorX = 0.18f;
+    float viewmodelAnchorY = -0.22f;
+    float viewmodelAnchorZ = -0.38f;
+    float viewmodelDriveYaw = 0.0f;
+    float viewmodelDrivePitch = 0.0f;
+    float viewmodelDriveRoll = 0.0f;
 };
 
 extern VRConfig g_vrConfig;

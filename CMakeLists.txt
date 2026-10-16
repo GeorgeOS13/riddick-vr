@@ -54,6 +54,7 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4 AND RIDDICKVR_BUILD_PROXY)
         src/hook/combat_strike.h
         src/hook/dialogue_navigation.h
         src/hook/viewmodel_suppressor.h
+        src/hook/viewmodel_drive.h
         src/hook/camera_hook.cpp
         src/hook/camera_hook.h
         src/hook/vr_config.cpp
@@ -141,6 +142,13 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
     )
     add_test(NAME viewmodel_suppressor_window COMMAND riddick_vr_viewmodel_suppressor_tests)
+
+    # GH #67 (ADR-0447): controller-driven engine viewmodel correction matrix.
+    add_executable(riddick_vr_viewmodel_drive_tests tests/viewmodel_drive_tests.cpp)
+    target_include_directories(riddick_vr_viewmodel_drive_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
+    )
+    add_test(NAME viewmodel_drive_correction COMMAND riddick_vr_viewmodel_drive_tests)
 
     add_executable(riddick_vr_dialogue_navigation_tests tests/dialogue_navigation_tests.cpp)
     target_include_directories(riddick_vr_dialogue_navigation_tests PRIVATE

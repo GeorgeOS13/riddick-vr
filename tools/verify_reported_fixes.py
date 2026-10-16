@@ -174,11 +174,23 @@ def main():
             "real_glDrawElements" in dllmain and "real_glCallList" in dllmain and
             "ShouldSuppressDrawCall()" in dllmain and
             "s_viewmodelSuppressor.NoteDepthOnlyClear()" in proxy and
-            "s_viewmodelSuppressor.NoteProjectionLoad()" in proxy and
+            "s_viewmodelSuppressor.NoteProjectionLoad(" in proxy and
             "s_viewmodelSuppressor.NoteSwap()" in proxy and
             "ShouldSuppressDrawCall()" in proxy and
             "viewmodel_suppressor_tests.cpp" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8"),
             "GH #66: engine viewmodel suppression must be off-by-default, intercept RndrGL draws, and be unit-tested")
+
+    # GH #63/#66/#67: window semantics, pass trace and the opt-in controller drive.
+    vm_config = (ROOT / "src/hook/vr_config.h").read_text(encoding="utf-8")
+    cmake_text = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+    require("NoteProjectionLoad(bool" in suppressor and
+            "LastFrameTrace" in suppressor and
+            "driveEngineViewmodel = 0" in vm_config and
+            "ComputeViewmodelCorrection" in (ROOT / "src/hook/viewmodel_drive.h").read_text(encoding="utf-8") and
+            "ComputeViewmodelCorrection(" in proxy and
+            "LastFrameTrace()" in proxy and
+            "viewmodel_drive_tests.cpp" in cmake_text,
+            "GH #63/#66/#67: viewmodel window must track the FP pass, expose a trace, and the controller drive must be opt-in and unit-tested")
 
     # GH #58: the native hand path must be able to consume an offline-baked
     # posed variant of the mesh (FK(clip) + influence-weighted skinning,

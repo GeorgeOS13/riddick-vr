@@ -10,6 +10,7 @@
 #include "viewmodel_suppressor.h"
 
 #include <cstdio>
+#include <cstring>
 
 using RiddickVR::ViewmodelSuppressionConfig;
 using RiddickVR::ViewmodelSuppressor;
@@ -132,6 +133,135 @@ int main() {
         off.enabled = false;
         s.Configure(off);
         Check(!s.ShouldSuppressDraw(), "re-configuring the suppressor off must stop suppression");
+    }
+
+    // GH #63/#66 (ADR-0446): the first perspective load after the depth-only
+    // clear is the first-person pass's own projection and must NOT close the
+    // window; a later load after draws does.
+    {
+        ViewmodelSuppressor s;
+        ViewmodelSuppressionConfig cfg;
+        cfg.enabled = true;
+        s.Configure(cfg);
+        s.NoteColorClear();
+        s.NoteProjectionLoad(true, 4.0f);   // world projection
+        s.ShouldSuppressDraw();             // world draw
+        s.NoteDepthOnlyClear();
+        s.NoteProjectionLoad(true, 0.5f);   // the FP pass's own projection
+        Check(s.WindowOpen(), "the FP pass's own projection load must not close the window");
+        Check(s.ShouldSuppressDraw() && s.ShouldSuppressDraw() && s.ShouldSuppressDraw(),
+              "all three viewmodel draws must be suppressed");
+        s.NoteProjectionLoad(true, 4.0f);   // the world resumes
+        Check(!s.WindowOpen(), "a perspective load after draws must close the window");
+        Check(!s.ShouldSuppressDraw(), "draws after the close must draw");
+        Check(s.FrameSuppressed() == 3, "exactly the three windowed draws are suppressed");
+    }
+
+    // An ortho load always closes, even with no draws in the window.
+    {
+        ViewmodelSuppressor s;
+        ViewmodelSuppressionConfig cfg;
+        cfg.enabled = true;
+        s.Configure(cfg);
+        s.NoteColorClear();
+        s.NoteDepthOnlyClear();
+        s.NoteProjectionLoad(false, 0.0f);
+        Check(!s.WindowOpen(), "an ortho load must close the window immediately");
+    }
+
+    // Near-plane-drop opener: world near 4.0, then a load with near 0.5 opens.
+    {
+        ViewmodelSuppressor s;
+        ViewmodelSuppressionConfig cfg;
+        cfg.enabled = true;
+        cfg.opener = ViewmodelWindowOpener::NearPlaneDrop;
+        s.Configure(cfg);
+        s.NoteColorClear();
+        s.NoteProjectionLoad(true, 4.0f);
+        Check(!s.WindowOpen(), "the world projection must not open the window");
+        s.NoteDepthOnlyClear();
+        Check(!s.WindowOpen(), "a depth-only clear must not open with the near-plane opener");
+        s.NoteProjectionLoad(true, 3.0f);
+        Check(!s.WindowOpen(), "a small near drop (3.0 vs 4.0) must not open the window");
+        s.NoteProjectionLoad(true, 0.5f);
+        Check(s.WindowOpen(), "a near plane below world*ratio must open the window");
+        Check(s.ShouldSuppressDraw(), "a draw in the near-drop window is suppressed");
+        s.NoteSwap();
+        s.NoteColorClear();
+        s.NoteProjectionLoad(true, 0.5f);
+        Check(!s.WindowOpen(), "worldNear is reset per frame, so a lone low near does not open");
+    }
+
+    // Either opener: both paths open.
+    {
+        ViewmodelSuppressor s;
+        ViewmodelSuppressionConfig cfg;
+        cfg.enabled = true;
+        cfg.opener = ViewmodelWindowOpener::Either;
+        s.Configure(cfg);
+        s.NoteColorClear();
+        s.NoteDepthOnlyClear();
+        Check(s.WindowOpen(), "Either must open on a depth-only clear");
+        s.NoteSwap();
+        s.NoteColorClear();
+        s.NoteProjectionLoad(true, 4.0f);
+        s.NoteProjectionLoad(true, 1.0f);
+        Check(s.WindowOpen(), "Either must open on a near-plane drop");
+    }
+
+    // track without enabled: the window opens and draws are counted, none suppressed.
+    {
+        ViewmodelSuppressor s;
+        ViewmodelSuppressionConfig cfg;
+        cfg.track = true;
+        s.Configure(cfg);
+        s.NoteColorClear();
+        s.NoteDepthOnlyClear();
+        Check(s.WindowOpen(), "track must open the window without enabled");
+        Check(!s.ShouldSuppressDraw() && !s.ShouldSuppressDraw(), "track alone must never suppress");
+        Check(s.FrameDraws() == 2 && s.FrameSuppressed() == 0, "track must count draws");
+        Check(s.TotalSuppressed() == 0, "track must not count suppressions");
+    }
+
+    // Exact trace string for a scripted frame, latched on swap.
+    {
+        ViewmodelSuppressor s;
+        ViewmodelSuppressionConfig cfg;
+        cfg.enabled = true;
+        s.Configure(cfg);
+        s.NoteColorClear();
+        s.NoteProjectionLoad(true, 4.0f);
+        s.ShouldSuppressDraw();
+        s.ShouldSuppressDraw();
+        s.NoteDepthOnlyClear();
+        s.NoteProjectionLoad(true, 0.5f);
+        s.ShouldSuppressDraw();
+        s.ShouldSuppressDraw();
+        s.ShouldSuppressDraw();
+        s.NoteProjectionLoad(false, 0.0f);
+        s.NoteProjectionLoad();
+        s.NoteSwap();
+        Check(std::strcmp(s.LastFrameTrace(), "C P4.0 d2 D P0.5 d3 O P?") == 0,
+              "the trace must match the scripted frame");
+        s.NoteSwap();
+        Check(std::strcmp(s.LastFrameTrace(), "") == 0, "an empty frame latches an empty trace");
+    }
+
+    // Trace truncation never overflows and stays NUL-terminated.
+    {
+        ViewmodelSuppressor s;
+        ViewmodelSuppressionConfig cfg;
+        cfg.track = true;
+        s.Configure(cfg);
+        s.NoteColorClear();
+        for (int i = 0; i < 200; ++i) {
+            s.NoteProjectionLoad(true, 12.5f);
+            s.ShouldSuppressDraw();
+        }
+        s.NoteSwap();
+        const size_t len = std::strlen(s.LastFrameTrace());
+        Check(len > 0 && len < static_cast<size_t>(RiddickVR::kViewmodelTraceCapacity),
+              "a long trace must truncate inside the fixed buffer");
     }
 
     if (g_failures == 0) {

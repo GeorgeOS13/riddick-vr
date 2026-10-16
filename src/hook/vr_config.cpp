@@ -155,6 +155,27 @@ void LoadVRConfig() {
         // signature is provisional and must be confirmed on a headset).
         cfg.suppressEngineViewmodel = ReadInt(iniPath, "SuppressEngineViewmodel", cfg.suppressEngineViewmodel) ? 1 : 0;
         cfg.viewmodelDepthClearWindow = ReadInt(iniPath, "ViewmodelDepthClearWindow", cfg.viewmodelDepthClearWindow) ? 1 : 0;
+        // GH #63/#66/#67: window opener, pass trace and controller-driven engine arms.
+        cfg.viewmodelTrace = ReadInt(iniPath, "ViewmodelTrace", cfg.viewmodelTrace) ? 1 : 0;
+        {
+            // Read as float: GetPrivateProfileInt does not return a usable -1.
+            const int opener = static_cast<int>(ReadFloat(iniPath, "ViewmodelWindowOpener", static_cast<float>(cfg.viewmodelWindowOpener)));
+            cfg.viewmodelWindowOpener = (opener < 0) ? -1 : (opener > 3 ? 3 : opener);
+        }
+        cfg.viewmodelNearRatio = ClampF(ReadFloat(iniPath, "ViewmodelNearRatio", cfg.viewmodelNearRatio), 0.05f, 0.95f);
+        cfg.driveEngineViewmodel = ReadInt(iniPath, "DriveEngineViewmodel", cfg.driveEngineViewmodel) ? 1 : 0;
+        cfg.viewmodelUnitsPerMeter = ClampF(ReadFloat(iniPath, "ViewmodelUnitsPerMeter", cfg.viewmodelUnitsPerMeter), 1.0f, 200.0f);
+        cfg.viewmodelAnchorX = ClampF(ReadFloat(iniPath, "ViewmodelAnchorX", cfg.viewmodelAnchorX), -1.5f, 1.5f);
+        cfg.viewmodelAnchorY = ClampF(ReadFloat(iniPath, "ViewmodelAnchorY", cfg.viewmodelAnchorY), -1.5f, 1.5f);
+        cfg.viewmodelAnchorZ = ClampF(ReadFloat(iniPath, "ViewmodelAnchorZ", cfg.viewmodelAnchorZ), -1.5f, 1.5f);
+        cfg.viewmodelDriveYaw = ClampF(ReadFloat(iniPath, "ViewmodelDriveYaw", cfg.viewmodelDriveYaw), -180.0f, 180.0f);
+        cfg.viewmodelDrivePitch = ClampF(ReadFloat(iniPath, "ViewmodelDrivePitch", cfg.viewmodelDrivePitch), -180.0f, 180.0f);
+        cfg.viewmodelDriveRoll = ClampF(ReadFloat(iniPath, "ViewmodelDriveRoll", cfg.viewmodelDriveRoll), -180.0f, 180.0f);
+        VR_LOG_INFO("Viewmodel config: suppress=%d drive=%d trace=%d opener=%d nearRatio=%.2f upm=%.1f anchor=[%.2f,%.2f,%.2f] rot=[%.0f,%.0f,%.0f]",
+            cfg.suppressEngineViewmodel, cfg.driveEngineViewmodel, cfg.viewmodelTrace,
+            cfg.viewmodelWindowOpener, cfg.viewmodelNearRatio, cfg.viewmodelUnitsPerMeter,
+            cfg.viewmodelAnchorX, cfg.viewmodelAnchorY, cfg.viewmodelAnchorZ,
+            cfg.viewmodelDriveYaw, cfg.viewmodelDrivePitch, cfg.viewmodelDriveRoll);
         VR_LOG_INFO("VR config loaded from %s (snap=%.0f move_dz=%.2f comfort=%d seated=%d scale=%.2f paw=%d native_hands=%d native_pose=%d native_tex=%d native_rot=[%.0f,%.0f,%.0f] guard_y=[%.2f,%.2f] guard_z=[%.2f,%.2f] guard_span=%.2f strike=[fwdVz=%.2f hookVx=%.2f upperVy=%.2f crossVx=%.2f] suppress_viewmodel=%d depth_window=%d)",
             iniPath, cfg.snapAngleDeg, cfg.moveDeadzone, cfg.comfortEnabled,
             cfg.seated, cfg.worldScale, cfg.southpaw, cfg.nativeHands,
