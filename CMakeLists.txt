@@ -127,6 +127,13 @@ if(BUILD_TESTING)
     )
     add_test(NAME input_hold_scheduler COMMAND riddick_vr_input_hold_tests)
 
+    # GH #50/#51: aim steering helper (no pull while guarding or swinging).
+    add_executable(riddick_vr_aim_pull_tests tests/aim_pull_tests.cpp)
+    target_include_directories(riddick_vr_aim_pull_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
+    )
+    add_test(NAME aim_pull COMMAND riddick_vr_aim_pull_tests)
+
     # GH #66 (approach 2): per-draw viewmodel suppression window state machine.
     add_executable(riddick_vr_viewmodel_suppressor_tests tests/viewmodel_suppressor_tests.cpp)
     target_include_directories(riddick_vr_viewmodel_suppressor_tests PRIVATE

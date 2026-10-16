@@ -8,6 +8,7 @@
 #include "combat_guard.h"
 #include "combat_strike.h"
 #include "input_hold.h"
+#include "aim_pull.h"
 #include "dialogue_navigation.h"
 #include "gesture_tap.h"
 #include <algorithm>
@@ -1250,7 +1251,7 @@ static HeadLookIntent UpdateHeadLook(HeadLookState& st, DWORD now,
                                      const RiddickVRTrackedPose& ctrlPose,
                                      bool recenterEdge, bool isReloading, bool aimHeld,
                                      bool physicalBlockEngaged, bool twoHandedActive,
-                                     bool southpaw, bool meleeEquipped) {
+                                     bool southpaw, bool meleeEquipped, bool guardPoseLike) {
     HeadLookIntent out;
     if (!hmdPose.isValid) {
         st.hasPrevHmdOrientation = false;
@@ -1330,7 +1331,8 @@ static HeadLookIntent UpdateHeadLook(HeadLookState& st, DWORD now,
                          (ctrlLocal.z >= -0.36f && ctrlLocal.z <= -0.10f) &&
                          (ctrlLocal.x >= 0.02f && ctrlLocal.x <= 0.22f);
 
-    if (inAdsCorridor && !isReloading && !physicalBlockEngaged) {
+    // GH #50/#51: the fist guard sits inside this corridor; never latch ADS from it.
+    if (inAdsCorridor && !isReloading && !physicalBlockEngaged && !guardPoseLike) {
         if (st.adsEnterStartTime == 0) {
             st.adsEnterStartTime = now;
         } else if (now - st.adsEnterStartTime > 50) { // 50ms hold to confirm ADS
@@ -1415,34 +1417,23 @@ static HeadLookIntent UpdateHeadLook(HeadLookState& st, DWORD now,
                     st.prevCtrlYaw = ctrlYaw;
                     st.prevCtrlPitch = ctrlPitch;
 
-                    // GH #50/#51: DELTA-based aim steering. The old code pulled
-                    // from the ABSOLUTE HMD-relative aim angle, so any arm held
-                    // away from view-center (swings, guard pose) injected a
-                    // constant spin every frame. Deltas only move the view
-                    // while the aim itself is moving; a steady arm (even far
-                    // off-center) injects nothing. Clamped per frame.
-                    // Melee equipped (fists/blades, incl. trigger-block guard):
-                    // no aim pull at all - swings must never steer the camera.
-                    constexpr float AIM_DELTA_DEADZONE = 0.0015f; // ~0.09 deg
-                    constexpr float AIM_DELTA_CLAMP = 0.05f;      // max rad/frame
-                    float dYaw = meleeEquipped ? 0.0f : deltaCtrlYaw;
-                    float dPitch = meleeEquipped ? 0.0f : deltaCtrlPitch;
-                    if (fabsf(dYaw) < AIM_DELTA_DEADZONE) dYaw = 0.0f;
-                    if (fabsf(dPitch) < AIM_DELTA_DEADZONE) dPitch = 0.0f;
-                    if (dYaw > AIM_DELTA_CLAMP) dYaw = AIM_DELTA_CLAMP;
-                    if (dYaw < -AIM_DELTA_CLAMP) dYaw = -AIM_DELTA_CLAMP;
-                    if (dPitch > AIM_DELTA_CLAMP) dPitch = AIM_DELTA_CLAMP;
-                    if (dPitch < -AIM_DELTA_CLAMP) dPitch = -AIM_DELTA_CLAMP;
-                    pullYaw = dYaw;
-                    pullPitch = dPitch;
-
-                    // Aim weights: only pull aim when actively aiming (ADS or two-handed stabilization or aiming trigger)
-                    isActivelyAiming = (st.isPhysicalADS || twoHandedActive || aimHeld) && !physicalBlockEngaged && !isReloading;
-                    if (isActivelyAiming) {
-                        wPull = st.isPhysicalADS ? 0.12f : 0.08f;
-                    } else {
-                        wPull = 0.0f;
-                    }
+                    // GH #50/#51: DELTA-based aim steering (aim_pull.h). A steady arm
+                    // injects nothing; melee and the boxer-guard pose never steer.
+                    AimPullInputs pullIn;
+                    pullIn.deltaYaw = deltaCtrlYaw;
+                    pullIn.deltaPitch = deltaCtrlPitch;
+                    pullIn.isPhysicalADS = st.isPhysicalADS;
+                    pullIn.twoHanded = twoHandedActive;
+                    pullIn.aimHeld = aimHeld;
+                    pullIn.physicalBlock = physicalBlockEngaged;
+                    pullIn.reloading = isReloading;
+                    pullIn.meleeEquipped = meleeEquipped;
+                    pullIn.guardPoseLike = guardPoseLike;
+                    const AimPullResult pull = ComputeAimPull(pullIn);
+                    pullYaw = pull.pullYaw;
+                    pullPitch = pull.pullPitch;
+                    isActivelyAiming = pull.active;
+                    wPull = pull.weight;
                 }
             }
         }
@@ -4034,6 +4025,11 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // no longer overrides it — menus/cinematics get the cinema screen path,
     // gameplay gets full-bleed immersion with bar-crop.
 
+    // Transform controller positions into HMD-relative space for spatial gestures
+    // (computed before head-look so the guard-pose test can use them, GH #50/#51)
+    RiddickVRVector3 leftLocal = WorldToHmdLocal(vrState.leftController.gripPose.position, vrState.hmdPose);
+    RiddickVRVector3 rightLocal = WorldToHmdLocal(vrState.rightController.gripPose.position, vrState.hmdPose);
+
     // 0. Singularity-Free Relative Quaternion Head Tracking Look Input (ADR 0409)
     // GH #17 step 7: math delegated to UpdateHeadLook (explicit HeadLookState,
     // no behavior change); side effects (mouse move, ADS detent haptic) stay here.
@@ -4043,11 +4039,18 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             s_stabilizedAimPose : (domCtrl.aimPose.isValid ? domCtrl.aimPose : domCtrl.gripPose); // Track C #14
         bool lookReloading = (now - s_reload.lastReloadGestureTime <= 1100);
         bool lookAimHeld = s_isAimingOrBlocking || (offCtrl.trigger > 0.5f); // Track C #14
+        // GH #50/#51: both fists in the front-of-face guard envelope (or just
+        // after a swing) is combat, not aiming: the arms must not steer the view.
+        const bool guardPoseLike = (!s_twoHandedStabilizationActive &&
+            InGuardEnvelope(GetGuardEnvelope(), leftLocal.y, leftLocal.z, rightLocal.y, rightLocal.z,
+                            leftLocal.x - rightLocal.x)) ||
+            (now - s_melee.lastPunchTime < 300);
         HeadLookIntent lookIntent = UpdateHeadLook(s_headlook, now,
             vrState.hmdPose, ctrlAimPose,
             recenterEdge, lookReloading, lookAimHeld,
             s_physicalBlockEngaged, s_twoHandedStabilizationActive,
-            g_vrConfig.southpaw, (s_activeWeaponSlot == 3)); // GH #51: melee/guard never steers
+            g_vrConfig.southpaw, (s_activeWeaponSlot == 3), // GH #51: melee/guard never steers
+            guardPoseLike);
         // GH #45: use the latching Has3DGameplayProjection() instead of the
         // per-frame Has3DThisFrame() — the latter caused judder by silently
         // dropping look deltas during brief ortho-HUD passes within gameplay.
@@ -4116,10 +4119,6 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             VR_LOG_INFO("Stealth Stance: CORNER WALL-PEEK disengaged");
         }
     }
-
-    // Transform controller positions into HMD-relative space for spatial gestures
-    RiddickVRVector3 leftLocal = WorldToHmdLocal(vrState.leftController.gripPose.position, vrState.hmdPose);
-    RiddickVRVector3 rightLocal = WorldToHmdLocal(vrState.rightController.gripPose.position, vrState.hmdPose);
 
     // GH #65: controller velocity arrives in world/stage space but every gesture
     // threshold is head-local (-Z = away from the body). Rotate into the HMD yaw
