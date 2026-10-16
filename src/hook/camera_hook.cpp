@@ -8170,16 +8170,21 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // - Hands steady (not throwing a punch, rSpeed < 1.3 m/s and lSpeed < 1.3 m/s)
     // - Outside punch execution recovery window (> 200ms since last punch)
     // - Not actively holding ladder rungs or climbing
-    bool chinLevel = (leftLocal.y >= -0.40f && leftLocal.y <= 0.30f) &&
-                     (rightLocal.y >= -0.40f && rightLocal.y <= 0.30f);
-    bool inFrontOfFace = (leftLocal.z >= -0.65f && leftLocal.z <= -0.06f) &&
-                         (rightLocal.z >= -0.65f && rightLocal.z <= -0.06f);
-    bool handsClose = fabsf(leftLocal.x - rightLocal.x) < 0.54f;
+    // GH #62: block is a *front-of-head* pose. Both hands must be raised in
+    // front of the HMD at/just below face height and held steady. Previously the
+    // pose also required the both-trigger combat chord and allowed y down to
+    // -0.40 m (well below the view), so "block" could be held low. Now it
+    // triggers on the pose alone and requires the hands in front of the face.
+    bool chinLevel = (leftLocal.y >= -0.16f && leftLocal.y <= 0.32f) &&
+                     (rightLocal.y >= -0.16f && rightLocal.y <= 0.32f);
+    bool inFrontOfFace = (leftLocal.z >= -0.60f && leftLocal.z <= -0.12f) &&
+                         (rightLocal.z >= -0.60f && rightLocal.z <= -0.12f);
+    bool handsClose = fabsf(leftLocal.x - rightLocal.x) < 0.50f;
     bool handsSteady = (rSpeed < 1.4f && lSpeed < 1.4f);
     bool notPunching = (now - s_melee.lastPunchTime > 120) && (now - s_melee.lastFinisherTime > 120); // GH #31
 
-    bool guardPoseDetected = combatStance.active && !isClimbingActive && chinLevel &&
-                             inFrontOfFace && handsClose && handsSteady && notPunching;
+    bool guardPoseDetected = !isClimbingActive && !s_twoHandedStabilizationActive &&
+                             chinLevel && inFrontOfFace && handsClose && handsSteady && notPunching;
 
     // Temporal Hysteresis & Debouncing:
     // Require guard pose to hold for ~40ms to engage
