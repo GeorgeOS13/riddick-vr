@@ -93,10 +93,23 @@ void LoadVRConfig() {
         // fallback even when the texture is on but unavailable).
         cfg.nativeHandTexture = ReadInt(iniPath, "NativeHandTexture", cfg.nativeHandTexture) ? 1 : 0;
         cfg.nativeHandTextureVFlip = ReadInt(iniPath, "NativeHandTextureVFlip", cfg.nativeHandTextureVFlip) ? 1 : 0;
-        VR_LOG_INFO("VR config loaded from %s (snap=%.0f move_dz=%.2f comfort=%d seated=%d scale=%.2f paw=%d native_hands=%d native_tex=%d)",
+        // GH #62: front-of-HMD block/guard envelope (head-local metres). The
+        // guard must sit in front of the face, not below the view, so Y is
+        // clamped well above the old -0.42 m low-hold floor.
+        cfg.guardYMin = ClampF(ReadFloat(iniPath, "GuardYMin", cfg.guardYMin), -0.40f, 0.20f);
+        cfg.guardYMax = ClampF(ReadFloat(iniPath, "GuardYMax", cfg.guardYMax), -0.05f, 0.60f);
+        cfg.guardZMin = ClampF(ReadFloat(iniPath, "GuardZMin", cfg.guardZMin), -1.00f, -0.20f);
+        cfg.guardZMax = ClampF(ReadFloat(iniPath, "GuardZMax", cfg.guardZMax), -0.55f, -0.02f);
+        cfg.guardMaxHandSpan = ClampF(ReadFloat(iniPath, "GuardMaxHandSpan", cfg.guardMaxHandSpan), 0.10f, 1.00f);
+        // Reject an inverted window (e.g. GuardYMin > GuardYMax) so a typo can
+        // never make the guard pose unreachable.
+        if (cfg.guardYMin > cfg.guardYMax) cfg.guardYMin = cfg.guardYMax;
+        if (cfg.guardZMin > cfg.guardZMax) cfg.guardZMax = cfg.guardZMin;
+        VR_LOG_INFO("VR config loaded from %s (snap=%.0f move_dz=%.2f comfort=%d seated=%d scale=%.2f paw=%d native_hands=%d native_tex=%d guard_y=[%.2f,%.2f] guard_z=[%.2f,%.2f] guard_span=%.2f)",
             iniPath, cfg.snapAngleDeg, cfg.moveDeadzone, cfg.comfortEnabled,
             cfg.seated, cfg.worldScale, cfg.southpaw, cfg.nativeHands,
-            cfg.nativeHandTexture);
+            cfg.nativeHandTexture, cfg.guardYMin, cfg.guardYMax,
+            cfg.guardZMin, cfg.guardZMax, cfg.guardMaxHandSpan);
     } else {
         VR_LOG_INFO("VR config: no riddick_vr.ini found, using defaults");
     }

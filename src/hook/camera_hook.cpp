@@ -5,6 +5,7 @@
 #include "vr_hand_renderer.h"
 #include "vr_action_map.h"
 #include "combat_stance.h"
+#include "combat_guard.h"
 #include "dialogue_navigation.h"
 #include "gesture_tap.h"
 #include <algorithm>
@@ -51,6 +52,19 @@ static RiddickVRTrackedPose s_stabilizedAimPose{};
 static bool s_hasStabilizedPose = false;
 
 static CombatStanceState s_combatStance;
+
+// GH #62: front-of-HMD block/guard envelope, sourced from the INI (head-local
+// metres; +Y up, -Z forward). Shared by the guard-pose detector and the strike
+// gate so a swing thrown from a raised guard is no longer masked.
+static GuardEnvelope GetGuardEnvelope() {
+    GuardEnvelope env;
+    env.yMin = g_vrConfig.guardYMin;
+    env.yMax = g_vrConfig.guardYMax;
+    env.zMin = g_vrConfig.guardZMin;
+    env.zMax = g_vrConfig.guardZMax;
+    env.maxHandSpan = g_vrConfig.guardMaxHandSpan;
+    return env;
+}
 
 
 bool CameraHook::Initialize() {
@@ -1792,13 +1806,17 @@ static MeleeCounterIntent UpdateMeleeCounters(MeleeState& st, DWORD now,
     (void)now;
             bool dualCrossSlash = (rVel.x < -1.1f && lVel.x > 1.1f) || (rVel.x > 1.1f && lVel.x < -1.1f);
 
-            // ADR 0403: Discriminate deliberate directional punch strikes from raising arms into Boxer Guard.
+            // ADR 0403 / GH #62: Discriminate deliberate directional punch strikes from raising arms into Boxer Guard.
             // Raising arms upward (Vy > 0) into guard position must NEVER trigger an attack or cancel guard.
-            bool chinLevelRough = (leftLocal.y >= -0.42f && leftLocal.y <= 0.32f) &&
-                                  (rightLocal.y >= -0.42f && rightLocal.y <= 0.32f);
-            bool inFrontRough = (leftLocal.z >= -0.68f && leftLocal.z <= -0.05f) &&
-                                (rightLocal.z >= -0.68f && rightLocal.z <= -0.05f);
-            bool inGuardVolume = chinLevelRough && inFrontRough && (fabsf(leftLocal.x - rightLocal.x) < 0.56f);
+            // The gate uses the SAME front-of-HMD envelope as the block pose (#62): the old loose volume reached
+            // y = -0.42 m and z = -0.05 m (below/inside the view), so a swing thrown from a raised guard was masked
+            // by `!inGuardVolume` and never fired. A fast swing now only has to leave the strict chin-to-forehead
+            // window to register, while slowly raising the hands into that window (no punch velocity) is still ignored.
+            const GuardEnvelope guardVolume = GetGuardEnvelope();
+            bool inGuardVolume = InGuardEnvelope(guardVolume,
+                                                 leftLocal.y, leftLocal.z,
+                                                 rightLocal.y, rightLocal.z,
+                                                 leftLocal.x - rightLocal.x);
 
             bool isForwardPunch = (rVel.z < -1.20f && rightLocal.z < -0.10f) || (lVel.z < -1.20f && leftLocal.z < -0.10f);
             bool isHookPunch = (fabsf(rVel.x) > 1.35f && rVel.z < -0.15f) || (fabsf(lVel.x) > 1.35f && lVel.z < -0.15f);
@@ -8175,11 +8193,16 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // pose also required the both-trigger combat chord and allowed y down to
     // -0.40 m (well below the view), so "block" could be held low. Now it
     // triggers on the pose alone and requires the hands in front of the face.
-    bool chinLevel = (leftLocal.y >= -0.16f && leftLocal.y <= 0.32f) &&
-                     (rightLocal.y >= -0.16f && rightLocal.y <= 0.32f);
-    bool inFrontOfFace = (leftLocal.z >= -0.60f && leftLocal.z <= -0.12f) &&
-                         (rightLocal.z >= -0.60f && rightLocal.z <= -0.12f);
-    bool handsClose = fabsf(leftLocal.x - rightLocal.x) < 0.50f;
+    // GH #62: the block window is the shared, INI-tunable front-of-HMD
+    // envelope (ADR-0434). Deriving the y/z/span tests from the same numbers the
+    // strike gate uses keeps "hold the fists in front of the face" and "a swing
+    // always fires" consistent.
+    const GuardEnvelope guardEnv = GetGuardEnvelope();
+    bool chinLevel = (leftLocal.y >= guardEnv.yMin && leftLocal.y <= guardEnv.yMax) &&
+                     (rightLocal.y >= guardEnv.yMin && rightLocal.y <= guardEnv.yMax);
+    bool inFrontOfFace = (leftLocal.z >= guardEnv.zMin && leftLocal.z <= guardEnv.zMax) &&
+                         (rightLocal.z >= guardEnv.zMin && rightLocal.z <= guardEnv.zMax);
+    bool handsClose = fabsf(leftLocal.x - rightLocal.x) < guardEnv.maxHandSpan;
     bool handsSteady = (rSpeed < 1.4f && lSpeed < 1.4f);
     bool notPunching = (now - s_melee.lastPunchTime > 120) && (now - s_melee.lastFinisherTime > 120); // GH #31
 

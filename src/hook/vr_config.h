@@ -49,6 +49,15 @@ struct VRConfig {
     // baked.
     int nativeHandTexture = 1;
     int nativeHandTextureVFlip = 0;
+    // GH #62: front-of-HMD block/guard envelope (head-local metres; +Y up,
+    // -Z forward). Block is a hand *pose* held in front of the face, never a
+    // low hold. Both the guard pose and the strike-suppression gate share these
+    // numbers; tune them on a headset. Defaults match the ADR-0400 window.
+    float guardYMin = -0.16f;
+    float guardYMax = 0.32f;
+    float guardZMin = -0.60f;
+    float guardZMax = -0.12f;
+    float guardMaxHandSpan = 0.50f;
 };
 
 extern VRConfig g_vrConfig;

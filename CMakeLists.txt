@@ -49,6 +49,7 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4 AND RIDDICKVR_BUILD_PROXY)
         src/hook/bc1.h
         src/hook/arm_ik.h
         src/hook/combat_stance.h
+        src/hook/combat_guard.h
         src/hook/dialogue_navigation.h
         src/hook/camera_hook.cpp
         src/hook/camera_hook.h
@@ -102,6 +103,13 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
     )
     add_test(NAME combat_stance_hysteresis COMMAND riddick_vr_combat_stance_tests)
+
+    # GH #62: front-of-HMD block/guard envelope (shared by pose + strike gate).
+    add_executable(riddick_vr_combat_guard_tests tests/combat_guard_tests.cpp)
+    target_include_directories(riddick_vr_combat_guard_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
+    )
+    add_test(NAME combat_guard_envelope COMMAND riddick_vr_combat_guard_tests)
 
     add_executable(riddick_vr_dialogue_navigation_tests tests/dialogue_navigation_tests.cpp)
     target_include_directories(riddick_vr_dialogue_navigation_tests PRIVATE

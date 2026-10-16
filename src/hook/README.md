@@ -40,4 +40,14 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
 - Gated by `[VR] NativeHands` (mesh) and `[VR] NativeHandTexture`; the flat
   skin tone is retained as the fallback. Only active when `NativeHands` is set.
 
+## Front-of-HMD block guard (GH #62)
+- `combat_guard.h`: header-only, dependency-free `GuardEnvelope` (`GuardHandInWindow`
+  / `InGuardEnvelope`) in head-local metres (`+Y` up, `-Z` forward). Block is a
+  hand **pose** held in front of the face; a low rest hold never blocks.
+- Shared by the guard-pose detector **and** the strike gate in
+  `camera_hook.cpp` (`GetGuardEnvelope()`), so a fast forward/hook swing thrown
+  from a raised guard is no longer masked by `!inGuardVolume`. Tunable via the
+  INI (`GuardYMin/GuardYMax/GuardZMin/GuardZMax/GuardMaxHandSpan`); unit-tested
+  by `combat_guard_envelope` (`tests/combat_guard_tests.cpp`). See ADR-0434.
+
 

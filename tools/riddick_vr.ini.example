@@ -54,3 +54,13 @@ NativeHandOffsetZ=0
 ; set to 1 if the texture reads vertically mirrored.
 NativeHandTexture=1
 NativeHandTextureVFlip=0
+; --- Front-of-HMD block/guard window (GH #62) ---
+; Head-local hand window (metres relative to the HMD: +Y up, -Z forward into the
+; view). Block = both fists held in front of the face within this window; a low
+; rest hold (Y below GuardYMin) does NOT block, and a fast swing outside the
+; window always fires. Keep GuardYMin well above a resting hand height.
+GuardYMin=-0.16     ; lowest hand height that counts as a block (head-local m)
+GuardYMax=0.32      ; highest hand height that counts as a block
+GuardZMin=-0.60     ; farthest forward the guard may be held
+GuardZMax=-0.12     ; nearest to the face (smaller magnitude = closer)
+GuardMaxHandSpan=0.50   ; max |leftX - rightX| shield width (m)

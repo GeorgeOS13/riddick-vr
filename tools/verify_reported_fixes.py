@@ -20,6 +20,7 @@ def main():
     host_main = (ROOT / "src/host/main.cpp").read_text(encoding="utf-8")
     action_map = (ROOT / "src/hook/vr_action_map.h").read_text(encoding="utf-8")
     stance = (ROOT / "src/hook/combat_stance.h").read_text(encoding="utf-8")
+    guard_header = (ROOT / "src/hook/combat_guard.h").read_text(encoding="utf-8")
     dialogue = (ROOT / "src/hook/dialogue_navigation.h").read_text(encoding="utf-8")
     config = (ROOT / "src/hook/vr_config.cpp").read_text(encoding="utf-8")
 
@@ -60,6 +61,14 @@ def main():
             "bool guardPoseDetected = !isClimbingActive && !s_twoHandedStabilizationActive" in camera and
             "chinLevel && inFrontOfFace && handsClose && handsSteady && notPunching" in camera,
             "combat stance must use two-hand hysteresis and gate strikes/guard")
+    require("struct GuardEnvelope" in guard_header and "InGuardEnvelope" in guard_header and
+            '#include "combat_guard.h"' in camera and
+            "InGuardEnvelope(guardVolume," in camera and
+            "GetGuardEnvelope()" in camera and
+            all(key in config for key in ("guardYMin", "guardYMax", "guardZMin",
+                                          "guardZMax", "guardMaxHandSpan")) and
+            "combat_guard_tests.cpp" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8"),
+            "GH #62: the block guard must be a shared, INI-tunable front-of-HMD envelope")
     require("using VRArmIK::ClampWristOrientation" in hands and "MIN_ELBOW_ANGLE" in ik_header and
             "arm_ik_tests.cpp" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8") and
             "DrawArmSegment(shoulder, elbow" in hands and "m_lastIkFrame" in hand_header and

@@ -2,6 +2,64 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 27 — 2026-10-16 12:19 (scheduled loop)
+- **Unit:** GH **#62** (physical block/attack) — make the block a **front-of-HMD
+  hand pose** and stop the guard from masking swings: extract the guard window
+  into a shared, INI-tunable, unit-tested envelope used by *both* the guard-pose
+  detector and the strike gate.
+- Finding (read-only, `src/hook/camera_hook.cpp`): the guard had **two different
+  volumes**. The pose detector (added in `05ae8a6`) used a tight front-of-face
+  window `y ∈ [-0.16, 0.32]`, `z ∈ [-0.60, -0.12]`, span `< 0.50`; the **strike
+  gate** still used the old loose volume `y ∈ [-0.42, 0.32]`, `z ∈ [-0.68,
+  -0.05]`, span `< 0.56`, and `isMeleeStrike` was masked by `&& !inGuardVolume`.
+  The old `y` floor sits **below the view** and its `z` ceiling reaches **inside**
+  it, so a forward/hook swing thrown from a raised guard landed in the loose
+  volume and never fired — the issue's "raising the hands to guard can mask or
+  cancel attacks".
+- Change (code/tools/docs):
+  - `src/hook/combat_guard.h` (new, header-only, dependency-free): `GuardEnvelope`
+    (head-local metres; `+Y` up, `-Z` forward) + `GuardHandInWindow` /
+    `InGuardEnvelope` (two-hand + `maxHandSpan` predicate; sign-agnostic span).
+  - `src/hook/vr_config.{h,cpp}`: `guardYMin=-0.16`, `guardYMax=0.32`,
+    `guardZMin=-0.60`, `guardZMax=-0.12`, `guardMaxHandSpan=0.50` — INI keys
+    `GuardYMin/GuardYMax/GuardZMin/GuardZMax/GuardMaxHandSpan` (clamped; an
+    inverted window is rejected). Defaults **reproduce the existing pose window
+    exactly**, so the block pose is unchanged; only the strike gate narrows.
+  - `src/hook/camera_hook.cpp`: `GetGuardEnvelope()` (from `g_vrConfig`); the
+    strike gate now uses `InGuardEnvelope(...)`; `chinLevel`/`inFrontOfFace`/
+    `handsClose` derive from the envelope fields (still front-of-face, never
+    below the view). The holster-gate `inGuardPose` predicate is left as-is.
+  - `tests/combat_guard_tests.cpp` (new) + CTest `combat_guard_envelope`:
+    boundary inclusivity, the **low-hold rejection** (#62 regression), view-plane
+    and reach rejections, one-hand-out, span bound (strict/sign-agnostic), tuned
+    envelope, inverted window.
+  - `CMakeLists.txt`, `riddick_vr.ini`, `tools/riddick_vr.ini.example`,
+    `src/hook/README.md`, `tools/verify_reported_fixes.py` (new shared-envelope
+    invariant), `docs/adr/0434-front-of-hmd-block-guard-envelope.md` (new).
+- Evidence: `build-all.ps1 -Config Release` OK (x86 `opengl32.dll` manifest +
+  x64 host); CTest **7/7 PASS** on x86 **and** x64 (new `combat_guard_envelope`);
+  `test_mos_xmd`, `test_xmd_export`, `test_xmd_bake`, `test_xmd_pose`,
+  `test_xsa_anim`, `test_mos_xtc`, `test_xtc_bake`, `validate_addresses`,
+  `verify_hook_init`, `verify_reported_fixes`, `scenario_tests.py --check` all
+  PASS.
+- **#63 lead (RE, read-only; not this wake's unit):** `noviewmodel` is a **shipped
+  per-item RPG flag**, not an engine-only token. `Content/Registry/RpgAmmo.xrg`
+  has e.g. `*flags renderquantity+noviewmodel+needequippedlink+unselectable`;
+  only **9/60** shipped `*flags` lines carry it (all in `RpgAmmo.xrg`); every
+  `RpgWeapons.xrg` weapon and pickup/template lacks it. The GameClasses flag-name
+  table also holds `noviewmodel`/`rpgmodelflags`/`usethirdperson` next to
+  `aiming`/`wallcollision` (`GameClasses_Win32_x86.dll` VA `0x101c527c`, sha256
+  `1898b736…`; only data xref at `0x101f7604`). So viewmodel suppression is
+  **data-driven** (option 1 of #63) — see comment on #63. (Retired: three
+  parallel `rea`/Ghidra runs contend and hit the 330 s provider timeout; run them
+  one at a time.)
+- Blocker: #62 acceptance ("only the VR/native hands visible … validated
+  in-headset") still needs a headset; the guard defaults are the ADR-0400 window
+  and must be tuned on hardware. **Next:** tune `Guard*` on-headset; #63 needs
+  the engine-side consumer of the `noviewmodel` bit (approach 1) or a per-draw
+  viewmodel signature (approach 2) since we cannot write game content.
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 26 — 2026-10-16 12:20 (scheduled loop)
 - **Unit:** GH **#61** (native-hand texture) — close ADR-0432's "Next": **bind
   the real `Riddick_ArmScar_D` diffuse** on `VRHandRenderer::DrawNativeHand`,
