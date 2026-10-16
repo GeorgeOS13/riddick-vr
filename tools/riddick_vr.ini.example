@@ -35,3 +35,14 @@ AmmoQuadCropX=0.75
 AmmoQuadCropY=0.75
 AmmoQuadCropW=0.23
 AmmoQuadCropH=0.23
+; --- Native arm/hand mesh (GH #46) ---
+; 1 = draw the real Riddick arm/hand geometry baked from the game's .xmd models
+; (behind the procedural overlay, which stays the default and the fallback).
+; PROVISIONAL / UNTUNED: the placement is derived from the mesh bounds and must
+; be calibrated on a headset. Scale is model units -> metres; the offsets are
+; hand-local metres (X right, Y up, Z back toward the forearm).
+NativeHands=0
+NativeHandScale=0.033
+NativeHandOffsetX=0
+NativeHandOffsetY=0
+NativeHandOffsetZ=0

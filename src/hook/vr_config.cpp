@@ -83,9 +83,15 @@ void LoadVRConfig() {
         cfg.ammoQuadCropH = ClampF(ReadFloat(iniPath, "AmmoQuadCropH", cfg.ammoQuadCropH), 0.01f, 1.0f);
         cfg.wristHudCropW = ClampF(ReadFloat(iniPath, "WristHudCropW", cfg.wristHudCropW), 0.01f, 1.0f);
         cfg.wristHudCropH = ClampF(ReadFloat(iniPath, "WristHudCropH", cfg.wristHudCropH), 0.01f, 1.0f);
-        VR_LOG_INFO("VR config loaded from %s (snap=%.0f move_dz=%.2f comfort=%d seated=%d scale=%.2f paw=%d)",
+        // GH #46: native arm/hand mesh draw (provisional; default off).
+        cfg.nativeHands = ReadInt(iniPath, "NativeHands", cfg.nativeHands) ? 1 : 0;
+        cfg.nativeHandScale = ClampF(ReadFloat(iniPath, "NativeHandScale", cfg.nativeHandScale), 0.005f, 0.20f);
+        cfg.nativeHandOffsetX = ClampF(ReadFloat(iniPath, "NativeHandOffsetX", cfg.nativeHandOffsetX), -1.0f, 1.0f);
+        cfg.nativeHandOffsetY = ClampF(ReadFloat(iniPath, "NativeHandOffsetY", cfg.nativeHandOffsetY), -1.0f, 1.0f);
+        cfg.nativeHandOffsetZ = ClampF(ReadFloat(iniPath, "NativeHandOffsetZ", cfg.nativeHandOffsetZ), -1.0f, 1.0f);
+        VR_LOG_INFO("VR config loaded from %s (snap=%.0f move_dz=%.2f comfort=%d seated=%d scale=%.2f paw=%d native_hands=%d)",
             iniPath, cfg.snapAngleDeg, cfg.moveDeadzone, cfg.comfortEnabled,
-            cfg.seated, cfg.worldScale, cfg.southpaw);
+            cfg.seated, cfg.worldScale, cfg.southpaw, cfg.nativeHands);
     } else {
         VR_LOG_INFO("VR config: no riddick_vr.ini found, using defaults");
     }

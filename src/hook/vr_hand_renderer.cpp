@@ -1,6 +1,8 @@
 #include "vr_hand_renderer.h"
 #include "arm_ik.h"
 #include "vr_config.h" // Track C #13: world scale
+#include "native_hand_mesh.h" // GH #46: baked native arm/hand geometry
+#include "native_hand_pose.h" // GH #46: model-space -> hand-local placement
 #include "opengl_proxy.h"
 #include "logging.h"
 #include <cmath>
@@ -429,7 +431,11 @@ void VRHandRenderer::RenderHands(const RiddickVRSharedState& state, bool isLeftE
         // Prisoner uniform cloth, tapering at elbow and wrist. Hand geometry
         // continues from the same tracked wrist target.
         DrawArmSegment(shoulder, elbow, 0.050f * armScale, 0.040f * armScale, 0.45f, 0.43f, 0.37f);
-        DrawArmSegment(elbow, wristTarget, 0.040f * armScale, 0.028f * armScale, 0.46f, 0.44f, 0.38f);
+        // GH #46: when the native arm mesh is enabled it carries the forearm,
+        // so only the upper-arm cloth is drawn procedurally (no doubling).
+        if (!g_vrConfig.nativeHands) {
+            DrawArmSegment(elbow, wristTarget, 0.040f * armScale, 0.028f * armScale, 0.46f, 0.44f, 0.38f);
+        }
         m_currentFade = 1.0f;
     };
     drawArm(leftCtrl, true, m_leftElbow, m_leftArmWrist, m_hasLeftElbow);
@@ -574,27 +580,31 @@ void VRHandRenderer::DrawTacticalHand(HandSide side, float grip, float trigger, 
     }
 
     // 1. Forearm Gauntlet & Wrist Vambrace
-    DrawForearmGauntlet(side);
+    // GH #46: the baked native arm mesh (when enabled) replaces the procedural
+    // gauntlet/palm/digits; the interaction visuals below are kept either way.
+    if (!DrawNativeHand(side)) {
+        DrawForearmGauntlet(side);
 
-    // 2. Palm & Armored Knuckle Guard
-    DrawPalmAndKnuckleGuard(side);
+        // 2. Palm & Armored Knuckle Guard
+        DrawPalmAndKnuckleGuard(side);
 
-    // 3. Articulated Digits (Fingers)
-    // Splay angles in degrees: Index outward, Middle straight, Ring inward, Pinky inward
-    float splayIndex  = (side == HandSide::Left) ? -4.5f :  4.5f;
-    float splayMiddle = 0.0f;
-    float splayRing   = (side == HandSide::Left) ?  3.0f : -3.0f;
-    float splayPinky  = (side == HandSide::Left) ?  6.5f : -6.5f;
+        // 3. Articulated Digits (Fingers)
+        // Splay angles in degrees: Index outward, Middle straight, Ring inward, Pinky inward
+        float splayIndex  = (side == HandSide::Left) ? -4.5f :  4.5f;
+        float splayMiddle = 0.0f;
+        float splayRing   = (side == HandSide::Left) ?  3.0f : -3.0f;
+        float splayPinky  = (side == HandSide::Left) ?  6.5f : -6.5f;
 
-    // Track C #13: world scale multiplier on hand render scale (INI WorldScale).
-    const float handScale = GetWorldScale();
-    DrawArticulatedFinger(side, 0, indexCurl,     splayIndex,  0.96f * handScale); // Index
-    DrawArticulatedFinger(side, 1, effectiveGrip, splayMiddle, 1.00f * handScale); // Middle
-    DrawArticulatedFinger(side, 2, effectiveGrip, splayRing,   0.93f * handScale); // Ring
-    DrawArticulatedFinger(side, 3, effectiveGrip, splayPinky,  0.80f * handScale); // Pinky
+        // Track C #13: world scale multiplier on hand render scale (INI WorldScale).
+        const float handScale = GetWorldScale();
+        DrawArticulatedFinger(side, 0, indexCurl,     splayIndex,  0.96f * handScale); // Index
+        DrawArticulatedFinger(side, 1, effectiveGrip, splayMiddle, 1.00f * handScale); // Middle
+        DrawArticulatedFinger(side, 2, effectiveGrip, splayRing,   0.93f * handScale); // Ring
+        DrawArticulatedFinger(side, 3, effectiveGrip, splayPinky,  0.80f * handScale); // Pinky
 
-    // 4. Articulated Thumb
-    DrawArticulatedThumb(side, thumbCurl);
+        // 4. Articulated Thumb
+        DrawArticulatedThumb(side, thumbCurl);
+    }
 
     // 5. Interaction visuals: reload proximity glow, NanoMED cartridge, heal glow.
     // Fixed-function only, no new state leaks (restored via PopAttrib in RenderHands).
@@ -627,6 +637,67 @@ void VRHandRenderer::DrawTacticalHand(HandSide side, float grip, float trigger, 
 
     m_currentFade = 1.0f;
     s_gl.glPopMatrix();
+}
+
+// GH #46: draw the baked native Riddick arm/hand mesh for one hand.
+//
+// Geometry comes from native_hand_mesh_data.h (baked from the shipped .xmd by
+// tools/xmd_bake.py); the model-space -> hand-local mapping is the provisional,
+// INI-tunable placement in native_hand_pose.h (ADR-0427). Deliberately built on
+// the already-loaded immediate-mode GL entry points, matching the rest of this
+// renderer: it mutates no state that RenderHands does not already restore.
+bool VRHandRenderer::DrawNativeHand(HandSide side) {
+    if (!g_vrConfig.nativeHands) {
+        return false;
+    }
+    if (!s_gl.glBegin || !s_gl.glEnd || !s_gl.glVertex3f) {
+        return false;
+    }
+
+    const char* name = (side == HandSide::Left) ? "Riddick_LeftArm" : "Riddick_RightArm";
+    const NativeHandMesh* mesh = FindNativeHandMesh(name);
+    if (!mesh || !mesh->vertices || !mesh->indices || mesh->index_count == 0 || mesh->vertex_count == 0) {
+        return false;
+    }
+
+    const float metersPerUnit = GetWorldScale() * g_vrConfig.nativeHandScale;
+    const NativeHandPlacement placement = ComputeNativeHandPlacement(
+        mesh->bounds_min, mesh->bounds_max, side == HandSide::Left, metersPerUnit);
+    if (!placement.valid) {
+        return false;
+    }
+
+    // Provisional hand-local placement offset (metres), INI-tunable; defaults
+    // to zero so the mesh's hand end sits at the tracked controller origin.
+    s_gl.glTranslatef(g_vrConfig.nativeHandOffsetX,
+                      g_vrConfig.nativeHandOffsetY,
+                      g_vrConfig.nativeHandOffsetZ);
+
+    // Inmate sleeve/skin-neutral tone, honouring the same per-hand fade as the
+    // procedural primitives.
+    const float r = 0.52f, g = 0.47f, b = 0.41f;
+    const float f = (std::clamp)(m_currentFade, 0.0f, 1.0f);
+    if (m_useAlphaFade) s_gl.glColor4f(r, g, b, f);
+    else s_gl.glColor3f(r * f, g * f, b * f);
+
+    s_gl.glBegin(GL_TRIANGLES);
+    for (unsigned int i = 0; i + 2 < mesh->index_count; i += 3) {
+        for (int k = 0; k < 3; ++k) {
+            const unsigned int vi = mesh->indices[i + k];
+            if (vi >= mesh->vertex_count) {
+                continue;
+            }
+            const NativeHandVertex& v = mesh->vertices[vi];
+            float localPos[3];
+            float localNormal[3];
+            MapNativeHandPoint(placement, v.position, localPos);
+            MapNativeHandNormal(placement, v.normal, localNormal);
+            s_gl.glNormal3f(localNormal[0], localNormal[1], localNormal[2]);
+            s_gl.glVertex3f(localPos[0], localPos[1], localPos[2]);
+        }
+    }
+    s_gl.glEnd();
+    return true;
 }
 
 void VRHandRenderer::DrawForearmGauntlet(HandSide side) {

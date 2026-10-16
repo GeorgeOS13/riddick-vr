@@ -34,6 +34,15 @@ struct VRConfig {
     // GH #40: wrist HUD crop rect (fraction of swapchain 0..1)
     float wristHudCropW = 0.26f;
     float wristHudCropH = 0.16f;
+    // GH #46: draw the baked native Riddick arm/hand mesh (default OFF;
+    // procedural overlay stays the fallback). Scale is model units -> metres
+    // and the offset is hand-local metres; both are provisional and need a
+    // headset-tuned value (ADR-0427).
+    int nativeHands = 0;
+    float nativeHandScale = 0.033f;
+    float nativeHandOffsetX = 0.0f;
+    float nativeHandOffsetY = 0.0f;
+    float nativeHandOffsetZ = 0.0f;
 };
 
 extern VRConfig g_vrConfig;

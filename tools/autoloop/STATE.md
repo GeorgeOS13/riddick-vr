@@ -2,6 +2,56 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 19 — 2026-10-16 08:21 (scheduled loop)
+- **Unit:** GH #46 (highest priority) — stop leaving the ten wakes of baked
+  native arm/hand RE unused: wire the baked mesh into `VRHandRenderer` behind a
+  config flag, with the model→hand-local placement isolated in a tested header.
+- Finding (real evidence, read-only; asset bounds + ADR-0420/0424):
+  - `native_hand_mesh_data.h` bounds: `Riddick_LeftArm` y `-25.45..-5.49`,
+    `Riddick_RightArm` y `17.61..25.45` — the arm's long axis is **model Y**
+    (extent ~20 vs ~8 on X/Z) with the hand at the **-Y** end on the left and the
+    **+Y** end on the right (left fingertips `y ≈ -24..-25.4` per ADR-0420/0424).
+    Both `Pa2_Hand` meshes are also Y-longest, so "long axis = largest AABB
+    extent" generalizes.
+  - ADR-0424/0425/0426 already established the stored geometry is **not** the
+    `NODES` bind pose (arm clusters carry a baked raised pose) and no per-cluster
+    bind-inverse transform is stored in the `.xmd`, so only a **rigid** draw is
+    honest today; a skinned draw still waits on the runtime pose (#59/#58).
+- Change:
+  - `src/hook/native_hand_pose.h` (new, header-only, dependency-free):
+    `NativeHandPlacement`, `ComputeNativeHandPlacement`, `MapNativeHandPoint`,
+    `MapNativeHandNormal` — AABB → hand-local basis (X right = up×backward,
+    Y up = model +Z, Z back = ±long axis), anchor at the **hand end** (not the
+    centre), scale = caller `meters/unit`.
+  - `src/hook/vr_hand_renderer.{h,cpp}`: `DrawNativeHand(side)` resolves
+    `Riddick_LeftArm`/`Riddick_RightArm`, emits the baked triangles with the
+    already-loaded immediate-mode GL entry points and the existing per-hand
+    fade; when on it replaces the procedural gauntlet/palm/digits and the
+    elbow→wrist cloth segment (keeps interaction glow + upper-arm cloth). When
+    off (the default) the procedural overlay is unchanged.
+  - `src/hook/vr_config.{h,cpp}`: `NativeHands` (0/1), `NativeHandScale`
+    (0.005..0.20, default `0.033`), `NativeHandOffset{X,Y,Z}` (m, ±1).
+  - `tests/native_hand_pose_tests.cpp` (new) + CTest `native_hand_pose_mapping`:
+    orthonormal/right-handed basis, left/right mirror, hand-end→origin, scaled
+    span, normal mapping, degenerate/inverted/non-positive-scale rejection, and a
+    baked-asset cross-check. `CMakeLists.txt` (test target + headers),
+    `tools/riddick_vr.ini.example`, `riddick_vr.ini`, `src/hook/README.md`.
+  - `docs/adr/0427-native-hand-draw-path.md` (new) — includes an explicit
+    "not claimed" list (not a validated fit, not skinned, not the engine
+    viewmodel).
+- Evidence: `build/x86` opengl32.dll built; `ctest build/x86 -C Release` →
+  **5/5 PASS** (new `native_hand_pose_mapping`), `ctest build/x64` → **5/5 PASS**
+  (+ host exe built). `test_mos_xmd.py` (50), `test_xmd_export.py`,
+  `test_xmd_bake.py`, `test_xmd_pose.py`, `test_xsa_anim.py` (19),
+  `validate_addresses.py`, `verify_hook_init.py`, `verify_reported_fixes.py`,
+  `scenario_tests.py --check` all PASS.
+- Blocker: none for landing; **calibration** needs a headset (`NativeHands=1` +
+  `NativeHandScale`/offsets; defaults deliberately untuned and documented as
+  such). **Next:** tune the placement on hardware and/or feed the ADR-0423
+  palette→node skin + `.xsa` pose (#58) into a skinned variant once #59's runtime
+  per-cluster matrix is confirmed.
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 18 — 2026-10-16 06:17 (scheduled loop)
 - **Unit:** GH #59 → #46 — identify the mesh's `matrix_map` (`+0x24`) /
   `matrix_map_id` (`+0x28`) and test the "`matrix_map_id` registry" candidate

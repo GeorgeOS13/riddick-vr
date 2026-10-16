@@ -41,6 +41,12 @@ private:
     void DrawArticulatedFinger(HandSide side, int fingerIndex, float curl, float splayAngle, float lengthScale);
     void DrawArticulatedThumb(HandSide side, float curl);
 
+    // GH #46: draws the baked native Riddick arm/hand mesh for this hand.
+    // Returns false (and draws nothing) when the enable flag is off, the mesh
+    // is missing, or the placement degenerates -- the caller then falls back to
+    // the procedural primitives. Only active when VRConfig::nativeHands is set.
+    bool DrawNativeHand(HandSide side);
+
     // Geometry utility primitives (colors multiplied by active hand fade)
     void DrawBeveledBox(float x0, float y0, float z0, float x1, float y1, float z1, float r, float g, float b);
     void DrawTaperedCylinder(float z0, float r0, float z1, float r1, int slices, float r, float g, float b);
