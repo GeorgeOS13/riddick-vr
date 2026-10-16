@@ -83,6 +83,25 @@ struct VRConfig {
     float strikeUppercutMaxY = -0.10f;
     float strikeUppercutVz = -0.20f;
     float strikeCrossVx = 1.10f;
+    // GH #65: rotate the controller's world velocity into the HMD yaw frame
+    // before classifying strikes, so a swing registers whichever way the player
+    // faces. 0 = legacy (world axes; only works facing stage -Z).
+    int headLocalVelocity = 1;
+    // GH #65: milliseconds a melee mouse click stays held before release (0 =
+    // legacy instant down+up, which the engine's polled input often misses).
+    int meleeClickHoldMs = 60;
+    // GH #62: guard pose hysteresis (ms) and the hand speed limit (m/s) below
+    // which the hands count as steady. Defaults are the old hard-coded values.
+    int guardEngageMs = 40;
+    int guardReleaseMs = 80;
+    float guardSteadySpeed = 1.4f;
+    // GH #52: two-trigger combat stance thresholds (trigger 0..1, hold in ms).
+    // Defaults are the old constants. MeleeRequiresStance=1 ignores swings
+    // outside the stance (exploration mode); default 0 keeps swings always live.
+    float stanceEnterTrigger = 0.85f;
+    float stanceExitTrigger = 0.60f;
+    int stanceHoldMs = 100;
+    int meleeRequiresStance = 0;
     // GH #66 (approach 2): suppress the engine's own first-person viewmodel
     // (arms/hands) at the draw level, since approach 1 (the RPG `noviewmodel`
     // bit) was falsified in ADR-0438. Default OFF: the pass signature is a

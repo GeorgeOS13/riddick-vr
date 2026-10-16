@@ -90,6 +90,22 @@ StrikeUppercutVy=1.35   ; uppercut: hand Vy above this
 StrikeUppercutMaxY=-0.10 ; ...starting below the view (y < this)
 StrikeUppercutVz=-0.20  ; ...with some forward travel
 StrikeCrossVx=1.10      ; dual cross-slash: opposing |Vx| swing
+; GH #65: 1 = rotate controller world velocity into the HMD yaw frame so swings
+; register whichever way you face; 0 = legacy world axes (only facing stage -Z).
+HeadLocalVelocity=1
+; GH #65: ms (0-250) a melee click stays held; 0 = legacy instant down+up.
+MeleeClickHoldMs=60
+; GH #62: guard pose hold time to engage (ms), survive-pose-loss time (ms), and
+; the hand speed (m/s) below which the hands count as steady.
+GuardEngageMs=40
+GuardReleaseMs=80
+GuardSteadySpeed=1.4
+; GH #52: combat stance trigger thresholds (enter/exit, 0-1) and hold time (ms);
+; MeleeRequiresStance=1 ignores swings outside the stance (0 = swings always live).
+StanceEnterTrigger=0.85
+StanceExitTrigger=0.60
+StanceHoldMs=100
+MeleeRequiresStance=0
 ; --- Engine viewmodel suppression (GH #66, approach 2) ---
 ; 1 = skip the engine's own first-person arms/hands at the draw level so only
 ; the VR/native hands are visible (the duplicate-hands fix). Default 0.
