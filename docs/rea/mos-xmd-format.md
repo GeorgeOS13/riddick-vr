@@ -306,10 +306,24 @@ The three game packs share one layout, parsed by `tools/mos_xtc.py`:
    bytes (DXT1-sized), block at `0x16CDEABE` (+350072 B). `riddick_armscar_N` =
    512x1024, uncompressed (`0x200000` = 512*1024*4 B).
 
-4. Each packed block begins with a **`u32` mip-offset table** (`mip_levels`
-   entries, absolute file offsets), followed by one `[0x2C-byte header + data]`
-   record per mip. The block's pixel codec (looks block-compressed) is **not**
-   decoded yet.
+4. Each packed block is a **mip chain**: a `u32` mip-offset table (`mip_count`
+   absolute file offsets, where `mip_count = (offset[0] - block_offset) / 4`),
+   then one `[header + pixel data]` record per mip. The header is `0x2C` bytes
+   for compressed images and `0x1C` for raw ones; the invariant
+   `offset[i] + header_len + mip_bytes == offset[i+1]` holds on 887/901 (Models),
+   244/246 (GUI) and 3787/3797 (Levels) images.
+
+   The per-mip header carries width (+0x0C), height (+0x10) and `mip_bytes`
+   (+0x20 compressed / +0x08 raw), and — for compressed mips — a **codec field
+   at +0x1C**: `0` = **DXT1/BC1** (`mip_bytes == w*h/2`), `2` = **DXT3/BC2**,
+   `4` = **DXT5/BC3** (both `mip_bytes == w*h`). A `mip_bytes == 0` mip is empty.
+   Decoding as standard S3TC reproduces the shipped art (BC1 on
+   `Riddick_ArmScar_D`/`Riddick_B03_D`, BC3 on `Pa2_inmate_H04_D`, BC2 on
+   `SKYMOUNT_0` — all verified visually). `tools/mos_xtc.py --decode NAME --out
+   FILE.png` writes a mip to an RGBA PNG (`--mips NAME` prints the chain). The
+   raw/linear images are 32-bit but their channel order is not yet decoded; the
+   engine reader is `CTextureContainer_VirtualXTC2::ReadTexture` /
+   `GetTextureMipMap` / `CImage::ReadHeader` (ADR-0432).
 
 Caveats: the node `count` field (`+0x28`) is 2-14 higher than the framed-record
 count (e.g. Models says 914, frames 901) - the framing tiles exactly, so the

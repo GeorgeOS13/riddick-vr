@@ -150,11 +150,12 @@ the table is a mip offset list. The **pixel codec itself is not decoded yet**.
   without loading it.
 
 ## Not claimed / follow-ups
-- The pixel codec (the block data looks block-compressed / `XTX`; `desc[4] & 0x10`
-  marks compression, but DXT variant, palette, and any swizzle are **not**
-  decoded). Next: decompile `CTextureContainer_VirtualXTC2` / `XTXCompile` in
-  `MSystem.dll` (needs a `rea search MSystem.dll "VirtualXTC2" --kind procedures`
-  run) and decode `desc[7]`/`desc[10]`/`desc[11]` bits.
+- The pixel codec — **resolved by ADR-0432**: the packed block is a mip chain
+  and the codec is standard S3TC (`0`=DXT1/BC1, `2`=DXT3/BC2, `4`=DXT5/BC3),
+  decoded by `tools/mos_xtc.py --decode` and verified visually. The codec enum
+  came from `rea decompile MSystem.dll 0x1009b280` (`ReadTexture`) /
+  `0x1009b760` (`GetTextureMipMap`). `desc[7]`/`desc[10]`/`desc[11]` bit
+  meanings and the raw/linear channel order remain open (ADR-0432).
 - The node `count` (`+0x28`) vs framed-record count discrepancy (Finding 3).
 - `Offline01.xtc` uses a different nested variant
   (`SOURCE`/`IMAGELIST`/`IMAGEDIRECTORY4`/`IMAGE`/`NAME`/`PROPERTIES`/`MIPMAP`);

@@ -65,10 +65,50 @@ The record length is variable (58 bytes of descriptor for most records, up to
 ``FF FF FF FF 00 00 00 00`` marker, which we use to walk them; the walked
 records tile the directory payload exactly.
 
-Not claimed here (open questions, recorded in ADR-0431):
-  * the exact pixel payload codec (the blocks look block-compressed / ``XTX``,
-    and ``desc[4] & 0x10`` marks compression, but the format is not decoded);
+The packed pixel data (the ``TEXTURES`` node payload):
+
+Every image's packed block (at ``desc[9]``) is a **mip chain**::
+
+    u32 mip_offset[mip_count]        absolute file offsets of each mip header
+    per mip:  0x2C-byte header (compressed) | 0x1C-byte header (raw), data
+
+``mip_count`` is read back from the table itself::
+
+    mip_count = (mip_offset[0] - block_offset) / 4
+
+(the table is exactly ``4 * mip_count`` bytes).  The per-mip header fields
+(little-endian ``u32``)::
+
+    compressed (0x2C header)             raw / linear (0x1C header)
+      +0x00  0x300                         +0x00  0x300
+      +0x04  colorspace (0x5000 or 0)      +0x04  colorspace (0)
+      +0x08  mip bytes | 0x10              +0x08  mip bytes
+      +0x0C  width                         +0x0C  width
+      +0x10  height                        +0x10  height
+      +0x14  0x800                         +0x14  0x800
+      +0x18  0                             +0x18  0
+      +0x1C  codec (0=DXT1, 2=DXT3,    (pixel data follows immediately)
+                     4=DXT5)
+      +0x20  mip bytes
+      +0x24  0
+      +0x28  0x10
+
+The codec field (+0x1C) is **0 for DXT1 / BC1**, **2 for DXT3 / BC2** and
+**4 for DXT5 / BC3**, and the stored mip ``bytes`` equals ``w*h/2`` (BC1) or
+``w*h`` (BC2/BC3) exactly.  A mip with ``bytes == 0`` is an *empty* mip (a
+header only, no pixel data).  Decoding the base mip as standard S3TC
+reproduces the shipped textures (verified visually: BC1 on
+``Riddick_ArmScar_D`` / ``Riddick_B03_D``, BC3 on ``Pa2_inmate_H04_D``, BC2 on
+``SKYMOUNT_0``).  The engine reader this mirrors is
+``CTextureContainer_VirtualXTC2::ReadTexture`` / ``GetTextureMipMap`` /
+``CImage::ReadHeader`` in ``MSystem.dll`` (see ADR-0432).
+
+Not claimed here (open questions, recorded in ADR-0431 / ADR-0432):
+  * the exact pixel format of the raw (linear / normal-map) images -- they are
+    32-bit (``bytes == w*h*4``) but the channel order is not verified;
   * the meaning of ``desc[0]``/``desc[7]``/``desc[10]`` bits;
+  * why a handful of images ship a *reduced* or non-conforming mip chain
+    (``mip_count`` < ``desc[1]``, e.g. ``SCam_D`` 9 of 10);
   * why the node ``count`` field (+0x28) is 2-14 higher than the number of
     framed records (e.g. Models.xtc says 914, frames 901); the framing tiles
     exactly, so the framed records are authoritative.
@@ -99,6 +139,16 @@ DESC_MIN_BYTES = 48
 # Node names we expect in a texture pack.
 TEXTURES = "TEXTURES"
 IMAGEDIRECTORY = "IMAGEDIRECTORY5"
+# Per-mip header length: compressed headers carry the S3TC codec field (+0x1C);
+# raw/linear headers stop right after +0x18.
+MIP_HEADER_COMPRESSED = 0x2C
+MIP_HEADER_RAW = 0x1C
+# S3TC codec codes (per-mip header +0x1C).
+CODEC_DXT1 = 0
+CODEC_DXT3 = 2
+CODEC_DXT5 = 4
+# Raw / linear 32-bit pixel blocks have no codec field.
+CODEC_RAW = -1
 
 
 class XtcError(Exception):
@@ -111,6 +161,129 @@ def _u32(b: bytes, off: int) -> int:
 
 def _is_pow2(n: int) -> bool:
     return n > 0 and (n & (n - 1)) == 0
+
+
+def _rgb565(color: int):
+    return ((((color >> 11) & 0x1F) * 255) // 31,
+            (((color >> 5) & 0x3F) * 255) // 63,
+            ((color & 0x1F) * 255) // 31)
+
+
+def _bc1_base(data: bytes, offset: int):
+    """Return the 4-entry RGB palette and the 32-bit index word of one
+    DXT1/BC1 block."""
+    c0, c1, bits = struct.unpack_from("<HHI", data, offset)
+    r0, g0, b0 = _rgb565(c0)
+    r1, g1, b1 = _rgb565(c1)
+    if c0 > c1:
+        pal = [(r0, g0, b0), (r1, g1, b1),
+               ((2 * r0 + r1) // 3, (2 * g0 + g1) // 3, (2 * b0 + b1) // 3),
+               ((r0 + 2 * r1) // 3, (g0 + 2 * g1) // 3, (b0 + 2 * b1) // 3)]
+    else:
+        pal = [(r0, g0, b0), (r1, g1, b1),
+               ((r0 + r1) // 2, (g0 + g1) // 2, (b0 + b1) // 2),
+               (0, 0, 0)]
+    return pal, bits
+
+
+def bc1_decode(data: bytes, width: int, height: int) -> bytes:
+    """Decode a DXT1 / BC1 surface to top-down RGBA8 bytes."""
+    out = bytearray(width * height * 4)
+    bw = max(1, (width + 3) // 4)
+    bh = max(1, (height + 3) // 4)
+    for by in range(bh):
+        for bx in range(bw):
+            o = (by * bw + bx) * 8
+            if o + 8 > len(data):
+                return bytes(out)
+            pal, bits = _bc1_base(data, o)
+            for py in range(4):
+                for px in range(4):
+                    x, y = bx * 4 + px, by * 4 + py
+                    if x < width and y < height:
+                        r, g, b = pal[(bits >> (2 * (4 * py + px))) & 3]
+                        di = (y * width + x) * 4
+                        out[di:di + 4] = bytes((r, g, b, 255))
+    return bytes(out)
+
+
+def bc2_decode(data: bytes, width: int, height: int) -> bytes:
+    """Decode a DXT3 / BC2 surface to top-down RGBA8 bytes (explicit 4-bit
+    alpha block first, colour block second)."""
+    out = bytearray(width * height * 4)
+    bw = max(1, (width + 3) // 4)
+    bh = max(1, (height + 3) // 4)
+    for by in range(bh):
+        for bx in range(bw):
+            o = (by * bw + bx) * 16
+            if o + 16 > len(data):
+                return bytes(out)
+            pal, bits = _bc1_base(data, o + 8)
+            for py in range(4):
+                for px in range(4):
+                    ci = (bits >> (2 * (4 * py + px))) & 3
+                    nib = data[o + (4 * py + px) // 2]
+                    ai = (nib >> (4 * (px % 2))) & 0xF
+                    x, y = bx * 4 + px, by * 4 + py
+                    if x < width and y < height:
+                        r, g, b = pal[ci]
+                        di = (y * width + x) * 4
+                        out[di:di + 4] = bytes((r, g, b, ai * 17))
+    return bytes(out)
+
+
+def bc3_decode(data: bytes, width: int, height: int) -> bytes:
+    """Decode a DXT5 / BC3 surface to top-down RGBA8 bytes (alpha block
+    first, colour block second -- the shipped order)."""
+    out = bytearray(width * height * 4)
+    bw = max(1, (width + 3) // 4)
+    bh = max(1, (height + 3) // 4)
+    for by in range(bh):
+        for bx in range(bw):
+            o = (by * bw + bx) * 16
+            if o + 16 > len(data):
+                return bytes(out)
+            a0, a1 = data[o], data[o + 1]
+            abits = int.from_bytes(data[o + 2:o + 8], "little")
+            apal = [a0, a1]
+            if a0 > a1:
+                for i in range(1, 7):
+                    apal.append(((7 - i) * a0 + i * a1) // 7)
+            else:
+                for i in range(1, 5):
+                    apal.append(((5 - i) * a0 + i * a1) // 5)
+                apal += [0, 255]
+            pal, bits = _bc1_base(data, o + 8)
+            for py in range(4):
+                for px in range(4):
+                    ci = (bits >> (2 * (4 * py + px))) & 3
+                    ai = (abits >> (3 * (4 * py + px))) & 7
+                    x, y = bx * 4 + px, by * 4 + py
+                    if x < width and y < height:
+                        r, g, b = pal[ci]
+                        di = (y * width + x) * 4
+                        out[di:di + 4] = bytes((r, g, b, apal[ai]))
+    return bytes(out)
+
+
+def write_png(path: str, width: int, height: int, rgba: bytes) -> None:
+    """Write 8-bit RGBA pixels to ``path`` as a PNG (stdlib only)."""
+    import zlib
+
+    def chunk(tag: bytes, body: bytes) -> bytes:
+        return (struct.pack(">I", len(body)) + tag + body +
+                struct.pack(">I", zlib.crc32(tag + body) & 0xFFFFFFFF))
+
+    rows = bytearray()
+    for y in range(height):
+        rows.append(0)
+        rows += rgba[y * width * 4:(y + 1) * width * 4]
+    png = b"\x89PNG\r\n\x1a\n"
+    png += chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
+    png += chunk(b"IDAT", zlib.compress(bytes(rows), 9))
+    png += chunk(b"IEND", b"")
+    with open(path, "wb") as f:
+        f.write(png)
 
 
 class XtcNode:
@@ -199,6 +372,48 @@ class XtcImage:
             "stored_size": self.stored_size,
             "format_flags": self.format_flags,
             "desc": [hex(v) for v in self.desc],
+        }
+
+
+class XtcMip:
+    """One mip level of an image's packed block (see the module docstring)."""
+
+    __slots__ = ("level", "width", "height", "size", "codec", "compressed",
+                 "data_offset", "header")
+
+    def __init__(self, level, width, height, size, codec, compressed,
+                 data_offset, header):
+        self.level = level
+        self.width = width
+        self.height = height
+        self.size = size
+        self.codec = codec
+        self.compressed = compressed
+        self.data_offset = data_offset
+        self.header = header
+
+    @property
+    def empty(self) -> bool:
+        return self.size == 0
+
+    def codec_name(self) -> str:
+        if not self.compressed:
+            return "raw32"
+        return {CODEC_DXT1: "DXT1", CODEC_DXT3: "DXT3",
+                CODEC_DXT5: "DXT5"}.get(self.codec, f"codec{self.codec}")
+
+    def as_dict(self) -> dict:
+        return {
+            "level": self.level,
+            "width": self.width,
+            "height": self.height,
+            "size": self.size,
+            "compressed": self.compressed,
+            "codec": self.codec,
+            "codec_name": self.codec_name(),
+            "empty": self.empty,
+            "data_offset": self.data_offset,
+            "header": [hex(v) for v in self.header],
         }
 
 
@@ -339,6 +554,95 @@ class Xtc:
     def blob_region(self):
         return self._blob
 
+    # -- mip chain / decode ---------------------------------------------
+    def read_mips(self, img: XtcImage) -> list[XtcMip]:
+        """Decode an image's packed-block mip chain (raises ``XtcError``).
+
+        The block is ``u32 mip_offset[n]`` (absolute) followed by one
+        ``[0x2C | 0x1C]-byte header + data`` record per mip.  ``n`` is
+        recovered from the first table entry.
+        """
+        hdrlen = MIP_HEADER_COMPRESSED if img.compressed else MIP_HEADER_RAW
+        self._fh.seek(img.data_offset)
+        first = self._fh.read(4)
+        if len(first) < 4:
+            raise XtcError(f"{img.name}: truncated mip table")
+        offs0 = _u32(first, 0)
+        rel = offs0 - img.data_offset
+        if rel <= 0 or rel % 4 or not (4 <= rel <= 4 * 32):
+            raise XtcError(f"{img.name}: implausible mip table "
+                           f"(first offset 0x{offs0:X}, block at "
+                           f"0x{img.data_offset:X})")
+        n = rel // 4
+        self._fh.seek(img.data_offset)
+        table = list(struct.unpack_from("<%dI" % n, self._fh.read(4 * n), 0))
+        block_end = img.data_offset + img.stored_size
+        mips: list[XtcMip] = []
+        for i, off in enumerate(table):
+            if off + hdrlen > self.size or off < img.data_offset:
+                raise XtcError(f"{img.name}: mip {i} header 0x{off:X} outside "
+                               f"the file/block")
+            self._fh.seek(off)
+            hdr_bytes = self._fh.read(hdrlen)
+            if len(hdr_bytes) < hdrlen:
+                raise XtcError(f"{img.name}: truncated mip {i} header")
+            header = list(struct.unpack_from(
+                "<%dI" % (hdrlen // 4), hdr_bytes, 0))
+            width, height = header[3], header[4]
+            if img.compressed:
+                size = header[8]
+                codec = header[7]
+            else:
+                size = header[2]
+                codec = CODEC_RAW
+            mip = XtcMip(i, width, height, size, codec, img.compressed,
+                         off + hdrlen, header)
+            mips.append(mip)
+            nxt = table[i + 1] if i + 1 < n else block_end
+            if off + hdrlen + size != nxt:
+                raise XtcError(
+                    f"{img.name}: mip {i} chain break "
+                    f"(0x{off + hdrlen + size:X} != 0x{nxt:X})")
+            if i + 1 < n and not _is_pow2(width) and width != 1:
+                raise XtcError(f"{img.name}: mip {i} non-pow2 width {width}")
+        return mips
+
+    def try_read_mips(self, img: XtcImage):
+        """``(mips, None)`` on success or ``(None, reason)`` on failure."""
+        try:
+            return self.read_mips(img), None
+        except XtcError as e:
+            return None, str(e)
+
+    def decode(self, img: XtcImage, level: int = 0):
+        """Decode one mip level to ``(width, height, rgba_bytes)``.
+
+        Only the S3TC codecs (DXT1/BC1, DXT5/BC3) are decoded; the raw 32-bit
+        linear images are returned in file byte order (channel order is *not*
+        claimed -- see the module docstring)."""
+        mips = self.read_mips(img)
+        if not (0 <= level < len(mips)):
+            raise XtcError(f"{img.name}: mip {level} out of range "
+                           f"(0..{len(mips) - 1})")
+        mip = mips[level]
+        self._fh.seek(mip.data_offset)
+        data = self._fh.read(mip.size)
+        if len(data) < mip.size:
+            raise XtcError(f"{img.name}: truncated mip {level} data")
+        if not mip.compressed:
+            return mip.width, mip.height, data
+        if mip.codec == CODEC_DXT1:
+            return mip.width, mip.height, bc1_decode(
+                data, mip.width, mip.height)
+        if mip.codec == CODEC_DXT3:
+            return mip.width, mip.height, bc2_decode(
+                data, mip.width, mip.height)
+        if mip.codec == CODEC_DXT5:
+            return mip.width, mip.height, bc3_decode(
+                data, mip.width, mip.height)
+        raise XtcError(f"{img.name}: mip {level} unknown codec "
+                       f"{mip.codec} ({mip.size} bytes)")
+
     # -- validation -----------------------------------------------------
     def validate(self) -> list[str]:
         problems: list[str] = []
@@ -395,6 +699,15 @@ class Xtc:
         mips = {}
         for img in self.images:
             mips[img.mip_levels] = mips.get(img.mip_levels, 0) + 1
+        chain_ok = 0
+        codecs: dict[str, int] = {}
+        for img in self.images:
+            got, _reason = self.try_read_mips(img)
+            if got is None:
+                continue
+            chain_ok += 1
+            for m in got:
+                codecs[m.codec_name()] = codecs.get(m.codec_name(), 0) + 1
         return {
             "path": self.path,
             "size": self.size,
@@ -408,13 +721,17 @@ class Xtc:
             "blob_size": blob_end - blob_off,
             "dimensions": sorted({(i.width, i.height) for i in self.images}),
             "mip_level_histogram": mips,
+            "mip_chain_ok_images": chain_ok,
+            "mip_chain_bad_images": len(self.images) - chain_ok,
+            "mip_codec_histogram": codecs,
             "notes": self.notes,
         }
 
 
 def report_file(path: str, want_json: bool, do_list: bool,
                 do_find: str | None, extract: str | None,
-                out: str | None) -> dict:
+                out: str | None, do_mips: str | None = None,
+                decode: str | None = None, decode_mip: int = 0) -> dict:
     with Xtc(path) as x:
         rec = x.summary()
         rec["problems"] = x.validate()
@@ -423,6 +740,18 @@ def report_file(path: str, want_json: bool, do_list: bool,
             rec["find"] = img.as_dict() if img else None
         if do_list:
             rec["images"] = [img.as_dict() for img in x.images]
+        if do_mips is not None:
+            img = x.image(do_mips)
+            if img is None:
+                raise XtcError(f"no image named {do_mips!r}")
+            mips, reason = x.try_read_mips(img)
+            rec["mips"] = {
+                "name": img.name,
+                "mip_count": len(mips) if mips else 0,
+                "declared_mip_levels": img.mip_levels,
+                "reason": reason,
+                "levels": [m.as_dict() for m in (mips or [])],
+            }
         if extract is not None:
             img = x.image(extract)
             if img is None:
@@ -436,6 +765,18 @@ def report_file(path: str, want_json: bool, do_list: bool,
             rec["extracted"] = {"name": img.name, "out": out,
                                 "bytes": len(blob),
                                 "data_offset": img.data_offset}
+        if decode is not None:
+            img = x.image(decode)
+            if img is None:
+                raise XtcError(f"no image named {decode!r}")
+            if not out:
+                raise XtcError("--decode needs --out FILE.png")
+            w, h, rgba = x.decode(img, decode_mip)
+            write_png(out, w, h, rgba)
+            mips, _r = x.try_read_mips(img)
+            codec = mips[decode_mip].codec_name() if mips else "?"
+            rec["decoded"] = {"name": img.name, "out": out, "mip": decode_mip,
+                              "width": w, "height": h, "codec": codec}
 
     if not want_json:
         print(f"== {os.path.basename(path)}  ({rec['size']} bytes, "
@@ -450,6 +791,9 @@ def report_file(path: str, want_json: bool, do_list: bool,
               f"compressed={rec['compressed_images']} "
               f"declared_count={rec['images_declared_count']}")
         print(f"   dimensions={rec['dimensions']}")
+        print(f"   mip chains: ok={rec['mip_chain_ok_images']} "
+              f"unparsed={rec['mip_chain_bad_images']} "
+              f"codecs={rec['mip_codec_histogram']}")
         if rec.get("find") is not None:
             i = rec["find"]
             print(f"   {i['name']}: {i['width']}x{i['height']} "
@@ -469,6 +813,21 @@ def report_file(path: str, want_json: bool, do_list: bool,
         if rec.get("extracted"):
             e = rec["extracted"]
             print(f"   extracted {e['name']} -> {e['out']} ({e['bytes']} bytes)")
+        if rec.get("mips") is not None:
+            m = rec["mips"]
+            print(f"   mips of {m['name']}: {m['mip_count']} parsed "
+                  f"(declared {m['declared_mip_levels']})")
+            if m["reason"]:
+                print(f"     problem: {m['reason']}")
+            for lv in m["levels"]:
+                print(f"     mip{lv['level']:<2} {lv['width']:>5}x{lv['height']:<5} "
+                      f"{lv['codec_name']:<5} {lv['size']:>9}B "
+                      f"@0x{lv['data_offset']:X}"
+                      f"{' (empty)' if lv['empty'] else ''}")
+        if rec.get("decoded"):
+            d = rec["decoded"]
+            print(f"   decoded {d['name']} mip{d['mip']} {d['codec']} "
+                  f"{d['width']}x{d['height']} -> {d['out']}")
         if rec["problems"]:
             for p in rec["problems"]:
                 print(f"   PROBLEM: {p}")
@@ -511,7 +870,13 @@ def main(argv=None) -> int:
     ap.add_argument("--find", metavar="NAME", help="print one image entry")
     ap.add_argument("--extract", metavar="NAME",
                     help="write an image's packed block to --out FILE")
-    ap.add_argument("--out", metavar="FILE", help="output for --extract")
+    ap.add_argument("--out", metavar="FILE", help="output for --extract/--decode")
+    ap.add_argument("--mips", metavar="NAME",
+                    help="print an image's parsed mip chain")
+    ap.add_argument("--decode", metavar="NAME",
+                    help="decode an image's mip to an RGBA PNG at --out FILE")
+    ap.add_argument("--mip", type=int, default=0, metavar="N",
+                    help="mip level for --decode (default 0)")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
@@ -523,7 +888,7 @@ def main(argv=None) -> int:
     if not args.path:
         ap.error("provide a .xtc path (or use --check)")
     rec = report_file(args.path, args.json, args.list, args.find,
-                      args.extract, args.out)
+                      args.extract, args.out, args.mips, args.decode, args.mip)
     if args.json:
         print(json.dumps(rec, indent=2))
     return 0

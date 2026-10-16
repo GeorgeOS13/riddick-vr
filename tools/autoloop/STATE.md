@@ -2,6 +2,60 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 25 — 2026-10-16 11:18 (scheduled loop)
+- **Unit:** GH **#61** (native-hand texture) — decode the shipped **`.xtc`
+  packed block**: recover the per-image **mip chain** and its **S3TC codec**, so
+  the real Riddick skin diffuse can be read out for the native-hand draw path.
+- Finding 1 (real evidence, read-only): the block at `desc[9]` is
+  `u32 mip_offset[mip_count]` (absolute file offsets of each mip's header)
+  followed by one `[header + pixel data]` record per mip. `mip_count` is read
+  back as `(mip_offset[0] - block_offset) / 4` (the table is exactly `4*n`).
+  Header is **`0x2C` when compressed, `0x1C` when raw**; the chain invariant
+  `offset[i] + header_len + mip_bytes == offset[i+1]` holds on **887/901**
+  (Models), **244/246** (GUI), **3787/3797** (Levels). Fields: `+0x04`
+  colours (`0x5000`/`0`), `+0x08` `mip_bytes|0x10` (compressed), `+0x0C`/`+0x10`
+  w/h, `+0x1C` **codec**, `+0x20` `mip_bytes`; a `mip_bytes == 0` mip is *empty*.
+- Finding 2 (decisive): the codec field `+0x1C` correlates **1:1** with the
+  stored size and is standard S3TC — **`0` = DXT1/BC1** (`w*h/2`), **`2` =
+  DXT3/BC2**, **`4` = DXT5/BC3** (both `w*h`). Verified **visually**: BC1
+  `Riddick_ArmScar_D`/`Riddick_B03_D` (skin + stitched arm scar), BC3
+  `Pa2_inmate_H04_D` (inmate head), BC2 `SKYMOUNT_0` (snowy skybox). Block order
+  is the usual S3TC order (alpha half first: the swap yields garbage).
+  Counts: Models `{DXT1:455, DXT5:128}` base mips; Levels adds `DXT3:290`.
+- Finding 3 (engine, read-only; Ghidra 12.1.4 via `rea`): `rea search
+  MSystem.dll "XTC" --kind procedures` names `CTextureContainer_VirtualXTC2::
+  ReadTexture` (`0x1009b280`) / `GetTextureMipMap` (`0x1009b760`) /
+  `CImage::ReadHeader`, `".\Raster\MTextureContainerXTC2.cpp"`,
+  `"Invalid mipmap requested: %d/%d/%d, texture %s"`. `GetTextureMipMap`
+  validates the level against a per-image `min_mip`/`max_mip` nibble
+  (`descriptor+0x19`) and returns a `CImage` (`0x30` stride). Mirrored
+  statically; nothing executed.
+- Change (tools/docs; **no C++**, so no `build-all.ps1`/CTest rerun):
+  - `tools/mos_xtc.py`: `XtcMip`; `Xtc.read_mips`/`try_read_mips`; `bc1_decode`
+    / `bc2_decode` / `bc3_decode` (+`_rgb565`/`_bc1_base`); `Xtc.decode`;
+    `write_png` (stdlib-only). CLI `--mips NAME`, `--decode NAME --out FILE.png
+    [--mip N]`; `summary()` adds `mip_chain_ok/bad_images` +
+    `mip_codec_histogram`.
+  - `tools/test_mos_xtc.py`: **+6** tests (BC1/BC2/BC3 on known blocks, empty
+    mip, raw 32-bit, PNG write, chain-break) -> **18**; `build_xtc` now emits
+    real packed mip blocks.
+  - `docs/adr/0432-xtc-mip-chain-and-s3tc-codec.md` (new); ADR-0431 follow-up
+    marked resolved; `docs/rea/mos-xmd-format.md` `.xtc` item 4 rewritten.
+- Evidence: `mos_xtc.py Models.xtc --mips Riddick_ArmScar_D` -> 11 parsed
+  (`512x1024 DXT1 262144B` .. `1x1 DXT1 8B`); `--decode Riddick_ArmScar_D
+  --out armscar.png` -> correct skin/scar texture (viewed), `--decode
+  Pa2_inmate_H04_D` (DXT5 head), `mos_xtc.py Levels.xtc --decode SKYMOUNT_0`
+  (DXT3 sky); `--check` GUI/Models/Levels -> ok (246/901/3797);
+  `test_mos_xtc.py` (18) PASS; `test_mos_xmd.py`, `test_xmd_export.py`,
+  `test_xmd_bake.py`, `test_xmd_pose.py`, `test_xsa_anim.py`,
+  `validate_addresses.py`, `verify_hook_init.py`, `verify_reported_fixes.py`,
+  `scenario_tests.py --check` all PASS.
+- Blocker: none. **Next:** feed `bc1_decode(Riddick_ArmScar_D)` into
+  `VRHandRenderer::DrawNativeHand` (GL texture upload or a small in-tree baked
+  asset like ADR-0420's mesh bake); the raw/linear channel order (needed for
+  normal maps) and the reduced-mip-chain images stay open.
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 24 — 2026-10-16 10:55 (scheduled loop)
 - **Unit:** GH **#61** (native-hand texture) — decode the shipped **`.xtc`
   texture packs** and build a read-only reader, so the real Riddick skin
