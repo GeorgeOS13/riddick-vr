@@ -1,0 +1,1677 @@
+{
+  "tool": "tools/xsa_anim.py",
+  "command": "python tools/xsa_anim.py <file> --clip NAME --json",
+  "generated_from": "C:\\Program Files (x86)\\Starbreeze Studios\\Riddick EFBB",
+  "evidence": {
+    "sampler": "MXR.dll FUN_100776b0 (reached from FUN_10077f20, the sequence object's +0x24 method)",
+    "check": "python tools/xsa_anim.py --inventory <Content> --check -> 313/313 ok"
+  },
+  "note": "pool_indices are QUATERNIONINDICES values (truncated to 8 here); a rotation slot dereferences QUATERNIONS, a movement slot MOVES unless flags & 0x0001 (then QUATERNIONS).",
+  "sets": [
+    {
+      "file": "Content/Anim/tests/MovBasSha_arm.xsa",
+      "sha256": "fa1de1d4387667ad98e2537ae577eccb629727ecbebdb6c78bd3e8f5a4c93d58",
+      "size": 9358,
+      "clip": {
+        "name": "mhstd_sha",
+        "rotation_count": 71,
+        "movement_count": 20,
+        "time_count": 6,
+        "key_window": [
+          0,
+          91
+        ],
+        "time_window": [
+          0,
+          6
+        ],
+        "rotation": [
+          {
+            "window": "rotation",
+            "slot": 12,
+            "track": 1,
+            "flags": 0,
+            "start": 1,
+            "count": 6,
+            "pool": "quaternions",
+            "pool_indices": [
+              1,
+              1,
+              1,
+              2,
+              3,
+              1
+            ],
+            "pool_indices_total": 6
+          },
+          {
+            "window": "rotation",
+            "slot": 13,
+            "track": 2,
+            "flags": 0,
+            "start": 7,
+            "count": 6,
+            "pool": "quaternions",
+            "pool_indices": [
+              4,
+              5,
+              6,
+              7,
+              8,
+              4
+            ],
+            "pool_indices_total": 6
+          },
+          {
+            "window": "rotation",
+            "slot": 14,
+            "track": 3,
+            "flags": 0,
+            "start": 13,
+            "count": 6,
+            "pool": "quaternions",
+            "pool_indices": [
+              9,
+              9,
+              10,
+              11,
+              12,
+              9
+            ],
+            "pool_indices_total": 6
+          },
+          {
+            "window": "rotation",
+            "slot": 16,
+            "track": 4,
+            "flags": 0,
+            "start": 19,
+            "count": 6,
+            "pool": "quaternions",
+            "pool_indices": [
+              13,
+              14,
+              15,
+              16,
+              17,
+              13
+            ],
+            "pool_indices_total": 6
+          },
+          {
+            "window": "rotation",
+            "slot": 22,
+            "track": 5,
+            "flags": 32768,
+            "start": 25,
+            "count": 1,
+            "pool": "quaternions",
+            "pool_indices": [
+              18
+            ],
+            "pool_indices_total": 1
+          },
+          {
+            "window": "rotation",
+            "slot": 38,
+            "track": 6,
+            "flags": 32768,
+            "start": 26,
+            "count": 1,
+            "pool": "quaternions",
+            "pool_indices": [
+              19
+            ],
+            "pool_indices_total": 1
+          },
+          {
+            "window": "rotation",
+            "slot": 39,
+            "track": 7,
+            "flags": 32768,
+            "start": 27,
+            "count": 1,
+            "pool": "quaternions",
+            "pool_indices": [
+              20
+            ],
+            "pool_indices_total": 1
+          },
+          {
+            "window": "rotation",
+            "slot": 40,
+            "track": 8,
+            "flags": 32768,
+            "start": 28,
+            "count": 1,
+            "pool": "quaternions",
+            "pool_indices": [
+              21
+            ],
+            "pool_indices_total": 1
+          },
+          {
+            "window": "rotation",
+            "slot": 41,
+            "track": 9,
+            "flags": 32768,
+            "start": 29,
+            "count": 1,
+            "pool": "quaternions",
+            "pool_indices": [
+              22
+            ],
+            "pool_indices_total": 1
+          },
+          {
+            "window": "rotation",
+            "slot": 42,
+            "track": 10,
+            "flags": 32768,
+            "start": 30,
+            "count": 1,
+            "pool": "quaternions",
+            "pool_indices": [
+              23
+            ],
+            "pool_indices_total": 1
+          },
+          {
+            "window": "rotation",
+            "slot": 43,
+            "track": 11,
+            "flags": 32768,
+            "start": 31,
+            "count": 1,
+            "pool": "quaternions",
+            "pool_indices": [
+              24
+            ],
+            "pool_indices_total": 1
+          },
+          {
+            "window": "rotation",
+            "slot": 44,
+            "track": 12,
+            "flags": 32768,
+            "start": 32,
+            "count": 1,
+            "pool": "quaternions",
+            "pool_indices": [
+              25
+            ],
+            "pool_indices_total": 1
+          },
+          {
+            "window": "rotation",
+            "slot": 45,
+            "track": 13,
+            "flags": 32768,
+            "start": 33,
+            "count": 1,
+            "pool": "quaternions",
+            "pool_indices": [
+              26
+            ],
+            "pool_indices_total": 1
+          },
+          {
+            "window": "rotation",
+            "slot": 46,
+            "track": 14,
+            "flags": 32768,
+            "start": 34,
+            "count": 1,
+            "pool": "quaternions",
+            "pool_indices": [
+              27
+            ],
+            "pool_indices_total": 1
+          },
+          {
+            "window": "rotation",
+            "slot": 47,
+            "track": 15,
+            "flags": 32768,
+            "start": 35,
+            "count": 1,
+            "pool": "quaternions",
+            "pool_indices": [
+              28
+            ],
+            "pool_indices_total": 1
+          },
+          {
+            "window": "rotation",
+            "slot": 48,
+            "track": 16,
+            "flags": 32768,
+            "start": 36,
+            "count": 1,
+            "pool": "quaternions",
+            "pool_indices": [
+              29
+            ],
+            "pool_indices_total": 1
+          },
+          {
+            "window": "rotation",
+            "slot": 49,
+            "track": 17,
+            "flags": 32768,
+            "start": 37,
+            "count": 1,
+            "pool": "quaternions",
+            "pool_indices": [
+              30
+            ],
+            "pool_indices_total": 1
+          },
+          {
+            "window": "rotation",
+            "slot": 50,
+            "track": 18,
+            "flags": 32768,
+            "start": 38,
+            "count": 1,
+            "pool": "quaternions",
+            "pool_indices": [
+              31
+            ],
+            "pool_indices_total": 1
+          },
+          {
+            "window": "rotation",
+            "slot": 51,
+            "track": 19,
+            "flags": 32768,
+            "start": 39,
+            "count": 1,
+            "pool": "quaternions",
+            "pool_indices": [
+              32
+            ],
+            "pool_indices_total": 1
+          },
+          {
+            "window": "rotation",
+            "slot": 52,
+            "track": 20,
+            "flags": 32768,
+            "start": 40,
+            "count": 1,
+            "pool": "quaternions",
+            "pool_indices": [
+              33
+            ],
+            "pool_indices_total": 1
+          }
+        ],
+        "movement": [
+          {
+            "window": "movement",
+            "slot": 2,
+            "track": 21,
+            "flags": 32768,
+            "start": 1,
+            "count": 1,
+            "pool": "moves",
+            "pool_indices": [
+              1
+            ],
+            "pool_indices_total": 1
+          }
+        ],
+        "rotation_static_slots": 51,
+        "movement_static_slots": 19
+      },
+      "note": "arm clip: 71 rotation slots, slot 12/13/14/16 -> tracks 1..4 (6 keys); slots 38..52 -> single-key arm/finger tracks"
+    },
+    {
+      "file": "Content/Anim/Main/Weapons/Grenade.xsa",
+      "sha256": "4317eef2d4bf9fa8e4f2e004d88dd594a7647bd493011d39bbcadcc581f58782",
+      "size": 1654,
+      "clip": {
+        "name": "Gren_Equip",
+        "rotation_count": 21,
+        "movement_count": 21,
+        "time_count": 14,
+        "key_window": [
+          84,
+          126
+        ],
+        "time_window": [
+          12,
+          26
+        ],
+        "rotation": [],
+        "movement": [
+          {
+            "window": "movement",
+            "slot": 2,
+            "track": 3,
+            "flags": 0,
+            "start": 3,
+            "count": 14,
+            "pool": "moves",
+            "pool_indices": [
+              3,
+              3,
+              3,
+              3,
+              3,
+              1,
+              4,
+              5
+            ],
+            "pool_indices_total": 14
+          },
+          {
+            "window": "movement",
+            "slot": 3,
+            "track": 4,
+            "flags": 0,
+            "start": 17,
+            "count": 14,
+            "pool": "moves",
+            "pool_indices": [
+              8,
+              8,
+              8,
+              8,
+              8,
+              9,
+              10,
+              11
+            ],
+            "pool_indices_total": 14
+          }
+        ],
+        "rotation_static_slots": 21,
+        "movement_static_slots": 19
+      },
+      "note": "movement-only set: nq=1, nm=24; movement values 0..23 index MOVES"
+    },
+    {
+      "file": "Content/Anim/Cutscenes/02-cs_entranceintro/Johns.xsa",
+      "sha256": "993926aa98ee74b9461ff40b29040e1d4ecef46f13f3a8ce7e3bed489cc90e18",
+      "size": 662794,
+      "clip": {
+        "name": "cut30",
+        "rotation_count": 75,
+        "movement_count": 24,
+        "time_count": 350,
+        "key_window": [
+          1782,
+          1881
+        ],
+        "time_window": [
+          1520,
+          1870
+        ],
+        "rotation": [
+          {
+            "window": "rotation",
+            "slot": 0,
+            "track": 789,
+            "flags": 32768,
+            "start": 64150,
+            "count": 1,
+            "pool": "quaternions",
+            "pool_indices": [
+              37454
+            ],
+            "pool_indices_total": 1
+          },
+          {
+            "window": "rotation",
+            "slot": 1,
+            "track": 843,
+            "flags": 1,
+            "start": 3358,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              8,
+              9,
+              10,
+              11,
+              12,
+              13,
+              14,
+              15
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 2,
+            "track": 844,
+            "flags": 1,
+            "start": 3708,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 3,
+            "track": 845,
+            "flags": 1,
+            "start": 4058,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              400,
+              400,
+              400,
+              400,
+              400,
+              400,
+              400,
+              400
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 4,
+            "track": 846,
+            "flags": 1,
+            "start": 4408,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              2447,
+              2448,
+              2449,
+              2450,
+              2451,
+              2452,
+              2453,
+              2454
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 5,
+            "track": 847,
+            "flags": 1,
+            "start": 4758,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              2769,
+              2770,
+              2771,
+              2772,
+              2773,
+              2774,
+              2775,
+              2776
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 6,
+            "track": 848,
+            "flags": 1,
+            "start": 5108,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              3108,
+              3109,
+              3110,
+              3111,
+              3112,
+              3113,
+              3114,
+              3115
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 7,
+            "track": 849,
+            "flags": 1,
+            "start": 5458,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              3458,
+              3459,
+              3460,
+              3461,
+              3462,
+              3463,
+              3464,
+              3465
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 8,
+            "track": 850,
+            "flags": 1,
+            "start": 5808,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              3745,
+              3746,
+              3747,
+              3748,
+              3749,
+              3750,
+              3751,
+              3752
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 9,
+            "track": 851,
+            "flags": 1,
+            "start": 6158,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              4057,
+              4058,
+              4059,
+              4060,
+              4061,
+              4062,
+              4063,
+              4064
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 10,
+            "track": 852,
+            "flags": 1,
+            "start": 6508,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              4204,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 11,
+            "track": 853,
+            "flags": 1,
+            "start": 6858,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              4432,
+              4432,
+              4433,
+              4433,
+              4434,
+              4435,
+              4436,
+              4437
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 12,
+            "track": 854,
+            "flags": 1,
+            "start": 7208,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 13,
+            "track": 855,
+            "flags": 1,
+            "start": 7558,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              4882,
+              4883,
+              4884,
+              4885,
+              4886,
+              4887,
+              4888,
+              4889
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 14,
+            "track": 856,
+            "flags": 1,
+            "start": 7908,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              631,
+              632,
+              633,
+              634,
+              635,
+              636,
+              637,
+              638
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 16,
+            "track": 857,
+            "flags": 1,
+            "start": 8258,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              824,
+              825,
+              826,
+              827,
+              828,
+              829,
+              813,
+              830
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 17,
+            "track": 858,
+            "flags": 1,
+            "start": 8608,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              967,
+              967,
+              967,
+              967,
+              967,
+              967,
+              967,
+              967
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 18,
+            "track": 859,
+            "flags": 1,
+            "start": 8958,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              5314,
+              5315,
+              5316,
+              5317,
+              5318,
+              5319,
+              5320,
+              5321
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 19,
+            "track": 860,
+            "flags": 1,
+            "start": 9308,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              5569,
+              5570,
+              5571,
+              5572,
+              5573,
+              5574,
+              5575,
+              5576
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 21,
+            "track": 861,
+            "flags": 1,
+            "start": 9658,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              5831,
+              5832,
+              5833,
+              5834,
+              5835,
+              5836,
+              5837,
+              5838
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 22,
+            "track": 862,
+            "flags": 1,
+            "start": 10008,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              6181,
+              6182,
+              6183,
+              6184,
+              6185,
+              6186,
+              6187,
+              6188
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 25,
+            "track": 810,
+            "flags": 32768,
+            "start": 55536,
+            "count": 1,
+            "pool": "quaternions",
+            "pool_indices": [
+              32874
+            ],
+            "pool_indices_total": 1
+          },
+          {
+            "window": "rotation",
+            "slot": 26,
+            "track": 810,
+            "flags": 32768,
+            "start": 55536,
+            "count": 1,
+            "pool": "quaternions",
+            "pool_indices": [
+              32874
+            ],
+            "pool_indices_total": 1
+          },
+          {
+            "window": "rotation",
+            "slot": 29,
+            "track": 863,
+            "flags": 1,
+            "start": 10358,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              6531,
+              6532,
+              6533,
+              6534,
+              6535,
+              6536,
+              6537,
+              6538
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 30,
+            "track": 864,
+            "flags": 1,
+            "start": 10708,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              6863,
+              6864,
+              6865,
+              6866,
+              6775,
+              6867,
+              6868,
+              6869
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 31,
+            "track": 865,
+            "flags": 1,
+            "start": 11058,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              7074,
+              7075,
+              7076,
+              7077,
+              7078,
+              7079,
+              7080,
+              7081
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 34,
+            "track": 866,
+            "flags": 1,
+            "start": 11408,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              7409,
+              7410,
+              7411,
+              7404,
+              7412,
+              7400,
+              7413,
+              7414
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 35,
+            "track": 867,
+            "flags": 1,
+            "start": 11758,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              7634,
+              7635,
+              7636,
+              7637,
+              7638,
+              7639,
+              7640,
+              7641
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 36,
+            "track": 868,
+            "flags": 1,
+            "start": 12108,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              7771,
+              7771,
+              7771,
+              7771,
+              7771,
+              7771,
+              7771,
+              7771
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 37,
+            "track": 869,
+            "flags": 1,
+            "start": 12458,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              4242,
+              7799,
+              7800,
+              3518,
+              0,
+              7801,
+              7802,
+              7803
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 41,
+            "track": 870,
+            "flags": 1,
+            "start": 12808,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              7947,
+              7946,
+              7945,
+              7944,
+              7949,
+              0,
+              7950,
+              7951
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 42,
+            "track": 871,
+            "flags": 1,
+            "start": 13158,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              8200,
+              8201,
+              8202,
+              8203,
+              8204,
+              8205,
+              8206,
+              8207
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 43,
+            "track": 871,
+            "flags": 1,
+            "start": 13158,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              8200,
+              8201,
+              8202,
+              8203,
+              8204,
+              8205,
+              8206,
+              8207
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 44,
+            "track": 872,
+            "flags": 1,
+            "start": 13508,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              8246,
+              8247,
+              8248,
+              8249,
+              8250,
+              8251,
+              8252,
+              8253
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 45,
+            "track": 873,
+            "flags": 1,
+            "start": 13858,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              8440,
+              8440,
+              8440,
+              8440,
+              8440,
+              8440,
+              8440,
+              8440
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 46,
+            "track": 873,
+            "flags": 1,
+            "start": 13858,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              8440,
+              8440,
+              8440,
+              8440,
+              8440,
+              8440,
+              8440,
+              8440
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 47,
+            "track": 874,
+            "flags": 1,
+            "start": 14208,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 48,
+            "track": 875,
+            "flags": 1,
+            "start": 14558,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              8637,
+              8638,
+              8639,
+              8640,
+              8611,
+              8611,
+              8611,
+              8611
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 49,
+            "track": 875,
+            "flags": 1,
+            "start": 14558,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              8637,
+              8638,
+              8639,
+              8640,
+              8611,
+              8611,
+              8611,
+              8611
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 50,
+            "track": 876,
+            "flags": 1,
+            "start": 14908,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              8735,
+              4956,
+              8736,
+              4995,
+              8737,
+              8738,
+              8739,
+              8740
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 51,
+            "track": 877,
+            "flags": 1,
+            "start": 15258,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              1039,
+              1040,
+              1041,
+              1042,
+              1043,
+              1044,
+              1045,
+              1046
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 52,
+            "track": 877,
+            "flags": 1,
+            "start": 15258,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              1039,
+              1040,
+              1041,
+              1042,
+              1043,
+              1044,
+              1045,
+              1046
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 53,
+            "track": 878,
+            "flags": 1,
+            "start": 15608,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              1477,
+              1478,
+              1479,
+              1480,
+              0,
+              1481,
+              1482,
+              1483
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 54,
+            "track": 879,
+            "flags": 1,
+            "start": 15958,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              700,
+              0,
+              1742,
+              1743,
+              1744,
+              1745,
+              1746,
+              1747
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 55,
+            "track": 880,
+            "flags": 1,
+            "start": 16308,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 56,
+            "track": 881,
+            "flags": 32769,
+            "start": 16658,
+            "count": 1,
+            "pool": "quaternions",
+            "pool_indices": [
+              8899
+            ],
+            "pool_indices_total": 1
+          },
+          {
+            "window": "rotation",
+            "slot": 57,
+            "track": 882,
+            "flags": 32769,
+            "start": 16659,
+            "count": 1,
+            "pool": "quaternions",
+            "pool_indices": [
+              8900
+            ],
+            "pool_indices_total": 1
+          },
+          {
+            "window": "rotation",
+            "slot": 58,
+            "track": 883,
+            "flags": 32769,
+            "start": 16660,
+            "count": 1,
+            "pool": "quaternions",
+            "pool_indices": [
+              8900
+            ],
+            "pool_indices_total": 1
+          },
+          {
+            "window": "rotation",
+            "slot": 59,
+            "track": 884,
+            "flags": 32769,
+            "start": 16661,
+            "count": 1,
+            "pool": "quaternions",
+            "pool_indices": [
+              8901
+            ],
+            "pool_indices_total": 1
+          },
+          {
+            "window": "rotation",
+            "slot": 60,
+            "track": 885,
+            "flags": 32769,
+            "start": 16662,
+            "count": 1,
+            "pool": "quaternions",
+            "pool_indices": [
+              8902
+            ],
+            "pool_indices_total": 1
+          },
+          {
+            "window": "rotation",
+            "slot": 61,
+            "track": 886,
+            "flags": 32769,
+            "start": 16663,
+            "count": 1,
+            "pool": "quaternions",
+            "pool_indices": [
+              8903
+            ],
+            "pool_indices_total": 1
+          },
+          {
+            "window": "rotation",
+            "slot": 62,
+            "track": 887,
+            "flags": 32769,
+            "start": 16664,
+            "count": 1,
+            "pool": "quaternions",
+            "pool_indices": [
+              8904
+            ],
+            "pool_indices_total": 1
+          },
+          {
+            "window": "rotation",
+            "slot": 63,
+            "track": 888,
+            "flags": 32769,
+            "start": 16665,
+            "count": 1,
+            "pool": "quaternions",
+            "pool_indices": [
+              8905
+            ],
+            "pool_indices_total": 1
+          },
+          {
+            "window": "rotation",
+            "slot": 64,
+            "track": 889,
+            "flags": 32769,
+            "start": 16666,
+            "count": 1,
+            "pool": "quaternions",
+            "pool_indices": [
+              8906
+            ],
+            "pool_indices_total": 1
+          },
+          {
+            "window": "rotation",
+            "slot": 65,
+            "track": 890,
+            "flags": 32769,
+            "start": 16667,
+            "count": 1,
+            "pool": "quaternions",
+            "pool_indices": [
+              8906
+            ],
+            "pool_indices_total": 1
+          },
+          {
+            "window": "rotation",
+            "slot": 66,
+            "track": 891,
+            "flags": 32769,
+            "start": 16668,
+            "count": 1,
+            "pool": "quaternions",
+            "pool_indices": [
+              8907
+            ],
+            "pool_indices_total": 1
+          },
+          {
+            "window": "rotation",
+            "slot": 67,
+            "track": 892,
+            "flags": 32769,
+            "start": 16669,
+            "count": 1,
+            "pool": "quaternions",
+            "pool_indices": [
+              8908
+            ],
+            "pool_indices_total": 1
+          },
+          {
+            "window": "rotation",
+            "slot": 68,
+            "track": 893,
+            "flags": 1,
+            "start": 16670,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              8909,
+              8910,
+              8911,
+              8912,
+              8913,
+              8914,
+              8915,
+              8916
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "rotation",
+            "slot": 69,
+            "track": 894,
+            "flags": 1,
+            "start": 17020,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              9126,
+              9127,
+              9128,
+              9129,
+              9130,
+              9131,
+              9132,
+              9133
+            ],
+            "pool_indices_total": 350
+          }
+        ],
+        "movement": [
+          {
+            "window": "movement",
+            "slot": 0,
+            "track": 895,
+            "flags": 1,
+            "start": 17370,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              9339,
+              9340,
+              9341,
+              9342,
+              9343,
+              9344,
+              9345,
+              9346
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "movement",
+            "slot": 1,
+            "track": 896,
+            "flags": 0,
+            "start": 9861,
+            "count": 350,
+            "pool": "moves",
+            "pool_indices": [
+              6034,
+              6035,
+              6036,
+              6037,
+              6038,
+              6039,
+              6040,
+              6041
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "movement",
+            "slot": 2,
+            "track": 897,
+            "flags": 1,
+            "start": 17720,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              9474,
+              9475,
+              9475,
+              9474,
+              9476,
+              9476,
+              9476,
+              9476
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "movement",
+            "slot": 5,
+            "track": 898,
+            "flags": 1,
+            "start": 18070,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              1973,
+              1974,
+              1975,
+              1976,
+              1976,
+              1976,
+              1976,
+              1976
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "movement",
+            "slot": 6,
+            "track": 899,
+            "flags": 1,
+            "start": 18420,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              9673,
+              9674,
+              9675,
+              9676,
+              9677,
+              9678,
+              9679,
+              9680
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "movement",
+            "slot": 9,
+            "track": 900,
+            "flags": 1,
+            "start": 18770,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              10019,
+              10020,
+              10021,
+              10022,
+              10023,
+              10024,
+              10024,
+              10023
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "movement",
+            "slot": 10,
+            "track": 901,
+            "flags": 1,
+            "start": 19120,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              10273,
+              10274,
+              10275,
+              10276,
+              10277,
+              10278,
+              10279,
+              10280
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "movement",
+            "slot": 11,
+            "track": 902,
+            "flags": 1,
+            "start": 19470,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              10612,
+              10612,
+              10613,
+              10614,
+              10615,
+              10616,
+              10617,
+              10618
+            ],
+            "pool_indices_total": 350
+          },
+          {
+            "window": "movement",
+            "slot": 12,
+            "track": 903,
+            "flags": 1,
+            "start": 19820,
+            "count": 350,
+            "pool": "quaternions",
+            "pool_indices": [
+              10882,
+              10883,
+              10884,
+              10885,
+              10886,
+              10887,
+              10888,
+              10889
+            ],
+            "pool_indices_total": 350
+          }
+        ],
+        "rotation_static_slots": 16,
+        "movement_static_slots": 15
+      },
+      "note": "flags 0x0001 movement tracks (895..903) read values 9339..11229 >= MOVES.count 7170 but < QUATERNIONS.count 48468 -> QUATERNIONS pool"
+    }
+  ]
+}

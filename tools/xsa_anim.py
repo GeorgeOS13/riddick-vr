@@ -63,15 +63,38 @@ x86) with Ghidra 12.1.4 via ``rea`` (see
   (enforced by :func:`window_tiling_problems` from :meth:`AnimSet.validate`) and
   ``track_mid == track_start + rotation_count`` holds for every sequence.
 
+**Clip -> bone (slot) binding (pinned from the runtime sampler):**
+
   ``TRACKINDICES`` values are indices into ``TRACKS`` (``max < TRACKS.count``
-  over the whole corpus), so the per-sequence key window says *which tracks are
-  keyed by that clip*; each ``TRACKS[i].start`` then points into
-  ``QUATERNIONINDICES``.  The skeleton side binds animation tracks to bones by
-  **slot**: ``CXR_Skeleton`` (read by ``FUN_100219d0``, finalised by
-  ``FUN_1001ff60``) caps the rotation-slot count at ``0x80`` (128) and the
-  movement-slot count at ``0x20`` (32), and every ``.xmd`` ``NODES`` record
-  carries the ``rotation_slot`` / ``movement_slot`` a bone listens on
-  (``tools/mos_xmd.py``, ADR-0418).
+  over the whole corpus).  A clip's key window is a **slot -> track** table, not
+  a set of tracks: its first ``rotation_count`` entries are indexed by the
+  skeleton **rotation slot** and its next ``movement_count`` entries by the
+  **movement slot** (``CXR_Skeleton`` caps those at ``0x80`` / ``0x20``;
+  ``.xmd`` ``NODES`` carry the ``rotation_slot`` / ``movement_slot`` a bone
+  listens on -- ``tools/mos_xmd.py``, ADR-0418).  The per-slot sampler is
+  ``FUN_100776b0``, reached from ``FUN_10077f20`` (the sequence object's
+  ``+0x24`` method): for slot ``j`` it reads
+  ``track = TRACKINDICES[window_start + j]`` and
+  ``(start, flags) = TRACKS[track]``.
+
+  *Key count.*  ``flags & 0x8000`` (``TRACK_FLAG_SINGLE``) means **one** key;
+  otherwise the track owns exactly ``sequence.time_count`` keys.  Keys live in
+  ``QUATERNIONINDICES`` at ``[start, start + key_count)``.
+
+  *Pool.*  A rotation-window slot always indexes ``QUATERNIONS``
+  (``CXR_Anim_Quatint16``, 4 x i16 / 32767).  A movement-window slot indexes
+  ``MOVES`` (3 x f32) **unless** the track's ``flags & 0x0001``
+  (``TRACK_FLAG_MOVEMENT``) is set, in which case it indexes ``QUATERNIONS``
+  too.  The runtime sampler (above) reads the value at
+  ``QUATERNIONINDICES[start + key]`` and dereferences it in the pool selected by
+  the *window*; the flag override is what the 81 shipped movement blocks that
+  exceed ``MOVES.count`` (e.g. ``Johns.xsa`` track 895, values 9339.. up to
+  11229 with ``MOVES.count == 7170``) prove: every one fits ``QUATERNIONS`` and
+  none exceeds it.
+
+  ``flags & 0x4000`` (never set in shipped data) yields the identity/zero key.
+  ``KEYFRAMETIMES`` is indexed directly by the clip's ``[time_start,
+  time_start + time_count)`` window -- no indirection.
 
 The parser is dependency-free and strictly read-only: it never writes next to
 the game install and never launches the game.
@@ -79,6 +102,7 @@ the game install and never launches the game.
 Usage:
     python tools/xsa_anim.py <file.xsa> [--json] [--tracks] [--sequences] [--tree]
     python tools/xsa_anim.py <file.xsa> --quaternions N
+    python tools/xsa_anim.py <file.xsa> --clip NAME
     python tools/xsa_anim.py --inventory <dir> [--json]
     python tools/xsa_anim.py <file.xsa> --check
     python tools/xsa_anim.py --inventory <dir> --check
@@ -117,9 +141,21 @@ QUAT_SCALE = 1.0 / 32767.0
 QUAT_NORM_TOLERANCE = 1e-3
 
 # CXR_Anim_CompressedTrack flags (proven set across all shipped tracks).
+# 0x8000 SINGLE: the track owns exactly one key (not ``time_count``).
+# 0x0001 MOVEMENT: on a *movement-window* slot this bit routes the key values to
+#   the QUATERNIONS pool instead of MOVES (corpus-proven; see module docstring).
 TRACK_FLAG_MOVEMENT = 0x0001
 TRACK_FLAG_SINGLE = 0x8000
 KNOWN_TRACK_FLAGS = TRACK_FLAG_MOVEMENT | TRACK_FLAG_SINGLE
+
+# The two halves of a clip's key window, indexed by skeleton slot number.
+ROTATION_WINDOW = "rotation"
+MOVEMENT_WINDOW = "movement"
+WINDOWS = (ROTATION_WINDOW, MOVEMENT_WINDOW)
+
+# The value pools a QUATERNIONINDICES entry can dereference to.
+POOL_QUATERNIONS = "quaternions"
+POOL_MOVES = "moves"
 
 # CXR_Anim_Sequence record.
 SEQ_VERSION = 0x103
@@ -222,6 +258,43 @@ class Sequence:
         return (self.time_start, self.time_start + self.time_count)
 
 
+class SlotBinding:
+    """One clip slot -> ``TRACKS`` binding, resolved through the pools.
+
+    Produced by :meth:`AnimSet.slot_binding`.  ``pool`` is the pool the
+    ``pool_indices`` dereference to (:data:`POOL_QUATERNIONS` or
+    :data:`POOL_MOVES`); ``start``/``count`` locate the key block inside
+    ``QUATERNIONINDICES``.
+    """
+
+    __slots__ = ("window", "slot", "track", "flags", "start", "count", "pool",
+                 "pool_indices")
+
+    def __init__(self, window, slot, track, flags, start, count, pool,
+                 pool_indices):
+        self.window = window
+        self.slot = slot
+        self.track = track
+        self.flags = flags
+        self.start = start
+        self.count = count
+        self.pool = pool
+        self.pool_indices = pool_indices
+
+    @property
+    def single(self) -> bool:
+        return bool(self.flags & TRACK_FLAG_SINGLE)
+
+    @property
+    def is_rotation(self) -> bool:
+        return self.pool == POOL_QUATERNIONS
+
+    def as_dict(self):
+        return {"window": self.window, "slot": self.slot, "track": self.track,
+                "flags": self.flags, "start": self.start, "count": self.count,
+                "pool": self.pool, "pool_indices": list(self.pool_indices)}
+
+
 def _u16(b: bytes, off: int) -> int:
     return struct.unpack_from("<H", b, off)[0]
 
@@ -232,6 +305,49 @@ def _u32(b: bytes, off: int) -> int:
 
 def _align(off: int, align: int) -> int:
     return (off + align - 1) // align * align
+
+
+def _bracket(times, t: float):
+    """Return ``(i, frac)`` bracketing ``t`` in the sorted ``times`` list."""
+    n = len(times)
+    if n < 2:
+        return 0, 0.0
+    if t <= times[0]:
+        return 0, 0.0
+    if t >= times[-1]:
+        return n - 2, 1.0
+    for i in range(1, n):
+        if t <= times[i]:
+            t0, t1 = times[i - 1], times[i]
+            frac = 0.0 if t1 == t0 else (t - t0) / (t1 - t0)
+            return i - 1, frac
+    return n - 2, 1.0
+
+
+def _lerp(a, b, f):
+    return tuple(x + (y - x) * f for x, y in zip(a, b))
+
+
+def _lerp_series(times, values, t):
+    i, f = _bracket(times, t)
+    return _lerp(values[i], values[i + 1], f)
+
+
+def _nlerp(a, b, f):
+    """Normalised lerp of two float quaternions (x, y, z, w)."""
+    dot = sum(x * y for x, y in zip(a, b))
+    if dot < 0.0:
+        b = tuple(-y for y in b)
+    q = tuple(x + (y - x) * f for x, y in zip(a, b))
+    n = sum(c * c for c in q) ** 0.5
+    if n == 0.0:
+        return (0.0, 0.0, 0.0, 1.0)
+    return tuple(c / n for c in q)
+
+
+def _nlerp_series(times, quats, t):
+    i, f = _bracket(times, t)
+    return _nlerp(quats[i], quats[i + 1], f)
 
 
 def window_tiling_problems(name: str, windows, total: int) -> list:
@@ -382,6 +498,108 @@ class AnimSet:
     def sequence_names(self):
         return [s.name for s in self.sequences if s.name]
 
+    def sequence_by_name(self, name: str):
+        """First sequence with this clip name (name2 fallback), or ``None``."""
+        for s in self.sequences:
+            if s.name == name or s.name2 == name:
+                return s
+        return None
+
+    # -- clip -> slot -> track -> pool (FUN_100776b0) ---------------------
+    def window_tracks(self, seq, window) -> list:
+        """The track ordinals of a clip's ``rotation``/``movement`` window."""
+        kw = seq.key_window
+        lo, hi = ((kw[0], seq.track_mid) if window == ROTATION_WINDOW
+                  else (seq.track_mid, kw[1]))
+        return self.track_indices[lo:hi]
+
+    def window_slot_track(self, seq, window, slot: int) -> int:
+        """The ``TRACKS`` ordinal a clip's ``window`` slot ``j`` listens on."""
+        return self.window_tracks(seq, window)[slot]
+
+    def movement_pool(self, ordinal: int) -> str:
+        """Pool a movement-window track's values dereference to."""
+        if self.tracks[ordinal].flags & TRACK_FLAG_MOVEMENT:
+            return POOL_QUATERNIONS
+        return POOL_MOVES
+
+    def pool_for(self, window: str, ordinal: int) -> str:
+        """Pool a ``window`` slot's key values dereference to."""
+        if window == ROTATION_WINDOW:
+            return POOL_QUATERNIONS
+        return self.movement_pool(ordinal)
+
+    def slot_binding(self, seq, window: str, slot: int) -> "SlotBinding":
+        """Resolve ``(clip, window, slot)`` to a :class:`SlotBinding`."""
+        tracks = self.window_tracks(seq, window)
+        if slot < 0 or slot >= len(tracks):
+            raise IndexError(f"{window} slot {slot} out of range 0..{len(tracks)}")
+        ordinal = tracks[slot]
+        tr = self.tracks[ordinal]
+        pool = self.pool_for(window, ordinal)
+        count = 1 if tr.is_single else seq.time_count
+        block = self.quaternion_indices[tr.start:tr.start + max(count, 0)]
+        return SlotBinding(window, slot, ordinal, tr.flags, tr.start, count,
+                           pool, block)
+
+    def slot_key_times(self, seq) -> list:
+        """The clip's ``KEYFRAMETIMES`` window (one time per multi-key track)."""
+        lo, hi = seq.time_window
+        return self.keyframe_times[lo:hi]
+
+    def slot_bindings(self, seq, window: str) -> list:
+        """All :class:`SlotBinding`\\ s of a clip's ``window``, in slot order."""
+        return [self.slot_binding(seq, window, j)
+                for j in range(len(self.window_tracks(seq, window)))]
+
+    def clip_bindings(self, seq) -> dict:
+        """Reproducible ``clip -> slot -> track -> pool`` record for one clip."""
+        d = {"name": seq.name, "rotation_count": seq.rotation_count,
+             "movement_count": seq.movement_count, "time_count": seq.time_count,
+             "key_window": list(seq.key_window),
+             "time_window": list(seq.time_window)}
+        for window in WINDOWS:
+            d[window] = [b.as_dict() for b in self.slot_bindings(seq, window)]
+        return d
+
+    def slot_rotation_keys(self, seq, slot: int) -> list:
+        """The rotation keys a clip's ``slot`` drives, as float quaternions."""
+        b = self.slot_binding(seq, ROTATION_WINDOW, slot)
+        return [self.quaternion(i) for i in b.pool_indices]
+
+    def slot_move_keys(self, seq, slot: int) -> list:
+        """The translation keys a clip's movement ``slot`` drives (3-tuples)."""
+        b = self.slot_binding(seq, MOVEMENT_WINDOW, slot)
+        if b.pool != POOL_MOVES:
+            raise ValueError(f"movement slot {slot} carries QUATERNIONS keys")
+        return [self.moves[i] for i in b.pool_indices]
+
+    def sample_rotation(self, seq, slot: int, t: float):
+        """Sample a rotation slot at time ``t`` (nlerp between keyframes).
+
+        The shipping engine interpolates with a Hermite spline
+        (``FUN_100776b0``); this is the offline normalised-lerp approximation.
+        """
+        b = self.slot_binding(seq, ROTATION_WINDOW, slot)
+        quats = [self.quaternion(i) for i in b.pool_indices]
+        if not quats:
+            return (0.0, 0.0, 0.0, 1.0)
+        if len(quats) == 1:
+            return quats[0]
+        return _nlerp_series(self.slot_key_times(seq), quats, t)
+
+    def sample_move(self, seq, slot: int, t: float):
+        """Sample a translation movement slot at ``t`` (linear interpolation)."""
+        b = self.slot_binding(seq, MOVEMENT_WINDOW, slot)
+        if b.pool != POOL_MOVES:
+            raise ValueError(f"movement slot {slot} carries QUATERNIONS keys")
+        moves = [self.moves[i] for i in b.pool_indices]
+        if not moves:
+            return (0.0, 0.0, 0.0)
+        if len(moves) == 1:
+            return moves[0]
+        return _lerp_series(self.slot_key_times(seq), moves, t)
+
     def summary(self) -> dict:
         return {
             "has_animation_set": self.has_anim,
@@ -477,12 +695,73 @@ class AnimSet:
             if mti >= len(self.tracks):
                 problems.append(f"TRACKINDICES max {mti} >= TRACKS count "
                                 f"{len(self.tracks)}")
+
+        # Clip slot -> track -> key block -> pool (FUN_100776b0).  Every
+        # rotation-window value must fit QUATERNIONS; every movement-window
+        # value must fit MOVES unless the track's 0x0001 flag routes it to
+        # QUATERNIONS.  This holds over the shipped corpus with 0 violations.
+        for si, s in enumerate(self.sequences):
+            for window in WINDOWS:
+                for slot, ordinal in enumerate(self.window_tracks(s, window)):
+                    if ordinal >= len(self.tracks):
+                        continue  # already reported above
+                    tr = self.tracks[ordinal]
+                    count = 1 if tr.is_single else s.time_count
+                    if count <= 0:
+                        continue
+                    end = tr.start + count
+                    if end > qi_count:
+                        problems.append(
+                            f"sequence {si} {window} slot {slot} track "
+                            f"{ordinal} key block {tr.start}..{end} overruns "
+                            f"QUATERNIONINDICES count {qi_count}")
+                        continue
+                    pool = self.pool_for(window, ordinal)
+                    limit = (len(self.quaternions) if pool == POOL_QUATERNIONS
+                             else len(self.moves))
+                    vals = self.quaternion_indices[tr.start:end]
+                    if vals and max(vals) >= limit:
+                        problems.append(
+                            f"sequence {si} {window} slot {slot} track "
+                            f"{ordinal} value {max(vals)} >= {pool} count "
+                            f"{limit}")
         return problems
+
+
+def clip_slot_table(a, name: str) -> list:
+    """Human-readable ``clip -> slot -> track -> pool`` table (list of lines)."""
+    seq = a.sequence_by_name(name)
+    if seq is None:
+        return [f"no clip named {name!r}"]
+    lines = ["clip %r: rot=%d mov=%d tc=%d key=%s time=%s" % (
+        seq.name.strip(), seq.rotation_count, seq.movement_count,
+        seq.time_count, seq.key_window, seq.time_window)]
+    for window in WINDOWS:
+        tracks = a.window_tracks(seq, window)
+        static = 0
+        rows = []
+        for slot, ordinal in enumerate(tracks):
+            tr = a.tracks[ordinal]
+            count = 1 if tr.is_single else seq.time_count
+            pool = a.pool_for(window, ordinal)
+            vals = a.quaternion_indices[tr.start:tr.start + max(count, 0)]
+            if tr.is_single and vals and vals[0] == 0:
+                static += 1
+                continue
+            rows.append("      %-8s slot %-3d track %-4d flags 0x%04X "
+                        "%-11s keys %-3d qi[%d..%d) %s"
+                        % (window, slot, ordinal, tr.flags, pool, count,
+                           tr.start, tr.start + count,
+                           vals[:6] if vals else []))
+        lines.append("   %s: %d slots (%d static single-key, %d keyed)"
+                     % (window, len(tracks), static, len(rows)))
+        lines.extend(rows)
+    return lines
 
 
 def report_file(path: str, want_json: bool, with_tracks: bool,
                 quaternions: int | None = None, with_tree: bool = False,
-                with_sequences: bool = False):
+                with_sequences: bool = False, with_clip: str | None = None):
     a = AnimSet(path)
     rec = a.as_dict(with_tracks=with_tracks or quaternions is not None
                     or with_sequences)
@@ -527,6 +806,12 @@ def report_file(path: str, want_json: bool, with_tracks: bool,
                 print("   %-3d %-22s [%4d,%4d)  %4d %4d  [%4d,%4d)"
                       % (i, s.name, klo, khi, s.rotation_count,
                          s.movement_count, tlo, thi))
+        if with_clip:
+            for line in clip_slot_table(a, with_clip):
+                print(line)
+    if want_json and with_clip:
+        seq = a.sequence_by_name(with_clip)
+        rec["clip"] = a.clip_bindings(seq) if seq is not None else None
     return rec
 
 
@@ -590,6 +875,8 @@ def main(argv=None) -> int:
                     help="print the per-track (start, flags) table")
     ap.add_argument("--sequences", action="store_true",
                     help="print the per-sequence key/time window table")
+    ap.add_argument("--clip", metavar="NAME",
+                    help="print a clip's slot -> track -> pool binding table")
     ap.add_argument("--quaternions", type=int, metavar="N",
                     help="print pooled rotation N as a float quaternion")
     ap.add_argument("--tree", action="store_true",
@@ -629,7 +916,7 @@ def main(argv=None) -> int:
         ap.error("provide a .xsa path or --inventory DIR")
     rec = report_file(args.path, args.json, args.tracks,
                       quaternions=args.quaternions, with_tree=args.tree,
-                      with_sequences=args.sequences)
+                      with_sequences=args.sequences, with_clip=args.clip)
     if args.json:
         print(json.dumps(rec, indent=2))
     return 0

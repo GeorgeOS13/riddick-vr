@@ -119,10 +119,25 @@ pools exactly. Skeleton-side binding is by **slot**: `CXR_Skeleton::Read`
 `0x80` (128) and movement slots at `0x20` (32) from each `.xmd` `NODES` record's
 `rotation_slot`/`movement_slot` (ADR-0418, 34-byte records).
 
+**Clip slot -> bone binding** (runtime sampler `FUN_100776b0`, reached from
+`FUN_10077f20` — the sequence object's `+0x24` method): a clip's key window is a
+**slot -> track** table.
+Its first `rotation_count` entries are indexed by rotation slot, the next
+`movement_count` by movement slot. For slot `j`,
+`track = TRACKINDICES[window_start + j]` and `(start, flags) = TRACKS[track]`.
+`flags & 0x8000` means one key, else the track owns exactly `sequence.time_count`
+keys, living in `QUATERNIONINDICES[start .. start + key_count)`. A rotation
+slot's values always dereference `QUATERNIONS`; a movement slot's dereference
+`MOVES` **unless** `flags & 0x0001` is set, in which case they dereference
+`QUATERNIONS` (81 shipped movement blocks, e.g. `Johns.xsa` track 895 with values
+up to 11229 against `MOVES.count == 7170`, prove the override; all fit
+`QUATERNIONS`, none exceeds it). `flags & 0x4000` (unused) yields the
+identity/zero key; `KEYFRAMETIMES` is indexed directly by the clip's time window.
+
 Decoded read-only by `tools/xsa_anim.py` (`--inventory <Content> --check` →
-313/313 ok; `--sequences` prints the per-clip windows). `.xag` files are
-animation **graphs** (states/actions/layers) and contain no
-`COMPRESSEDANIMATIONSET2`. See
+313/313 ok; `--sequences` prints the per-clip windows; `--clip NAME` prints the
+slot -> track -> pool table). `.xag` files are animation **graphs**
+(states/actions/layers) and contain no `COMPRESSEDANIMATIONSET2`. See
 `docs/adr/0422-xsa-compressed-animation-set.md`.
 
 ## Next steps (for the loop/next agent)

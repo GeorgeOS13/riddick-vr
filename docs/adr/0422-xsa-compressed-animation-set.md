@@ -210,19 +210,85 @@ words each key consumes, and how a `TRACKS` block binds to a `NODES` slot) is th
 next step; the data is consistent with "per-key owning track index", and
 `rotation_slot == node index` for used `.xmd` nodes supplies the slot order.
 
+## Update (Wake 15) — the clip slot -> bone binding and the value pools
+
+### Finding - the runtime sampler (`FUN_100776b0`, reached from `FUN_10077f20`)
+`CXR_Anim_Compressed`'s evaluation is not `EvalRot` (which throws) but
+`FUN_100776b0`, reached from `FUN_10077f20` (the sequence object's `+0x24`
+method) with the clip's `TRACKINDICES` rotation/movement window pointers. For
+each rotation slot `j` it does
+`track = TRACKINDICES[track_start + j]`, `(start, flags) = TRACKS[track]`,
+`count = (flags & 0x8000) ? 1 : sequence.time_count`, and dereferences
+`QUATERNIONINDICES[start + key]` into `QUATERNIONS`
+(`CXR_Anim_Quatint16`, 4 x i16, `3.051851e-05 == 1/32767`), interpolating with a
+Hermite spline. For each movement slot `j` it does the same with
+`track = TRACKINDICES[track_mid + j]` and (for `flags & 0x0001` clear)
+dereferences `QUATERNIONINDICES[start + key]` into `MOVES` (3 x f32). So:
+* the clip's key window is a **slot -> track** table (rotation slots first, then
+  movement slots), not a set of tracks;
+* `flags & 0x8000` selects a **single key**; otherwise the track owns
+  **`sequence.time_count`** keys;
+* the **pool is chosen by the window** (rotation -> `QUATERNIONS`, movement ->
+  `MOVES`), with one data-proven override (below).
+
+### Finding - the `0x0001` flag and the "re-base" exceptions
+Corpus-wide, **every** rotation-window key value is `< QUATERNIONS.count`
+(**0 / 313** sets violate). For movement windows, **all 81** blocks that exceed
+`MOVES.count` carry `flags & 0x0001` and every one fits `QUATERNIONS.count`
+(0 exceed it): e.g. `Anim\Cutscenes\02-cs_entranceintro\Johns.xsa` track 895
+(`start 17370`, `time_count 350`) reads values `9339..11229` while
+`MOVES.count == 7170` and `QUATERNIONS.count == 48468`. Every
+non-`0x0001` movement block fits `MOVES`. So a movement-window track with
+`flags & 0x0001` set dereferences `QUATERNIONS`, not `MOVES` — this is what the
+"7 sets where `QUATERNIONINDICES` exceeds `QUATERNIONS.count`" (e.g.
+`Grenade.xsa`, `nq == 1`, `nm == 24`, movement values `0..23`) actually are: a
+pure-movement set whose movement values index `MOVES`.
+`FUN_100776b0` itself always reads `MOVES` for movement slots; the flag is the
+converter/authoring convention the shipped data follows.
+
+### Change
+`tools/xsa_anim.py`: `SlotBinding`, `AnimSet.window_tracks/window_slot_track/
+movement_pool/pool_for/slot_binding/slot_key_times/slot_rotation_keys/
+slot_move_keys/sample_rotation/sample_move`, `sequence_by_name`,
+`_bracket/_lerp/_nlerp` helpers, `clip_slot_table`, a `--clip NAME` CLI, and a
+new `validate()` check that every resolved slot's key values fit its pool
+(rotation -> `QUATERNIONS`, movement -> `MOVES` unless `flags & 0x0001`).
+`tools/test_xsa_anim.py`: **+5** tests (slot binding, flag-routed movement pool,
+pool-aware validation both ways, nlerp sampling, clip table).
+
+### Evidence (commands)
+- `rea function MXR.dll 0x10077f20` -> sampler entry (window pointers, key
+  indices)
+- `rea function MXR.dll 0x100776b0` -> per-slot sampler (`TRACKS`,
+  `QUATERNIONINDICES`, `QUATERNIONS`/`MOVES`, `flags & 0x8000`/`0x4000`)
+- `rea function MXR.dll 0x100783e0` -> the `used`-key collector reading the same
+  `TRACKINDICES`/`TRACKS`/`QUATERNIONINDICES` (vtable `+0x28`)
+- `rea function MXR.dll 0x10076680`/`0x10076700` -> `EvalRot`/`EvalMove` throwing
+  `"WTF is this used for?"` (compressed class is storage)
+- `python tools/xsa_anim.py --inventory <game>\Content --check` -> **313/313 ok,
+  0 FAIL** (with the new pool-range invariant), 23 non-animation files skipped
+- `python tools/test_xsa_anim.py` -> PASS (19 tests)
+- `python tools/xsa_anim.py <game>\Content\Anim\tests\MovBasSha_arm.xsa --clip
+  mhstd_sha` -> 71 rotation slots (slot 12/13/14/16 -> tracks 1/2/3/4 with 6
+  keys each; slots 38..52 -> single-key arm/finger tracks), 20 movement slots
+
+### Still open
+The slot number is the skeleton **rotation/movement slot** and used `.xmd`
+`NODES` carry `rotation_slot == index` (ADR-0418), so a clip binds to bones once
+a skeleton is chosen; the mesh pose also needs the clip's interpolated keys and
+the bind-pose pairing (ADR-0423). The `0x0001` flag's authoring meaning is only
+observed (its runtime effect is the pool switch); `DATAKEYS` remains undecoded.
+
 ## Unknowns / follow-ups
-- **Track -> skeleton-node resolution is not yet end-to-end.** `TRACKS[i].start`
-  is a valid `QUATERNIONINDICES` slot (proven, 312/312) and the skeleton's
-  rotation/movement slot space is pinned (above), but the exact
-  `TRACKS`-block -> `NODES`-slot mapping for cutscene clips (`TRACKS` up to
-  1,333) is unresolved; the second `TRACKS` word is a flag word
-  (`0x8000` marks single-key tracks), not a count.
-- `Grenade.xsa` carries a **1-entry** `QUATERNIONS` pool while
+- ~~**Track -> skeleton-node resolution is not yet end-to-end.**~~ **Resolved
+  (Wake 15, above):** the clip's key window is a slot -> track table and
+  `flags & 0x8000` vs `sequence.time_count` gives the key count. The remaining
+  work is pairing a clip with a concrete `.xmd` skeleton and its bind pose.
+- ~~`Grenade.xsa` carries a **1-entry** `QUATERNIONS` pool while
   `QUATERNIONINDICES` reaches 23 (one of **7** sets where
-  `max(QUATERNIONINDICES) >= QUATERNIONS.count`), so the pool index is *not*
-  always a plain 1:1 `QUATERNIONS` index; the other 305 sets are consistent with
-  1:1. Cracking the 7 exceptions (per-clip pool re-base?) is what turns the pool
-  into a posed skeleton.
+  `max(QUATERNIONINDICES) >= QUATERNIONS.count`) ...~~ **Resolved (Wake 15):**
+  movement-window values index `MOVES` (or `QUATERNIONS` when `flags & 0x0001`),
+  so a low `QUATERNIONS.count` is expected in movement-only sets.
 - `DATAKEYS` (`CXR_Anim_DataKey::Read`) records are variable-length; the parser
   exposes their size/count but does not decode the fields.
 - Only sequence version `0x103` is shipped; `FUN_1001a5e0` also defines
@@ -245,11 +311,15 @@ next step; the data is consistent with "per-key owning track index", and
   sequence-table fields + `key_window`/`time_window`), `window_tiling_problems`,
   `decode_quaternions`/`decode_moves`/`decode_tracks`/`decode_sequences`,
   `AnimSet.validate()`, `--inventory`/`--check`/`--tracks`/`--sequences`/
-  `--quaternions` CLI.
-- `tools/test_xsa_anim.py` - synthetic-container tests (round-trip, tiling,
+  `--quaternions` CLI. Wake 15 adds `SlotBinding`,
+  `window_tracks`/`window_slot_track`/`movement_pool`/`pool_for`/`slot_binding`/
+  `slot_key_times`/`slot_rotation_keys`/`slot_move_keys`/`sample_rotation`/
+  `sample_move`/`sequence_by_name`/`clip_slot_table` and `--clip NAME`.
+- `tools/test_xsa_anim.py` - synthetic-container tests (19: round-trip, tiling,
   non-unit quaternion, unknown flags, track range, missing chunk, sequence
   tiling, unsupported sequence version, sequence key/time window gap/overlap,
-  `track_mid` mismatch, `TRACKINDICES` range).
+  `track_mid` mismatch, `TRACKINDICES` range, slot binding, flag-routed movement
+  pool, pool-aware validation, nlerp sampling, clip table).
 - `docs/rea/mos-xmd-format.md` - `.xsa` animation-set section (cross-ref).
 - `.github/workflows/vr-worker.yml` - runs the new test next to the `.xmd` tests.
 - `docs/adr/0421-xmd-keys-metadata-map.md` - "rotations" follow-up now points here.

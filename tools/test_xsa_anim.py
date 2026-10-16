@@ -276,6 +276,84 @@ def test_detects_track_index_out_of_range(tmp_dir):
                for p in problems), problems
 
 
+def test_slot_binding_rotation(tmp_dir):
+    a = _decode(_anim_container())
+    s0 = a.sequences[0]
+    # cut01 rotation slot 1 -> track 1 (flags 0), 2 keys == time_count.
+    b = a.slot_binding(s0, xsa_anim.ROTATION_WINDOW, 1)
+    assert (b.track, b.flags, b.pool, b.count, b.start) == \
+        (1, 0x0000, xsa_anim.POOL_QUATERNIONS, 2, 1), b.as_dict()
+    assert b.pool_indices == [1, 2], b.pool_indices
+    assert b.is_rotation and not b.single
+    # slot 0 -> track 0 (single) -> exactly one key.
+    b0 = a.slot_binding(s0, xsa_anim.ROTATION_WINDOW, 0)
+    assert b0.single and b0.count == 1 and b0.pool_indices == [0]
+    # out of range
+    try:
+        a.slot_binding(s0, xsa_anim.ROTATION_WINDOW, 2)
+    except IndexError:
+        pass
+    else:
+        raise AssertionError("slot 2 should be out of range")
+
+
+def test_movement_pool_routes_on_flag(tmp_dir):
+    """0x0001 on a movement-window track routes keys to QUATERNIONS."""
+    a = _decode(_anim_container())
+    s0 = a.sequences[0]
+    # track 2 = (2, 0x8001): single *and* movement-flagged -> QUATERNIONS.
+    b = a.slot_binding(s0, xsa_anim.MOVEMENT_WINDOW, 0)
+    assert b.track == 2 and b.pool == xsa_anim.POOL_QUATERNIONS, b.as_dict()
+    assert b.pool_indices == [2]
+    # A movement track without the flag routes to MOVES.
+    assert a.pool_for(xsa_anim.MOVEMENT_WINDOW, 0) == xsa_anim.POOL_MOVES
+    assert a.pool_for(xsa_anim.ROTATION_WINDOW, 0) == xsa_anim.POOL_QUATERNIONS
+
+
+def test_validate_movement_pool_flag(tmp_dir):
+    # Value 2 fits QUATERNIONS (3) but not MOVES (1): ok because flag 0x0001.
+    chunks = _default_chunks()
+    chunks["MOVES"] = (_moves_payload([(0.0, 0.0, 0.0)]), 1)
+    a = _decode(_anim_container(chunks))
+    assert a.validate() == [], a.validate()
+    # Without the flag the same value must fall inside MOVES -> a problem.
+    chunks = _default_chunks()
+    chunks["MOVES"] = (_moves_payload([(0.0, 0.0, 0.0)]), 1)
+    chunks["TRACKS"] = (_tracks_payload([(0, 0x8000), (1, 0x0000),
+                                         (2, 0x8000)]), 3)
+    a = _decode(_anim_container(chunks))
+    problems = a.validate()
+    assert any(">= moves count 1" in p for p in problems), problems
+
+
+def test_sample_rotation_interpolates(tmp_dir):
+    a = _decode(_anim_container())
+    s0 = a.sequences[0]
+    q1 = a.quaternion(1)
+    first = a.sample_rotation(s0, 1, 0.0)
+    assert all(abs(x - y) < 1e-4 for x, y in zip(first, q1)), (first, q1)
+    mid = a.sample_rotation(s0, 1, 0.25)             # halfway 0.0 -> 0.5
+    assert abs(sum(c * c for c in mid) ** 0.5 - 1.0) < 1e-9
+    q2 = a.quaternion(2)
+    expect = tuple((x + y) / 2.0 for x, y in zip(q1, q2))
+    n = sum(c * c for c in expect) ** 0.5
+    expect = tuple(c / n for c in expect)
+    assert all(abs(x - y) < 1e-6 for x, y in zip(mid, expect)), (mid, expect)
+    # Single-key slot is constant.
+    assert a.sample_rotation(s0, 0, 0.9) == a.quaternion(0)
+
+
+def test_clip_slot_table(tmp_dir):
+    a = _decode(_anim_container())
+    lines = xsa_anim.clip_slot_table(a, "cut01")
+    joined = "\n".join(lines)
+    assert "clip 'cut01'" in joined, joined
+    assert "rotation: 2 slots" in joined, joined
+    assert "movement: 1 slots" in joined, joined
+    assert "track 1" in joined and "track 2" in joined, joined
+    assert xsa_anim.clip_slot_table(a, "nope") == ["no clip named 'nope'"]
+
+
 def main() -> int:
     tests = (test_anim_roundtrip, test_non_anim_container_is_ok,
              test_detects_quaternion_tiling, test_detects_non_unit_quaternion,
@@ -287,7 +365,12 @@ def main() -> int:
              test_detects_sequence_key_window_gap,
              test_detects_sequence_key_window_overlap,
              test_detects_sequence_track_mid_mismatch,
-             test_detects_track_index_out_of_range)
+             test_detects_track_index_out_of_range,
+             test_slot_binding_rotation,
+             test_movement_pool_routes_on_flag,
+             test_validate_movement_pool_flag,
+             test_sample_rotation_interpolates,
+             test_clip_slot_table)
     with tempfile.TemporaryDirectory() as d:
         for t in tests:
             t(d)

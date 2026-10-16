@@ -2,6 +2,59 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 15 — 2026-10-16 04:00 (scheduled loop)
+- **Unit:** GH #58 → #46 — pin the `.xsa` **clip → skeleton-slot → track → key
+  pool** binding (the "TRACKS-block → NODES-slot mapping" + "7
+  QUATERNIONINDICES re-base sets" left open by Wakes 12–14 / ADR-0422).
+- Finding (real evidence, read-only; Ghidra 12.1.4 via `rea`):
+  - The compressed class is not evaluated by `EvalRot`/`EvalMove`
+    (`FUN_10076680`/`FUN_10076700`, both throw `"WTF is this used for?"`).
+    Evaluation is **`FUN_100776b0`**, reached from **`FUN_10077f20`** (the
+    sequence object's `+0x24` method, `FUN_10078340`). For rotation slot `j` it
+    reads `track = TRACKINDICES[track_start + j]`,
+    `(start, flags) = TRACKS[track]`, `count = (flags & 0x8000) ? 1 :
+    sequence.time_count`, and dereferences `QUATERNIONINDICES[start + key]`
+    into **`QUATERNIONS`** (4 x i16, `3.051851e-05 == 1/32767`), Hermite
+    interpolation. For movement slot `j` it uses `track = TRACKINDICES[track_mid
+    + j]` and dereferences into **`MOVES`** (3 x f32). So a clip's key window is
+    a **slot → track** table (not a track set); `0x8000` = single key else
+    `time_count` keys; the **pool is chosen by the window**.
+  - **The re-base exception is the movement flag `0x0001`:** corpus-wide every
+    rotation-window value is `< QUATERNIONS.count` (**0 / 313** sets violate);
+    for movement windows **all 81** blocks that exceed `MOVES.count` carry
+    `flags & 0x0001` and **all** fit `QUATERNIONS.count` (0 exceed). Decisive:
+    `02-cs_entranceintro\Johns.xsa` cut30 track 895 (start 17370, tc 350) reads
+    `9339..11229` with `MOVES.count 7170`, `QUATERNIONS.count 48468`; every
+    non-`0x0001` movement block fits `MOVES`. So a movement-window track with
+    `flags & 0x0001` dereferences `QUATERNIONS`, not `MOVES` — which is exactly
+    what the "7 sets where `QUATERNIONINDICES` exceeds `QUATERNIONS.count`" are
+    (`Grenade.xsa`: `nq 1`, `nm 24`, movement values `0..23`).
+- Change:
+  - `tools/xsa_anim.py`: `SlotBinding`; `AnimSet.window_tracks/
+    window_slot_track/movement_pool/pool_for/slot_binding/slot_bindings/
+    clip_bindings/slot_key_times/slot_rotation_keys/slot_move_keys/
+    sample_rotation/sample_move/sequence_by_name`; `clip_slot_table`;
+    `_bracket/_lerp/_nlerp` helpers; `--clip NAME` (+ `--json`); `validate()`
+    now checks every resolved slot's key values against its pool (rotation →
+    `QUATERNIONS`; movement → `MOVES` unless `flags & 0x0001`); docstring.
+  - `tools/test_xsa_anim.py`: **+5** tests (slot binding, flag-routed movement
+    pool, pool-aware validation both ways, nlerp sampling, clip table) → **19**.
+  - `docs/adr/0422-…md` "Update (Wake 15)" (sampler + pool finding, evidence
+    commands, resolved follow-ups); `docs/rea/mos-xmd-format.md` `.xsa` section.
+  - `docs/rea/reference/xsa_clip_slot_bindings.json` (new evidence: MovBasSha_arm
+    `mhstd_sha`, Grenade `Gren_Equip`, Johns `cut30`).
+- Evidence: `xsa_anim.py --inventory <game>\Content --check` → **313/313 `ok`,
+  0 FAIL** (now with the pool-range invariant), 23 non-animation files skipped;
+  `test_xsa_anim.py` (19) PASS; `test_mos_xmd.py`, `test_xmd_export.py`,
+  `test_xmd_bake.py`, `validate_addresses.py`, `verify_hook_init.py`,
+  `verify_reported_fixes.py`, `scenario_tests.py --check` all PASS. No C++
+  changed → no `build-all.ps1`/CTest rerun.
+- Blocker: none. **Next:** bind a clip (e.g. an arm/FPS clip) to the
+  `Riddick_B05`/FPS-arm `.xmd` skeleton via `rotation_slot`, evaluate the
+  bind-pose pairing, bake a posed arm (ADR-0423), then wire `VRHandRenderer`
+  behind a config flag (procedural overlay kept as fallback).
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 14 — 2026-10-16 03:37 (scheduled loop)
 - **Unit:** GH #58 → #46 — pin the `.xmd` `BONEDEFORM` **bone-index space**
   (the "node index vs `NODEINDICES` position" question left open by Wakes 8–10 /
