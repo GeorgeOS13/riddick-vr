@@ -120,6 +120,13 @@ if(BUILD_TESTING)
     )
     add_test(NAME combat_strike_thresholds COMMAND riddick_vr_combat_strike_tests)
 
+    # GH #65: held-input scheduler (melee clicks are held, not zero-length).
+    add_executable(riddick_vr_input_hold_tests tests/input_hold_tests.cpp)
+    target_include_directories(riddick_vr_input_hold_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
+    )
+    add_test(NAME input_hold_scheduler COMMAND riddick_vr_input_hold_tests)
+
     # GH #66 (approach 2): per-draw viewmodel suppression window state machine.
     add_executable(riddick_vr_viewmodel_suppressor_tests tests/viewmodel_suppressor_tests.cpp)
     target_include_directories(riddick_vr_viewmodel_suppressor_tests PRIVATE

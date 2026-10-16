@@ -122,6 +122,13 @@ void LoadVRConfig() {
         cfg.strikeUppercutMaxY = ClampF(ReadFloat(iniPath, "StrikeUppercutMaxY", cfg.strikeUppercutMaxY), -0.60f, 0.20f);
         cfg.strikeUppercutVz = ClampF(ReadFloat(iniPath, "StrikeUppercutVz", cfg.strikeUppercutVz), -8.0f, 0.0f);
         cfg.strikeCrossVx = ClampF(ReadFloat(iniPath, "StrikeCrossVx", cfg.strikeCrossVx), 0.10f, 8.0f);
+        // GH #65: head-local strike velocity and held melee clicks.
+        cfg.headLocalVelocity = ReadInt(iniPath, "HeadLocalVelocity", cfg.headLocalVelocity) ? 1 : 0;
+        cfg.meleeClickHoldMs = ReadInt(iniPath, "MeleeClickHoldMs", cfg.meleeClickHoldMs);
+        if (cfg.meleeClickHoldMs < 0) cfg.meleeClickHoldMs = 0;
+        if (cfg.meleeClickHoldMs > 250) cfg.meleeClickHoldMs = 250;
+        VR_LOG_INFO("Combat input config: head_local_velocity=%d melee_click_hold_ms=%d",
+            cfg.headLocalVelocity, cfg.meleeClickHoldMs);
         // GH #66: per-draw engine viewmodel suppression (default off; the
         // signature is provisional and must be confirmed on a headset).
         cfg.suppressEngineViewmodel = ReadInt(iniPath, "SuppressEngineViewmodel", cfg.suppressEngineViewmodel) ? 1 : 0;
