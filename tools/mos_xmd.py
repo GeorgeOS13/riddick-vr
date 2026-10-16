@@ -102,6 +102,18 @@ Geometry (recovered from MXR.dll ``CTriangleMeshCore::Read`` +
                  The trailing matrix-map block is present for every shipped
                  asset (model version 0x302); it is validated by ``--check``.
 
+                 **Bone-index space** (ADR-0423): an influence's ``bone`` byte
+                 is *not* always a skeleton node index. When the trailing
+                 ``matrix_bones`` palette is **non-empty** the byte is an index
+                 into that palette and the skeleton node is
+                 ``matrix_bones[bone]``; when the palette is **empty** the byte
+                 is the node index directly (``matrix_map_id`` is ``-1`` for
+                 map-less clusters but is *not* a reliable discriminator — 33
+                 shipped clusters store ``-1`` *and* a palette, so the palette
+                 length alone decides). Use
+                 :meth:`BoneDeform.resolve_bone` /
+                 :meth:`BoneDeform.resolved_influences_of`.
+
   Clusters     : one ``VERTEXFRAMES``/``TVERTEXFRAMES``/``TRIANGLES`` triple per
                  submesh, in traversal order; every index must be < the paired
                  frame's vertex count and a non-empty UV frame's count must
@@ -404,7 +416,14 @@ class BoneVertex:
 
 
 class BoneDeform:
-    """Decoded ``BONEDEFORM`` payload: per-vertex bone influences + matrix map."""
+    """Decoded ``BONEDEFORM`` payload: per-vertex bone influences + matrix map.
+
+    Influence ``bone`` bytes live in one of two spaces (ADR-0423): a
+    ``matrix_bones`` palette index when that palette is non-empty, otherwise a
+    direct skeleton node index. :meth:`resolve_bone` /
+    :meth:`resolved_influences_of` apply the mapping; :meth:`influences_of`
+    keeps the raw bytes.
+    """
 
     __slots__ = ("vertex_count", "vertices", "influence_count", "influences",
                  "matrix_map_id", "matrix_bones", "size", "exact")
@@ -420,14 +439,70 @@ class BoneDeform:
         self.size = size
         self.exact = exact
 
+    def has_palette(self) -> bool:
+        """True when the trailing ``matrix_bones`` palette is present."""
+        return bool(self.matrix_bones)
+
+    def bone_space(self) -> str:
+        """``"palette"`` when ``bone`` bytes index ``matrix_bones``, else ``"node"``."""
+        return "palette" if self.matrix_bones else "node"
+
+    def resolve_bone(self, index: int) -> int:
+        """Map a raw influence ``bone`` byte to a skeleton node index.
+
+        Applies the ``matrix_bones`` palette when present; otherwise the raw
+        index is already a node index. Raises ``GeometryError`` when a palette
+        is present and ``index`` falls outside it."""
+        if not self.matrix_bones:
+            return index
+        if not 0 <= index < len(self.matrix_bones):
+            raise GeometryError(
+                f"BONEDEFORM bone palette index {index} out of range "
+                f"(palette size {len(self.matrix_bones)})")
+        return self.matrix_bones[index]
+
     def influences_of(self, vertex_index: int):
-        """Return ``[(bone, weight), ...]`` for one vertex (weights sum to ~1)."""
+        """Return raw ``[(bone_byte, weight), ...]`` for one vertex."""
         v = self.vertices[vertex_index]
         s = v.influence_start
         return self.influences[s:s + v.influence_count]
 
+    def resolved_influences_of(self, vertex_index: int):
+        """Return ``[(skeleton_node, weight), ...]`` for one vertex."""
+        v = self.vertices[vertex_index]
+        s = v.influence_start
+        return [(self.resolve_bone(b), w)
+                for b, w in self.influences[s:s + v.influence_count]]
+
     def max_bone(self) -> int:
+        """Largest raw ``bone`` byte (a palette index when a palette is present)."""
         return max((bone for bone, _w in self.influences), default=-1)
+
+    def max_resolved_bone(self) -> int:
+        """Largest resolved skeleton node index over every in-range influence.
+
+        Out-of-palette indices are ignored here (they are reported by
+        ``validate()`` / raise from :meth:`resolve_bone`) so aggregation never
+        fails on a malformed cluster."""
+        m = -1
+        for b, _w in self.influences:
+            if self.matrix_bones:
+                if 0 <= b < len(self.matrix_bones):
+                    m = max(m, self.matrix_bones[b])
+            else:
+                m = max(m, b)
+        return m
+
+    def used_palette_indices(self) -> list:
+        """Distinct raw ``bone`` bytes actually referenced by influences."""
+        return sorted({b for b, _w in self.influences})
+
+    def palette_fully_used(self) -> bool:
+        """True when every ``matrix_bones`` entry is referenced (vacuously true
+        without a palette)."""
+        if not self.matrix_bones:
+            return True
+        return len(self.used_palette_indices()) == len(self.matrix_bones)
 
     def max_influences(self) -> int:
         return max((v.influence_count for v in self.vertices), default=0)
@@ -437,17 +512,21 @@ class BoneDeform:
             "vertex_count": self.vertex_count,
             "influence_count": self.influence_count,
             "max_bone": self.max_bone(),
+            "max_resolved_bone": self.max_resolved_bone(),
+            "bone_space": self.bone_space(),
             "max_influences": self.max_influences(),
             "matrix_map_id": self.matrix_map_id,
             "matrix_bone_count": len(self.matrix_bones),
+            "matrix_bones": list(self.matrix_bones),
+            "palette_fully_used": self.palette_fully_used(),
             "size": self.size,
             "exact": self.exact,
         }
         if with_skin:
             d["vertices"] = [v.as_dict() for v in self.vertices]
             d["influences"] = [[bone, w] for bone, w in self.influences]
-            d["matrix_bones"] = list(self.matrix_bones)
         return d
+
 
 
 def decode_bonedeform(b: bytes, off: int,
@@ -985,6 +1064,8 @@ class Xmd:
         summary["uv_clusters"] = dec["uv_clusters"]
         summary["decoded_uvs"] = dec["decoded_uvs"]
         summary["skinned_clusters"] = dec["skinned_clusters"]
+        summary["paletted_bone_clusters"] = dec["paletted_bone_clusters"]
+        summary["direct_bone_clusters"] = dec["direct_bone_clusters"]
         summary["bone_deform_vertices"] = dec["skinned_vertices"]
         summary["decoded_influences"] = dec["decoded_influences"]
         summary["max_influences_per_vertex"] = dec["max_influences_per_vertex"]
@@ -1144,11 +1225,36 @@ class Xmd:
                 problems.append(
                     f"cluster {c['index']}: skin vertex count "
                     f"{c['skin_vertices']} != vertex count")
-            elif (c.get("max_bone") is not None and bone_total
-                    and c["max_bone"] >= bone_total):
-                problems.append(
-                    f"cluster {c['index']}: bone index {c['max_bone']} "
-                    f">= skeleton node count {bone_total}")
+            elif c.get("skin") is not None and bone_total:
+                # Bone-index space (ADR-0423): a non-empty palette means the raw
+                # influence byte indexes matrix_bones and the resolved node must
+                # be inside the skeleton; an empty palette means the byte is the
+                # node index directly.
+                skin = c["skin"]
+                if skin["bone_space"] == "palette":
+                    plen = skin["matrix_bone_count"]
+                    if c["max_bone"] >= plen:
+                        problems.append(
+                            f"cluster {c['index']}: bone palette index "
+                            f"{c['max_bone']} >= palette size {plen}")
+                    elif c["max_resolved_bone"] >= bone_total:
+                        problems.append(
+                            f"cluster {c['index']}: resolved bone index "
+                            f"{c['max_resolved_bone']} >= skeleton node count "
+                            f"{bone_total}")
+                    palette = skin.get("matrix_bones") or []
+                    if len(palette) != len(set(palette)):
+                        problems.append(
+                            f"cluster {c['index']}: bone palette has duplicate "
+                            f"entries")
+                    elif any(b >= bone_total for b in palette):
+                        problems.append(
+                            f"cluster {c['index']}: bone palette entry >= "
+                            f"skeleton node count {bone_total}")
+                elif c["max_bone"] >= bone_total:
+                    problems.append(
+                        f"cluster {c['index']}: bone index {c['max_bone']} "
+                        f">= skeleton node count {bone_total}")
 
         # Cluster MISCELLANEOUS cross-check (GH #55): each cluster's
         # surface_index must resolve inside SURFACES, the used indices must
@@ -1472,6 +1578,9 @@ class Xmd:
                 "skin_vertices": None,
                 "skin_matches": None,
                 "max_bone": None,
+                "max_resolved_bone": None,
+                "bone_space": None,
+                "palette_fully_used": None,
                 "triangle_chunk": None,
                 "triangle_count": None,
                 "max_index": None,
@@ -1508,6 +1617,9 @@ class Xmd:
                     entry["skin"] = skin.as_dict()
                     entry["skin_vertices"] = skin.vertex_count
                     entry["max_bone"] = skin.max_bone()
+                    entry["max_resolved_bone"] = skin.max_resolved_bone()
+                    entry["bone_space"] = skin.bone_space()
+                    entry["palette_fully_used"] = skin.palette_fully_used()
                     if frames:
                         entry["skin_matches"] = (
                             skin.vertex_count == frames[-1].count)
@@ -1542,6 +1654,9 @@ class Xmd:
         total_skin_verts = 0
         uv_clusters = 0
         skinned = 0
+        paletted = 0
+        direct = 0
+        palette_unused = 0
         max_infl = 0
         bad = 0
         for c in clusters:
@@ -1557,6 +1672,12 @@ class Xmd:
                 total_infl += c["skin"]["influence_count"]
                 total_skin_verts += c["skin_vertices"]
                 max_infl = max(max_infl, c["skin"]["max_influences"])
+                if c["bone_space"] == "palette":
+                    paletted += 1
+                    if c["palette_fully_used"] is False:
+                        palette_unused += 1
+                else:
+                    direct += 1
             if (c["error"] or c["index_in_range"] is False
                     or c.get("uv_matches") is False
                     or c.get("skin_matches") is False):
@@ -1568,6 +1689,9 @@ class Xmd:
             "uv_clusters": uv_clusters,
             "decoded_uvs": total_uvs,
             "skinned_clusters": skinned,
+            "paletted_bone_clusters": paletted,
+            "direct_bone_clusters": direct,
+            "palette_unused_clusters": palette_unused,
             "skinned_vertices": total_skin_verts,
             "decoded_influences": total_infl,
             "max_influences_per_vertex": max_infl,
@@ -1648,6 +1772,8 @@ def report_file(path: str, want_json: bool, with_strings: bool,
               f"  decoded_tris={g['decoded_triangles']}"
               f"  uv_clusters={g['uv_clusters']}  decoded_uvs={g['decoded_uvs']}")
         print(f"   skinned_clusters={g['skinned_clusters']}  "
+              f"paletted={g['paletted_bone_clusters']} "
+              f"direct={g['direct_bone_clusters']}  "
               f"decoded_influences={g['decoded_influences']}  "
               f"max_influences_per_vertex={g['max_influences_per_vertex']}  "
               f"bad_clusters={g['bad_clusters']}")
@@ -1684,7 +1810,9 @@ def report_file(path: str, want_json: bool, with_strings: bool,
                       f"uvs={c['uv_count']} uv_match={c['uv_matches']} "
                       f"surface={c['surface_index']} flags={c['cluster_flags']} "
                       f"skin={c['skin'] and c['skin']['influence_count']} "
-                      f"skin_match={c['skin_matches']} max_bone={c['max_bone']}"
+                      f"skin_match={c['skin_matches']} "
+                      f"bone_space={c['bone_space']} max_bone={c['max_bone']} "
+                      f"max_node={c['max_resolved_bone']}"
                       + (f"  ERR {c['error']}" if c["error"] else ""))
         if cluster is not None:
             for d in rec["cluster_detail"]:
@@ -1702,9 +1830,15 @@ def report_file(path: str, want_json: bool, with_strings: bool,
             for sk in rec.get("skin_detail", []):
                 print(f"   cluster {cluster} skin verts={sk['vertex_count']} "
                       f"influences={sk['influence_count']} "
+                      f"bone_space={sk['bone_space']} "
                       f"max_bone={sk['max_bone']} "
+                      f"max_node={sk['max_resolved_bone']} "
                       f"matrix_map_id={sk['matrix_map_id']} "
                       f"matrix_bones={sk['matrix_bone_count']}")
+                palette = sk.get("matrix_bones") or []
+                if palette:
+                    print("      palette(nodes)=%s"
+                          % ", ".join(str(p) for p in palette))
                 for i, v in enumerate(sk["vertices"][:4]):
                     inf = sk["influences"][v["influence_start"]:
                                            v["influence_start"]

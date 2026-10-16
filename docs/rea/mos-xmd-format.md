@@ -71,6 +71,12 @@ names `VERTEXFRAMES`, `TVERTEXFRAMES`, `BONEDEFORM`, `SKELETON`, `NODEINDICES`.
      of bone influences; the secondary list holds 8-byte entries whose first
      `u16` is a 1-based bone index.
   → i.e. per-vertex skin influences. Exact stride/packing to be finalised.
+   **Decoded (ADR-0417/ADR-0423):** the completed layout is
+   `u32 n; n*{u8 flags; u8 count; u16 start}; u32 m; m*{u8 bone; u8 wq};
+   s32 matrix_map_id; u32 b; b*u8 matrix_bones`, with `influence_start` a
+   running prefix sum and `weight = wq/255`. The `bone` byte is a **palette
+   index into `matrix_bones`** when that palette is non-empty, and a direct
+   skeleton node index only when it is empty (ADR-0423).
 - `VERTEXFRAMES` positions are byte-packed (not plain float3 arrays); the
   reader sizes the list then fills it in `CTriangleMeshCore::Read`. The precise
   packing (likely per-frame deltas) is the remaining decode target.

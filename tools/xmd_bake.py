@@ -114,6 +114,7 @@ def bake_mesh(model_path: str, cluster: int, name: str, rel_path: str) -> dict:
         "bounds_max": list(mesh.bounds_max),
         "skinned": mesh.skin is not None,
         "influences": mesh.skin.influence_count if mesh.skin else 0,
+        "bone_space": mesh.bone_space,
         "bones_used": bones,
         "skeleton_nodes": len(sk.nodes) if sk else 0,
         "surfaces": x.surface_names(),
@@ -212,8 +213,8 @@ def render_manifest(records: list[dict], generated_from: str) -> dict:
         return {k: rec[k] for k in (
             "name", "source", "source_sha256", "source_size", "cluster",
             "surface_index", "cluster_count", "vertices", "triangles", "uvs",
-            "bounds_min", "bounds_max", "skinned", "influences", "bones_used",
-            "skeleton_nodes", "surfaces")}
+            "bounds_min", "bounds_max", "skinned", "influences", "bone_space",
+            "bones_used", "skeleton_nodes", "surfaces")}
 
     return {
         "tool": "tools/xmd_bake.py",

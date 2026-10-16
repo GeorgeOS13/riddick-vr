@@ -61,7 +61,8 @@ BONEDEFORM (embedded form; selected when model_version > 0x100):
           u8 influence_count;  number of bones affecting this vertex
           u16 influence_start }running prefix sum of influence_count
     u32  influence_count       m
-    m * { u8 bone;             skeleton node index
+    m * { u8 bone;             palette index into matrix_bones (skeleton node
+                               index only when matrix_bones is empty; ADR-0423)
           u8 weight_q }        weight = weight_q / 255
     u32  matrix_map_id         (s32; 0xFFFFFFFF = none)
     u32  matrix_bone_count     b
@@ -74,6 +75,14 @@ The trailing matrix-map block is present for every shipped cluster (the
 model version `0x102` selects it). A cluster with no skinning omits the
 `BONEDEFORM` node entirely; no shipped model uses the separate
 `BONEVERTEXINFO`/`BONEINFLUENCE`/`BONEMATRIXMAP` chunks.
+
+> **Update (2026-10-16) — the `bone` byte is a palette index, not a node index.**
+> ADR-0423 pins the index space: when `matrix_bones` is non-empty the influence
+> byte indexes that palette and the skeleton node is `matrix_bones[bone]`;
+> only an empty palette means the byte is a node index directly. The check
+> described below as "bone index < skeleton node count" was therefore
+> indexing the wrong space (it passed only because palette indices are small);
+> `mos_xmd.validate()` now enforces the space-correct invariants.
 
 ## Verification
 - `python tools/mos_xmd.py --inventory <game>\Content\Models --check`:

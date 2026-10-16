@@ -29,6 +29,7 @@
       "surface_index": 0,
       "skinned": false,
       "influences": 0,
+      "bone_space": "none",
       "bones_used": [],
       "bone_count_used": 0
     },
@@ -51,6 +52,7 @@
       "surface_index": 0,
       "skinned": false,
       "influences": 0,
+      "bone_space": "none",
       "bones_used": [],
       "bone_count_used": 0
     }

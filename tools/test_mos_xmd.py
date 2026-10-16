@@ -397,7 +397,9 @@ def test_skin_matrix_map_and_influences_of(tmp_dir):
     verts = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
     normals = [(0, 0, 0)] * 3
     vrecs = [(0, 1, 0), (0, 2, 1), (0, 1, 3)]
-    infl = [(4, 200), (6, 55), (9, 255), (2, 100)]
+    # Influence bytes are palette indices; the palette resolves them to skeleton
+    # nodes 1, 2 and 9 (ADR-0423).
+    infl = [(0, 200), (1, 55), (2, 255), (0, 100)]
     bd = _bonedeform(vrecs, infl, matrix_map_id=3, matrix_bones=b"\x01\x02\x09")
     blob = _skin_container(_vf204_frame(verts, normals), bd, bones=16)
     path = _write_tmp(blob)
@@ -406,9 +408,136 @@ def test_skin_matrix_map_and_influences_of(tmp_dir):
         sk = x.bone_deform()
         assert sk.matrix_map_id == 3, sk.matrix_map_id
         assert sk.matrix_bones == [1, 2, 9], sk.matrix_bones
-        assert sk.influences_of(1) == [(6, 55 / 255.0), (9, 1.0)], \
+        assert sk.has_palette() and sk.bone_space() == "palette", sk.bone_space()
+        assert sk.influences_of(1) == [(1, 55 / 255.0), (2, 1.0)], \
             sk.influences_of(1)
+        assert sk.resolved_influences_of(1) == [(2, 55 / 255.0), (9, 1.0)], \
+            sk.resolved_influences_of(1)
+        assert sk.resolve_bone(2) == 9, sk.resolve_bone(2)
+        assert sk.max_bone() == 2, sk.max_bone()
+        assert sk.max_resolved_bone() == 9, sk.max_resolved_bone()
+        assert sk.used_palette_indices() == [0, 1, 2]
+        assert sk.palette_fully_used() is True
         assert x.validate() == [], x.validate()
+        c = x.cluster_meshes()[0]
+        assert c["bone_space"] == "palette", c
+        assert c["max_resolved_bone"] == 9 and c["max_bone"] == 2, c
+        assert x.geometry_stats()["paletted_bone_clusters"] == 1, x.geometry_stats()
+        assert x.geometry_stats()["direct_bone_clusters"] == 0
+    finally:
+        os.remove(path)
+
+
+def test_skin_direct_bone_space_without_palette(tmp_dir):
+    verts = [(0, 0, 0), (1, 0, 0)]
+    normals = [(0, 0, 0)] * 2
+    vrecs = [(0, 1, 0), (0, 1, 1)]
+    infl = [(0, 255), (3, 255)]          # direct skeleton node indices
+    bd = _bonedeform(vrecs, infl, matrix_map_id=-1, matrix_bones=())
+    blob = _skin_container(_vf204_frame(verts, normals), bd, bones=4)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        sk = x.bone_deform()
+        assert not sk.has_palette() and sk.bone_space() == "node", sk.bone_space()
+        assert sk.resolve_bone(3) == 3 and sk.max_resolved_bone() == 3
+        assert sk.palette_fully_used() is True
+        assert x.validate() == [], x.validate()
+        assert x.geometry_stats()["direct_bone_clusters"] == 1
+        assert x.geometry_stats()["paletted_bone_clusters"] == 0
+    finally:
+        os.remove(path)
+
+
+def test_skin_id_minus_one_with_palette_still_palette(tmp_dir):
+    # 33 shipped clusters store matrix_map_id == -1 *and* a palette; the palette
+    # length alone decides the space, not the id (ADR-0423).
+    verts = [(0, 0, 0), (1, 0, 0)]
+    normals = [(0, 0, 0)] * 2
+    vrecs = [(0, 1, 0), (0, 1, 1)]
+    infl = [(0, 255), (1, 255)]
+    bd = _bonedeform(vrecs, infl, matrix_map_id=-1, matrix_bones=b"\x02\x03")
+    blob = _skin_container(_vf204_frame(verts, normals), bd, bones=8)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        sk = x.bone_deform()
+        assert sk.matrix_map_id == -1 and sk.matrix_bones == [2, 3]
+        assert sk.bone_space() == "palette", sk.bone_space()
+        assert sk.resolve_bone(1) == 3
+        assert x.validate() == [], x.validate()
+        assert x.geometry_stats()["paletted_bone_clusters"] == 1
+    finally:
+        os.remove(path)
+
+
+def test_skin_palette_index_out_of_range(tmp_dir):
+    verts = [(0, 0, 0), (1, 0, 0)]
+    normals = [(0, 0, 0)] * 2
+    vrecs = [(0, 1, 0), (0, 1, 1)]
+    infl = [(0, 255), (5, 255)]          # palette index 5 with a 3-entry palette
+    bd = _bonedeform(vrecs, infl, matrix_map_id=1, matrix_bones=b"\x01\x02\x09")
+    blob = _skin_container(_vf204_frame(verts, normals), bd, bones=8)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        problems = x.validate()
+        assert any("bone palette index 5 >= palette size 3" in p
+                   for p in problems), problems
+    finally:
+        os.remove(path)
+
+
+def test_skin_palette_entry_out_of_range(tmp_dir):
+    verts = [(0, 0, 0), (1, 0, 0)]
+    normals = [(0, 0, 0)] * 2
+    vrecs = [(0, 1, 0), (0, 1, 1)]
+    infl = [(0, 255), (1, 255)]          # only palette entries 0 and 1 used
+    # entry 2 (20) is unused but still outside the 4-node skeleton
+    bd = _bonedeform(vrecs, infl, matrix_map_id=1,
+                     matrix_bones=b"\x01\x02\x14")
+    blob = _skin_container(_vf204_frame(verts, normals), bd, bones=4)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        problems = x.validate()
+        assert any("bone palette entry >= skeleton node count 4" in p
+                   for p in problems), problems
+    finally:
+        os.remove(path)
+
+
+def test_skin_palette_duplicate_entries(tmp_dir):
+    verts = [(0, 0, 0), (1, 0, 0)]
+    normals = [(0, 0, 0)] * 2
+    vrecs = [(0, 1, 0), (0, 2, 1)]
+    infl = [(0, 255), (1, 128), (2, 127)]
+    bd = _bonedeform(vrecs, infl, matrix_map_id=2, matrix_bones=b"\x01\x01\x02")
+    blob = _skin_container(_vf204_frame(verts, normals), bd, bones=8)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        problems = x.validate()
+        assert any("bone palette has duplicate entries" in p
+                   for p in problems), problems
+    finally:
+        os.remove(path)
+
+
+def test_skin_palette_unused_entries_ok(tmp_dir):
+    verts = [(0, 0, 0), (1, 0, 0)]
+    normals = [(0, 0, 0)] * 2
+    vrecs = [(0, 1, 0), (0, 1, 1)]
+    infl = [(0, 255), (1, 255)]          # entries 1 (node 9) unused
+    bd = _bonedeform(vrecs, infl, matrix_map_id=0, matrix_bones=b"\x01\x02\x09")
+    blob = _skin_container(_vf204_frame(verts, normals), bd, bones=16)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        sk = x.bone_deform()
+        assert sk.palette_fully_used() is False, sk.used_palette_indices()
+        assert x.validate() == [], x.validate()
+        assert x.geometry_stats()["palette_unused_clusters"] == 1
     finally:
         os.remove(path)
 
@@ -934,6 +1063,12 @@ def main() -> int:
              test_uv_roundtrip, test_uv_detects_count_mismatch,
              test_uv_detects_bad_tiling, test_uv_empty_chunk_is_ok,
              test_skin_roundtrip, test_skin_matrix_map_and_influences_of,
+             test_skin_direct_bone_space_without_palette,
+             test_skin_id_minus_one_with_palette_still_palette,
+             test_skin_palette_index_out_of_range,
+             test_skin_palette_entry_out_of_range,
+             test_skin_palette_duplicate_entries,
+             test_skin_palette_unused_entries_ok,
              test_skin_detects_prefix_sum_mismatch,
              test_skin_detects_vertex_count_mismatch,
              test_skin_detects_bone_out_of_range,

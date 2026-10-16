@@ -79,9 +79,19 @@ class ClusterMesh:
         return len(self.positions)
 
     def bones_used(self) -> list[int]:
+        """Distinct **skeleton node** indices referenced by this cluster's skin.
+
+        Applies the BONEDEFORM ``matrix_bones`` palette (ADR-0423): influence
+        bytes are palette indices when the palette is present, node indices
+        otherwise."""
         if self.skin is None:
             return []
-        return sorted({bone for bone, _w in self.skin.influences})
+        return sorted({self.skin.resolve_bone(bone)
+                       for bone, _w in self.skin.influences})
+
+    @property
+    def bone_space(self) -> str:
+        return self.skin.bone_space() if self.skin else "none"
 
 
 def vertex_frame_nodes(x: Xmd):
@@ -243,11 +253,21 @@ def cluster_skin_dict(mesh: ClusterMesh) -> dict | None:
         "vertex_count": sk.vertex_count,
         "influence_count": sk.influence_count,
         "max_influences_per_vertex": sk.max_influences(),
+        "bone_space": sk.bone_space(),
+        "max_bone": sk.max_bone(),
+        "max_resolved_bone": sk.max_resolved_bone(),
         "matrix_map_id": sk.matrix_map_id,
         "matrix_bone_count": len(sk.matrix_bones),
         "matrix_bones": list(sk.matrix_bones),
+        # Raw influence bytes: a palette index when matrix_bones is non-empty,
+        # a skeleton node index otherwise (ADR-0423).
         "influences": [
             [[bone, w] for bone, w in sk.influences_of(i)]
+            for i in range(sk.vertex_count)
+        ],
+        # The same weights with the palette already applied (skeleton nodes).
+        "resolved_influences": [
+            [[node, w] for node, w in sk.resolved_influences_of(i)]
             for i in range(sk.vertex_count)
         ],
     }
@@ -274,6 +294,7 @@ def manifest(x: Xmd, meshes) -> dict:
             "surface_index": surface_of.get(m.index),
             "skinned": m.skin is not None,
             "influences": m.skin.influence_count if m.skin else 0,
+            "bone_space": m.bone_space,
             "bones_used": bones,
             "bone_count_used": len(bones),
         })

@@ -65,6 +65,13 @@ arm/hand surfaces (`RIDDICK_ARMSCAR_*` in `Riddick_B05.xmd`, `Pa2_Hand_01`).
   - Clusters **3,4,5 duplicate 0,1,2** (same bounds, vertex/triangle counts and
     bone sets); the duplicates store an **empty** `TVERTEXFRAMES` node. So each
     of the 3 surfaces appears twice: a textured copy and an untextured copy.
+  - **Update (2026-10-16, ADR-0423):** the "bones used" column above lists the
+    raw `BONEDEFORM` influence bytes, which are **`matrix_bones` palette
+    indices**, not node indices. Resolved to skeleton nodes: cluster 0/3 = nodes
+    `{68,4,3,2,1,8,5,6,7,69}`, cluster 1/4 (left arm) = nodes
+    `{1,8,9,12,13,14,16,17,18,38..52}`, cluster 2/5 (right arm) = nodes
+    `{9,17,18,19,21,53..67}`, cluster 6 (shadow body, empty palette) = node
+    indices `0..69` directly. The OBJ/JSON exports apply the palette now.
   - Cluster 0/3 are the **legs** (bones 0-9, z 0-25); clusters 1/4 and 2/5 are
     the **two arms** (z ~44-52, `|y|` up to 25.4, bones 10-23); cluster 6 is the
     untextured `SHADOWDATA` body.

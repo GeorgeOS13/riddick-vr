@@ -175,6 +175,42 @@ def test_skeleton_dict_children(tmp_dir):
         os.remove(path)
 
 
+def test_manifest_bone_space_palette(tmp_dir):
+    # Same mesh, but the BONEDEFORM carries a matrix_bones palette: the manifest
+    # must report the palette space and resolve the bones to skeleton nodes
+    # (ADR-0423).
+    verts = [(0, 0, 0), (65535, 0, 0), (0, 65535, 0), (0, 0, 65535)]
+    normals = [(127, 0, 0), (0, 127, 0), (0, 0, -127), (0, 0, 0)]
+    vf = tm._vf204_frame(verts, normals)
+    tv = tm._tv200_frame([(0, 0), (65535, 0), (0, 65535), (65535, 65535)])
+    tri = tm._triangles([0, 1, 2, 0, 2, 3])
+    vrecs = [(0, 1, 0), (0, 2, 1), (0, 1, 3), (0, 1, 4)]
+    infl = [(0, 255), (1, 128), (2, 255), (3, 255), (5, 64)]
+    # palette: index 0->node 2, 1->node 3, 2->node 4, 3->node 5, 5->node 7
+    bd = tm._bonedeform(vrecs, infl, matrix_map_id=0,
+                        matrix_bones=b"\x02\x03\x04\x05\x06\x07")
+    nodes_payload = tm._flat_nodes(8)
+    indices = tm._node_indices(range(1, 8))
+    path = tm._write_tmp(_export_container(vf, tv, bd, tri, 2, nodes_payload,
+                                           8, indices))
+    out = os.path.join(tmp_dir, "export5")
+    try:
+        man = xmd_export.export_model(path, out)
+        c = man["clusters"][0]
+        assert c["bone_space"] == "palette", c
+        # raw bytes {0,1,2,3,5} -> nodes {2,3,4,5,7}
+        assert c["bones_used"] == [2, 3, 4, 5, 7], c["bones_used"]
+        skin = json.load(open(os.path.join(out, f"{_stem(path)}.skin.json"),
+                              encoding="utf-8"))
+        cl = skin["clusters"][0]
+        assert cl["bone_space"] == "palette", cl
+        assert cl["matrix_bones"] == [2, 3, 4, 5, 6, 7], cl["matrix_bones"]
+        assert cl["influences"][1] == [[1, 128 / 255.0], [2, 1.0]], cl
+        assert cl["resolved_influences"][1] == [[3, 128 / 255.0], [4, 1.0]], cl
+    finally:
+        os.remove(path)
+
+
 def test_main_list_and_errors(tmp_dir):
     path = tm._write_tmp(_single_cluster())
     try:
@@ -194,7 +230,7 @@ def main() -> int:
     tests = (test_export_roundtrip, test_export_without_uv,
              test_export_cluster_select_and_out_of_range,
              test_manifest_bones_and_surfaces, test_skeleton_dict_children,
-             test_main_list_and_errors)
+             test_manifest_bone_space_palette, test_main_list_and_errors)
     with tempfile.TemporaryDirectory() as d:
         for t in tests:
             t(d)
