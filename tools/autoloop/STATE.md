@@ -2,6 +2,59 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 28 — 2026-10-16 14:26 (scheduled loop)
+- **Unit:** GH **#63** (duplicate hands) — RE **approach 1** precondition: pin
+  the RPG item `*flags` encoding so the engine's `noviewmodel` flag can be
+  written at runtime.
+- Finding (read-only, REA/Ghidra 12.1.4 on
+  `Content/GameClasses_Win32_x86.dll`, sha256 `1898b736…`, 2004 EFBB build):
+  - `*flags` is parsed by the `CRPG_Object_Item` property registrar
+    `FUN_100dfbd0` (`0x100dfbd0..0x100e0b31`); the FLAGS branch
+    (`"FLAGS"` @0x100e0568) does
+    `*(uint *)(item + 0x14c) |= FUN_100095a0(&PTR_s_wallcollision_101f7600)`
+    (mask injected at `0x100e057a`). → **flag bitfield = `CRPG_Object_Item + 0x14c` (u32)**.
+  - `FUN_100095a0 → FUN_10009160` is the generic, reused name-set→bitmask
+    translator: it walks a **NULL-terminated** `char*` table and sets
+    `mask |= 1 << index` per matched `a+b+c` token (numeric tokens OR raw).
+    → **bit = 1 << (0-based name index)**.
+  - Table base `0x101f7600` (`PTR_s_wallcollision_101f7600`), **32 entries**,
+    NULL at `0x101f7680`: `[0] wallcollision, [1] noviewmodel, [2]
+    playerlaserbeam, [3] __equipped__, [4] rpgmodelflags, [5] aiming, …`.
+    → **`noviewmodel` = bit 1 = `0x00000002`**.
+  - Shipped-content cross-check: `Content/Registry/RpgAmmo.xrg`
+    `renderquantity+noviewmodel+needequippedlink+unselectable` →
+    `0x00100000 | 0x2 | 0x00010000 | 0x100 = 0x00110102`.
+  - Reader lead (NOT proven to be the draw gate): the only direct `& 2` read of
+    `+0x14c` found is `0x10037111  F6 80 4C 01 00 00 02` (`test byte [eax+0x14c],2`)
+    inside `FUN_10037020` (`0x10037020..0x100372bc`, sole caller `FUN_10040aa0`),
+    whose bits tested (0x1/0x2/0x20 = wallcollision/noviewmodel/aiming) match the
+    table — but its surrounding role is player-start/camera-entity selection.
+  - No `test dword [reg+0x14c],2` (F7 /8x) exists; the F6 byte forms for modrm
+    `0x81..0x87` were not exhaustively scanned (search-bytes re-imports Ghidra
+    ~35 s/pattern).
+- Change (docs only, no C++/asset): new
+  `docs/rea/reference/GameClasses_RPG_ItemFlags.txt` (full 32-bit table + the
+  parser loop + reader lead) and `docs/adr/0435-rpg-item-flags-noviewmodel-bit.md`.
+  No code/asset change → no build/CTest.
+- **Repair (main was red):** between this wake's start and its end a concurrent
+  writer landed `e858809` (GH #65 punch fix) + `147d7b8` (prompt re-prioritize;
+  new issues **#64/#65**) but did **not** refresh `tools/verify_reported_fixes.py`.
+  #65 removed the `combatStance.active && !isClimbingActive` melee chord literal,
+  so the `#52/#54` stance invariant failed on `main`. Updated that one assertion
+  to pin #65's intent (melee is swing-driven; the two-hand stance still gates the
+  guard *pose*) — `verify_reported_fixes` is green again. (Note: concurrent
+  writer → re-check `git log` before pushing.)
+- Evidence: `wake28_*` under `tools/autoloop/logs/` (ev_f32fcf56 FLAGS registrar,
+  ev_bf358cea TranslateFlags wrapper, ev_36fdf50a core scanner, ev_11cf38db table
+  bytes, ev_70ebc13f name bytes, ev_ee5b4a11 +0x14c reader, ev_b8c39329 table
+  xref). Retired: run `rea`/Ghidra **serially** — one function/search per call.
+- Blocker: the **viewmodel draw gate** (consumer of the bit) and the live
+  **equipped-item pointer** are still unidentified, so approach 1 cannot be
+  implemented yet. **Next:** decompile `FUN_10040aa0` (sole caller of the reader)
+  to classify `FUN_10037020`, and hunt the first-person weapon/arm draw path for
+  a `[+0x14c] & 2` test; else fall back to #63 approach 2.
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 27 — 2026-10-16 12:19 (scheduled loop)
 - **Unit:** GH **#62** (physical block/attack) — make the block a **front-of-HMD
   hand pose** and stop the guard from masking swings: extract the guard window

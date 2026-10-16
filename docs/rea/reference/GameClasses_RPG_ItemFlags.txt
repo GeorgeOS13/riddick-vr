@@ -1,0 +1,125 @@
+# GameClasses_Win32_x86.dll — RPG item "*flags" token bitfield
+# provider: ghidra 12.1.4
+# subject : Content/GameClasses_Win32_x86.dll
+#           sha256 = 1898b736f11e0fc0bc2976703592d30184225c6f5b39263cfd54a86b423d8903
+#           (2004 EFBB build; internal PDB Dll_GameClasses.pdb)
+# evidence: ev_f32fcf56 (FLAGS property registrar), ev_bf358cea (TranslateFlags
+#           wrapper), ev_36fdf50a (TranslateFlags core), ev_11cf38db (table bytes),
+#           ev_70ebc13f (name-string bytes), ev_ee5b4a11 (+0x14c & 2 reader),
+#           ev_b8c39329 (xref of the table base)
+# purpose : the RPG item flag bitfield and the on-disk token -> bit mapping.
+#           GH #63 (duplicate hands, approach 1 = engine-state flag write) needs
+#           the `noviewmodel` bit; this records it. Read-only artefact of REA.
+# ------------------------------------------------------------------------------
+
+FINDING (observed, high confidence)
+===================================
+The registry property `*flags` on an RPG item is parsed by the
+CRPG_Object_Item property registrar
+
+    FUN_100dfbd0   GameClasses_Win32_x86.dll   0x100dfbd0 .. 0x100e0b31
+
+which references the property name "FLAGS" at 0x100e0568 alongside
+MODEL / WEAPONGROUP / ATTACHPOINT / MUZZLEATTACHPOINT / ITEMTYPE / SKILL /
+MAXITEMS / ANIM_* / SOUND_* / ICONSURFACE / PICKUPMSG / ... (item props).
+
+FLAGS branch (Ghidra pseudocode):
+
+    iVar5 = FUN_10004b50(local_224, "FLAGS");
+    if (iVar5 != 0) {
+        uVar8 = FUN_100095a0(&PTR_s_wallcollision_101f7600);   // token -> mask
+        *(uint *)(in_ECX + 0x14c) = *(uint *)(in_ECX + 0x14c) | uVar8;
+        goto LAB_100e0abd;
+    }
+
+=> the RPG item flag bitfield is a u32 at            CRPG_Object_Item + 0x14c
+   (`in_ECX` is the item object being constructed — the same object the other
+   properties write: +0x130 MAXITEMS, +0x174 icon, +0x48 SKILL, ...).
+
+FUN_100095a0 -> FUN_10009160 is the generic token-string -> bitmask translator
+(the same helper family is reused for every name-set property, e.g. SKILL with
+&PTR_s_unarmed_101f72fc). Core loop (Ghidra pseudocode):
+
+    piVar5 = table; iVar3 = *piVar5; bVar10 = 0;
+    while (iVar3 != 0) {                         // table is NULL-terminated
+        if (token == table[bVar10])
+            mask = mask | 1 << (bVar10 & 0x1f);
+        ++piVar5; ++bVar10; iVar3 = *piVar5;
+    }
+
+A token beginning with '-' or '0'..'9' is parsed numerically and OR'd raw
+instead (so `*flags 0x13` and `*flags noviewmodel+...` both work).
+
+=> the bit of a flag = 1 << (0-based index of its name in the table).
+
+THE FLAG TABLE  (base 0x101f7600, Ghidra symbol `PTR_s_wallcollision_101f7600`,
+                 32 char* entries, NULL-terminated at 0x101f7680)
+
+    idx   bit          name                string address
+    0     0x00000001   wallcollision       0x101c5288
+    1     0x00000002   noviewmodel         0x101c527c
+    2     0x00000004   playerlaserbeam     0x101c526c
+    3     0x00000008   __equipped__        0x101c525c
+    4     0x00000010   rpgmodelflags       0x101c524c
+    5     0x00000020   aiming              0x101c5244
+    6     0x00000040   playerflashlight    0x101c5230
+    7     0x00000080   forcewalk           0x101c5224
+    8     0x00000100   unselectable        0x101c5214
+    9     0x00000200   autoaim             0x101c520c
+    10    0x00000400   autoquip            0x101c5200
+    11    0x00000800   autoactivate        0x101c51f0
+    12    0x00001000   useless             0x101c51e8
+    13    0x00002000   __activated__       0x101c51d8
+    14    0x00004000   needammo            0x101c51cc
+    15    0x00008000   needlink            0x101c51c0
+    16    0x00010000   needequippedlink    0x101c51ac
+    17    0x00020000   keepaftermission    0x101c5198
+    18    0x00040000   droponunequip       0x101c5188
+    19    0x00080000   __removed__         0x101c517c
+    20    0x00100000   renderquantity      0x101c516c
+    21    0x00200000   questitem           0x101c5160
+    22    0x00400000   forceselected       0x101c5150
+    23    0x00800000   twohanded           0x101c5144
+    24    0x01000000   consume             0x101c513c
+    25    0x02000000   __usable__          0x101c5130
+    26    0x04000000   nopickup            0x101c5124
+    27    0x08000000   mergeonly           0x101c5118
+    28    0x10000000   weapontargeting     0x101c5108
+    29    0x20000000   singleshot          0x101c50fc
+    30    0x40000000   removeinstant       0x101c50ec
+    31    0x80000000   nomerge             0x101c50e4
+
+Cross-check against shipped content (read-only):
+  Content/Registry/RpgAmmo.xrg lines 7/29/49/70/94/116 …
+      *flags renderquantity+noviewmodel+needequippedlink+unselectable
+  -> mask = 0x00100000 | 0x00000002 | 0x00010000 | 0x00000100 = 0x00110102.
+
+=> **noviewmodel = bit 1 = 0x00000002 of `CRPG_Object_Item + 0x14c`.**
+
+READER LEAD (observation — consumer NOT yet proven)
+==================================================
+A masked scan for `test dword [reg+0x14c], 2` (F7 /8x … 02 00 00 00) matched
+**nothing** in the module. The byte form matched once:
+
+    0x10037111   F6 80 4C 01 00 00 02     test byte ptr [eax + 0x14c], 2
+
+inside  FUN_10037020  (0x10037020 .. 0x100372bc; sole caller FUN_10040aa0).
+That function queries an entity by class name (fallback string
+"info_player_start" @0x101bc260), selects the first entity whose `[+0x14c]`
+bit1 is set (else random), copies a 4x4 from `entity + 0xa8`, applies
+camera-space offsets from `this + 0x4e4 / +0x524`, and returns the low 16 bits
+of `[+0x14c]` through an out-parameter. The bits it tests (0x1, 0x2, 0x20 =
+wallcollision / noviewmodel / aiming) line up with this table, but the
+surrounding role is player-start / camera-entity selection, so this is **not
+proven** to be the viewmodel draw gate. Treat it as the only direct `& 2`
+reader of `+0x14c` found so far (F6 forms for modrm 0x81..0x87 were not
+exhaustively scanned).
+
+NEXT PROBES
+===========
+- Find the runtime path to the **equipped item** (`CRPG_Object_Item*`) so the
+  hook could OR 0x2 into `+0x14c` (approach 1, GH #63).
+- Identify the actual first-person weapon/arm draw gate and whether it reads
+  `[+0x14c] & 2` at all (approach 1) — or fall back to approach 2 (a per-draw
+  viewmodel signature).
+- Decompile FUN_10040aa0 (the sole caller) to classify FUN_10037020's role.
