@@ -650,7 +650,7 @@ bool VRHandRenderer::DrawNativeHand(HandSide side) {
     if (!g_vrConfig.nativeHands) {
         return false;
     }
-    if (!s_gl.glBegin || !s_gl.glEnd || !s_gl.glVertex3f) {
+    if (!s_gl.glBegin || !s_gl.glEnd || !s_gl.glVertex3f || !s_gl.glNormal3f || !s_gl.glTranslatef) {
         return false;
     }
 
