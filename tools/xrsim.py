@@ -28,34 +28,62 @@ import sys
 import time
 from pathlib import Path
 
-import numpy as np
-from PIL import Image
 
-GAME_DIR = Path(r"F:\The Chronicles of Riddick - Assault on Dark Athena\System\Win32_x86")
-GAME_EXE = GAME_DIR / "DarkAthena.exe"
-HOST_EXE = Path(r"C:\Users\GigelCastel\riddick-vr\dist\riddickvr-host.exe")
-LOG_FILE = GAME_DIR / "riddick_vr.log"
+# numpy/Pillow are imported lazily so the pure-logic selftest runs without them.
+_IMG = None
+
+
+def image_deps():
+    """Return (numpy, PIL.Image) or raise ImportError."""
+    global _IMG
+    if _IMG is None:
+        import numpy as np
+        from PIL import Image
+        _IMG = (np, Image)
+    return _IMG
+
+
+def have_image_deps():
+    try:
+        image_deps()
+        return True
+    except ImportError:
+        return False
+
+
+GAME_DIR = Path(os.environ.get(
+    "RIDDICKVR_GAME_DIR",
+    r"F:\The Chronicles of Riddick - Assault on Dark Athena\System\Win32_x86"))
+GAME_EXE = Path(os.environ.get("RIDDICKVR_GAME_EXE", str(GAME_DIR / "DarkAthena.exe")))
+HOST_EXE = Path(os.environ.get(
+    "RIDDICKVR_HOST_EXE", r"C:\Users\GigelCastel\riddick-vr\dist\riddickvr-host.exe"))
 ARTIFACTS = Path(r"C:\Users\GigelCastel\riddick-vr\tests\xrsim\artifacts")
 REPORT = Path(r"C:\Users\GigelCastel\riddick-vr\tests\xrsim\report.json")
 
+MIN_BUDGET_SAMPLES = 30
+CONTENT_STD_MIN = 2.0
+
 FRAME_BUDGET_RE = re.compile(
     r"FrameBudget samples=(\d+) mean_ms=([\d.]+) max_ms=([\d.]+) "
-    r"over_budget=(\d+) budget_ms=([\d.]+)")
+    r"over_budget=(\d+) budget_ms=([\d.]+)( gameplay_only=1)?")
+CAPTURE_RE = re.compile(r"Captured stereo frame (\d+) .*mode=(gameplay|cinema)")
 
 
 # ---------------------------------------------------------------- stereo diff
 def stereo_metrics(left_path: Path, right_path: Path, search=48):
     """Best horizontal/vertical alignment of the two eye images.
 
-    Returns dict with: non_black_l/r, best_dx, best_dy, residual (MSE at best),
-    identical (bool). The mod is a monoscopic blit with an IPD shift, so a
-    correct frame has a small horizontal dx and ~zero dy.
+    Returns dict with: non_black_l/r, std_l (left luminance std-dev),
+    best_dx, best_dy, residual (MSE at best), identical (bool). A correct
+    gameplay frame has a small horizontal dx and ~zero dy.
     """
+    np, Image = image_deps()
     L = np.array(Image.open(left_path).convert("L"), dtype=np.float32)
     R = np.array(Image.open(right_path).convert("L"), dtype=np.float32)
     out = {"shape_l": list(L.shape), "shape_r": list(R.shape)}
     out["non_black_l"] = float(L.mean()) > 1.0
     out["non_black_r"] = float(R.mean()) > 1.0
+    out["std_l"] = float(L.std())
     if L.shape != R.shape:
         out.update(best_dx=None, best_dy=None, residual=None, identical=False,
                    note="shape mismatch")
@@ -82,6 +110,10 @@ def stereo_metrics(left_path: Path, right_path: Path, search=48):
     return out
 
 
+def has_content(metrics):
+    return metrics.get("std_l", 0.0) > CONTENT_STD_MIN
+
+
 def assert_stereo(metrics, require_disparity=True):
     checks = []
     ok = True
@@ -106,10 +138,29 @@ def assert_stereo(metrics, require_disparity=True):
     return ok, checks
 
 
+def stereo_frame_checks(n, mode, metrics, require_disparity=True):
+    """Checks for one captured frame, honouring its mode label (GH #68).
+
+    Cinema/menu frames are mono by design and gameplay frames without content
+    (black, loading, uniform) say nothing about stereo, so neither can fail.
+    """
+    if mode == "cinema":
+        return [{"group": "stereo", "frame": n, "check": "cinema_mono_expected",
+                 "ok": True, "detail": "cinema frame, mono by design (info)"}]
+    if not has_content(metrics):
+        return [{"group": "stereo", "frame": n, "check": "stereo_skipped",
+                 "ok": True,
+                 "detail": f"skipped: no content (std={metrics.get('std_l', 0.0):.2f})"}]
+    _, sub = assert_stereo(metrics, require_disparity=require_disparity)
+    return [{**c, "group": "stereo", "frame": n,
+             "detail": f"{c['detail']} {metrics.get('best_dx')}/{metrics.get('best_dy')}"}
+            for c in sub]
+
+
 # ------------------------------------------------------------------ comfort
 def comfort_checks(left_path: Path):
+    np, Image = image_deps()
     arr = np.array(Image.open(left_path).convert("RGB"))
-    h, w, _ = arr.shape
     green = (arr[:, :, 1] > 200) & (arr[:, :, 0] < 50) & (arr[:, :, 2] < 50)
     green_n = int(green.sum())
     row_max = arr.max(axis=(1, 2))
@@ -127,41 +178,92 @@ def comfort_checks(left_path: Path):
 
 # ------------------------------------------------------------------ frame budget
 def parse_budget(host_log: str, budget_ms: float):
-    samples = FRAME_BUDGET_RE.findall(host_log)
+    """Use the last gameplay-only FrameBudget line; too few samples is a FAIL."""
+    samples = [m for m in FRAME_BUDGET_RE.findall(host_log) if m[5]]
     if not samples:
         return False, {"check": "frame_budget_reported", "ok": False,
-                       "detail": "no FrameBudget line from host"}
-    n, mean, mx, over, budget = samples[-1]
+                       "detail": "no gameplay-only FrameBudget line from host"}
+    n, mean, mx, over, budget, _ = samples[-1]
     n, mean, mx, over, budget = int(n), float(mean), float(mx), int(over), float(budget)
+    if n < MIN_BUDGET_SAMPLES:
+        return False, {"check": "frame_budget", "ok": False,
+                       "detail": f"insufficient gameplay samples (n={n} < {MIN_BUDGET_SAMPLES})"}
     tol = max(budget_ms, budget) * 1.5
     rec = {"check": "frame_budget", "ok": (mean <= budget_ms and mx <= tol),
            "detail": f"n={n} mean={mean:.2f} max={mx:.2f} over={over} budget={budget:.2f}"}
     return rec["ok"], rec
 
 
+# ------------------------------------------------------------------ captures
+def parse_captures(host_log: str):
+    """{frame number: 'gameplay'|'cinema'} from host 'Captured stereo frame' lines."""
+    return {int(n): mode for n, mode in CAPTURE_RE.findall(host_log)}
+
+
+# ------------------------------------------------------------------ markers
+def check_markers(scenario: dict, fresh_log: str):
+    """Marker checks: markers (all), markers_any (>=1), forbidden_markers (none),
+    marker_order (markers must appear in listed order)."""
+    checks = []
+    markers = scenario.get("markers", []) or []
+    for marker in markers:
+        checks.append({"group": "interaction", "check": f"marker:{marker}",
+                       "ok": marker in fresh_log, "detail": "fresh log"})
+    any_markers = scenario.get("markers_any", []) or []
+    if any_markers:
+        hits = [m for m in any_markers if m in fresh_log]
+        checks.append({"group": "interaction", "check": "markers_any",
+                       "ok": bool(hits),
+                       "detail": f"hit {hits[0]!r}" if hits else f"none of {any_markers}"})
+    for marker in scenario.get("forbidden_markers", []) or []:
+        checks.append({"group": "interaction", "check": f"forbidden:{marker}",
+                       "ok": marker not in fresh_log, "detail": "fresh log"})
+    if scenario.get("marker_order") and len(markers) > 1:
+        pos, ordered = 0, True
+        for marker in markers:
+            idx = fresh_log.find(marker, pos)
+            if idx < 0:
+                ordered = False
+                break
+            pos = idx + len(marker)
+        checks.append({"group": "interaction", "check": "marker_order", "ok": ordered,
+                       "detail": "markers appear in listed order" if ordered
+                       else "markers missing or out of order"})
+    return checks
+
+
 # ------------------------------------------------------------------ orchestration
 def run_sim(args):
-    ARTIFACTS.mkdir(parents=True, exist_ok=True)
-    for f in list(ARTIFACTS.glob("*.bmp")) + list(ARTIFACTS.glob("*.png")):
+    artifacts = Path(args.artifacts)
+    game_dir = Path(args.game_dir)
+    game_exe = Path(args.game_exe) if args.game_exe else game_dir / "DarkAthena.exe"
+    host_exe = Path(args.host_exe)
+    log_file = game_dir / "riddick_vr.log"
+
+    artifacts.mkdir(parents=True, exist_ok=True)
+    for f in (list(artifacts.glob("*.bmp")) + list(artifacts.glob("*.png"))
+              + list(artifacts.glob("frame_*.json"))):
         try:
             f.unlink()
         except OSError:
             pass
-    log_mark = LOG_FILE.stat().st_size if LOG_FILE.exists() else 0
+    log_mark = log_file.stat().st_size if log_file.exists() else 0
 
-    host_cmd = [str(HOST_EXE), "--mock", "--auto-exit-with-game",
-                "--dump-dir", str(ARTIFACTS), "--dump-interval", str(args.interval),
+    host_cmd = [str(host_exe), "--mock", "--auto-exit-with-game",
+                "--dump-dir", str(artifacts), "--dump-interval", str(args.interval),
                 "--max-frames", str(args.frames)]
     if args.scenario:
         host_cmd += ["--scenario-file", str(Path(args.scenario).resolve())]
+    if args.scenario_immediate:
+        host_cmd += ["--scenario-immediate"]
 
     env = dict(os.environ, RIDDICKVR_SIM="1")  # GH #68: no desktop input
     print(f"[xrsim] host: {' '.join(host_cmd)}")
     host = subprocess.Popen(host_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, bufsize=1, env=env)
     time.sleep(1.5)
-    print(f"[xrsim] game: {GAME_EXE}")
-    game = subprocess.Popen([str(GAME_EXE)], cwd=str(GAME_DIR), env=env)
+    print(f"[xrsim] game: {game_exe}")
+    game = subprocess.Popen([str(game_exe)], cwd=str(game_dir), env=env)
 
     host_log = []
     start = time.time()
@@ -177,7 +279,7 @@ def run_sim(args):
         else:
             time.sleep(0.03)
 
-    for p, name in ((game, "DarkAthena.exe"), (host, "riddickvr-host.exe")):
+    for p, name in ((game, game_exe.name), (host, host_exe.name)):
         try:
             if p.poll() is None:
                 p.terminate(); p.wait(timeout=3)
@@ -188,80 +290,145 @@ def run_sim(args):
 
 
 def evaluate(args, host_log, log_mark):
+    artifacts = Path(args.artifacts)
+    log_file = Path(args.game_dir) / "riddick_vr.log"
     checks = []
     # 1. frame budget
-    ok_b, rec = parse_budget(host_log, args.max_frame_ms)
+    _, rec = parse_budget(host_log, args.max_frame_ms)
     checks.append({**rec, "group": "frame_budget"})
-    # 2. stereo
-    lefts = sorted(ARTIFACTS.glob("test_frame_*.bmp"))
-    rights_by_n = {int(p.stem.split("_")[1]): p for p in ARTIFACTS.glob("right_*.bmp")}
-    stereo_ok = True
+    # 2. stereo, labelled per frame
+    modes = parse_captures(host_log)
+    lefts = sorted(artifacts.glob("test_frame_*.bmp"))
+    rights_by_n = {int(p.stem.split("_")[1]): p for p in artifacts.glob("right_*.bmp")}
+    gameplay_with_content = []
     if not lefts:
         checks.append({"group": "stereo", "check": "frames_captured", "ok": False,
                        "detail": "no test_frame_*.bmp"})
-        stereo_ok = False
     else:
         for lp in lefts:
             n = int(lp.stem.split("_")[2])
+            mode = modes.get(n, "gameplay")  # unlabelled frames are judged as gameplay
             rp = rights_by_n.get(n)
             if rp is None:
                 checks.append({"group": "stereo", "check": f"right_frame_{n}", "ok": False,
                                "detail": "missing right_*.bmp"})
-                stereo_ok = False
                 continue
             m = stereo_metrics(lp, rp)
-            ok, sub = assert_stereo(m, require_disparity=args.require_disparity)
-            for c in sub:
-                checks.append({**c, "group": "stereo", "frame": n,
-                               "detail": f"{c['detail']} {m.get('best_dx')}/{m.get('best_dy')}"})
-            stereo_ok = stereo_ok and ok
+            if mode == "gameplay" and has_content(m):
+                gameplay_with_content.append(lp)
+            checks.extend(stereo_frame_checks(n, mode, m, args.require_disparity))
+        if modes and "gameplay" not in modes.values():
+            checks.append({"group": "stereo", "check": "gameplay_reached", "ok": False,
+                           "detail": "game never left menus/cinema"})
     # 3. interaction markers
-    req = []
+    scenario = {}
     if args.scenario and Path(args.scenario).is_file():
-        req = json.loads(Path(args.scenario).read_text(encoding="utf-8")).get("markers", [])
+        scenario = json.loads(Path(args.scenario).read_text(encoding="utf-8"))
     fresh = ""
-    if LOG_FILE.exists():
-        fresh = LOG_FILE.read_bytes()[log_mark:].decode(errors="ignore")
-    for marker in req:
-        hit = marker in fresh
-        checks.append({"group": "interaction", "check": f"marker:{marker}", "ok": hit,
-                       "detail": "fresh log"})
-    # 4. comfort
-    if lefts:
-        ok_c, sub = comfort_checks(lefts[-1])
+    if log_file.exists():
+        fresh = log_file.read_bytes()[log_mark:].decode(errors="ignore")
+    checks.extend(check_markers(scenario, fresh))
+    # 4. comfort (last gameplay frame that shows content)
+    if gameplay_with_content:
+        _, sub = comfort_checks(gameplay_with_content[-1])
         for c in sub:
             checks.append({**c, "group": "comfort"})
     passed = all(c["ok"] for c in checks) if checks else False
     return passed, checks
 
 
-def cmd_selftest():
-    """Validate the stereo/comfort/budget logic without the game (CI-safe)."""
+# ------------------------------------------------------------------ selftest
+def _selftest_logic(results):
+    ok_b, _ = parse_budget(
+        "FrameBudget samples=60 mean_ms=8.0 max_ms=12.0 over_budget=2 budget_ms=11.11 gameplay_only=1", 11.11)
+    ok_b2, _ = parse_budget(
+        "FrameBudget samples=60 mean_ms=30.0 max_ms=90.0 over_budget=50 budget_ms=11.11 gameplay_only=1", 11.11)
+    ok_b3, rec3 = parse_budget(
+        "FrameBudget samples=30 mean_ms=8.0 max_ms=9.0 over_budget=0 budget_ms=11.11 gameplay_only=1\n"
+        "FrameBudget samples=10 mean_ms=8.0 max_ms=9.0 over_budget=0 budget_ms=11.11 gameplay_only=1", 11.11)
+    ok_b4, _ = parse_budget(
+        "FrameBudget samples=60 mean_ms=8.0 max_ms=9.0 over_budget=0 budget_ms=11.11", 11.11)
+    results["budget_ok_detected"] = ok_b
+    results["budget_blow_detected"] = not ok_b2
+    results["budget_insufficient_samples_fails"] = (not ok_b3) and "insufficient" in rec3["detail"]
+    results["budget_ignores_non_gameplay_lines"] = not ok_b4
+
+    log = ("[Mock Host] Captured stereo frame 15 (L=ok R=ok) -> a / b mode=cinema\n"
+           "[Mock Host] Captured stereo frame 30 (L=ok R=ok) -> a / b mode=gameplay\n"
+           "[Mock Host] Captured stereo frame 45 (L=ok R=ok) -> a / b\n")
+    results["capture_mode_parse"] = parse_captures(log) == {15: "cinema", 30: "gameplay"}
+
+    def all_ok(checks):
+        return all(c["ok"] for c in checks)
+
+    sc = {"markers": ["A", "B"], "markers_any": ["X", "Y"],
+          "forbidden_markers": ["BAD"], "marker_order": True}
+    results["markers_pass"] = all_ok(check_markers(sc, "..A..B..Y.."))
+    results["markers_missing_fails"] = not all_ok(check_markers({"markers": ["A", "B"]}, "A"))
+    results["markers_any_one_hit"] = all_ok(check_markers({"markers_any": ["X", "Y"]}, "Y"))
+    results["markers_any_no_hit_fails"] = not all_ok(check_markers({"markers_any": ["X", "Y"]}, "Z"))
+    results["markers_forbidden_fails"] = not all_ok(check_markers({"forbidden_markers": ["BAD"]}, "A BAD"))
+    results["markers_forbidden_absent_ok"] = all_ok(check_markers({"forbidden_markers": ["BAD"]}, "A"))
+    results["markers_order_enforced"] = not all_ok(check_markers(
+        {"markers": ["A", "B"], "marker_order": True}, "B A"))
+
+
+def _selftest_images(results, skipped):
     import tempfile
+    if not have_image_deps():
+        skipped.extend(["shifted_pair_passes", "identical_gameplay_pair_fails",
+                        "black_pair_skipped", "identical_cinema_pair_not_failed",
+                        "uniform_frame_skipped"])
+        return
+    np, Image = image_deps()
     tmp = Path(tempfile.mkdtemp(prefix="xrsim_selftest_"))
-    # shifted pair -> should pass
     base = (np.random.default_rng(7).random((64, 96, 3)) * 255).astype(np.uint8)
-    Image.fromarray(base).save(tmp / "test_frame_0001.bmp")
-    shifted = np.roll(base, 4, axis=1)
-    Image.fromarray(shifted).save(tmp / "right_0001.bmp")
-    m = stereo_metrics(tmp / "test_frame_0001.bmp", tmp / "right_0001.bmp", search=20)
-    ok_shift, _ = assert_stereo(m, require_disparity=True)
-    # identical pair -> should fail (mono duplicate)
-    Image.fromarray(base).save(tmp / "right_0002.bmp")
-    Image.fromarray(base).save(tmp / "test_frame_0002.bmp")
-    m2 = stereo_metrics(tmp / "test_frame_0002.bmp", tmp / "right_0002.bmp", search=20)
-    ok_dup, checks_dup = assert_stereo(m2, require_disparity=True)
-    ok_b, _ = parse_budget("FrameBudget samples=60 mean_ms=8.0 max_ms=12.0 over_budget=2 budget_ms=11.11", 11.11)
-    ok_b2, _ = parse_budget("FrameBudget samples=60 mean_ms=30.0 max_ms=90.0 over_budget=50 budget_ms=11.11", 11.11)
-    results = {
-        "shifted_pair_passes": ok_shift,
-        "identical_pair_fails": (not ok_dup),
-        "budget_ok_detected": ok_b,
-        "budget_blow_detected": (not ok_b2),
-    }
+
+    def save(arr, name):
+        Image.fromarray(arr).save(tmp / name)
+        return tmp / name
+
+    def frame_ok(left, right, mode):
+        m = stereo_metrics(left, right, search=20)
+        return all(c["ok"] for c in stereo_frame_checks(1, mode, m, True)), m
+
+    l = save(base, "l_shift.bmp")
+    r = save(np.roll(base, 4, axis=1), "r_shift.bmp")
+    results["shifted_pair_passes"] = frame_ok(l, r, "gameplay")[0]
+
+    l = save(base, "l_same.bmp")
+    r = save(base, "r_same.bmp")
+    results["identical_gameplay_pair_fails"] = not frame_ok(l, r, "gameplay")[0]
+    results["identical_cinema_pair_not_failed"] = frame_ok(l, r, "cinema")[0]
+
+    black = np.zeros_like(base)
+    l = save(black, "l_black.bmp")
+    r = save(black, "r_black.bmp")
+    ok_black, m_black = frame_ok(l, r, "gameplay")
+    skipped_black = [c for c in stereo_frame_checks(1, "gameplay", m_black, True)
+                     if c["check"] == "stereo_skipped"]
+    results["black_pair_skipped"] = ok_black and bool(skipped_black)
+
+    grey = np.full_like(base, 120)
+    l = save(grey, "l_grey.bmp")
+    r = save(grey, "r_grey.bmp")
+    ok_grey, m_grey = frame_ok(l, r, "gameplay")
+    results["uniform_frame_skipped"] = ok_grey and not has_content(m_grey)
+
+
+def cmd_selftest(require_image_deps=False):
+    """Validate the stereo/comfort/budget/marker logic without the game (CI-safe)."""
+    results, skipped = {}, []
+    _selftest_logic(results)
+    _selftest_images(results, skipped)
     allok = all(results.values())
     for k, v in results.items():
         print(f"  {'ok ' if v else 'FAIL'} {k}")
+    for k in skipped:
+        print(f"  SKIP (numpy/Pillow missing) {k}")
+    if skipped and require_image_deps:
+        print("FAIL xrsim selftest: image cases skipped but --require-image-deps was given")
+        return 1
     print("PASS xrsim selftest" if allok else "FAIL xrsim selftest")
     return 0 if allok else 1
 
@@ -275,23 +442,40 @@ def main(argv=None):
     ap.add_argument("--max-frame-ms", type=float, default=1000.0 / 90.0)
     ap.add_argument("--no-require-disparity", dest="require_disparity",
                     action="store_false")
+    ap.add_argument("--game-dir", default=str(GAME_DIR),
+                    help="game System\\Win32_x86 dir (env RIDDICKVR_GAME_DIR)")
+    ap.add_argument("--game-exe", default=os.environ.get("RIDDICKVR_GAME_EXE"),
+                    help="game exe (env RIDDICKVR_GAME_EXE; default <game-dir>\\DarkAthena.exe)")
+    ap.add_argument("--host-exe", default=str(HOST_EXE),
+                    help="riddickvr-host.exe (env RIDDICKVR_HOST_EXE)")
+    ap.add_argument("--artifacts", default=str(ARTIFACTS), help="capture output directory")
+    ap.add_argument("--report", default=str(REPORT), help="JSON report path")
+    ap.add_argument("--scenario-immediate", action="store_true",
+                    help="start the scenario at host frame 0 instead of waiting for gameplay")
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--require-image-deps", action="store_true",
+                    help="selftest: fail instead of skipping image cases without numpy/Pillow")
     args = ap.parse_args(argv)
 
     if args.selftest:
-        return cmd_selftest()
+        return cmd_selftest(args.require_image_deps)
+    if not have_image_deps():
+        print("xrsim: numpy and Pillow are required for real runs (pip install numpy pillow)",
+              file=sys.stderr)
+        return 2
 
     host_log, log_mark = run_sim(args)
     passed, checks = evaluate(args, host_log, log_mark)
 
-    REPORT.parent.mkdir(parents=True, exist_ok=True)
-    REPORT.write_text(json.dumps({"passed": passed, "checks": checks}, indent=2),
+    report = Path(args.report)
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text(json.dumps({"passed": passed, "checks": checks}, indent=2),
                       encoding="utf-8")
     print("\n" + "=" * 60)
     for c in checks:
         print(f"  [{'PASS' if c['ok'] else 'FAIL'}] {c.get('group','')}: {c['check']} ({c['detail']})")
     print("=" * 60)
-    print(f"  XRSIM RESULT: {'PASS' if passed else 'FAIL'}  -> {REPORT}")
+    print(f"  XRSIM RESULT: {'PASS' if passed else 'FAIL'}  -> {report}")
     return 0 if passed else 1
 
 
