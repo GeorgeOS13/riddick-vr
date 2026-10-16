@@ -46,6 +46,7 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4 AND RIDDICKVR_BUILD_PROXY)
         src/hook/native_hand_pose.h
         src/hook/native_hand_texture.h
         src/hook/native_hand_texture_data.h
+        src/hook/hand_visuals.h
         src/hook/bc1.h
         src/hook/arm_ik.h
         src/hook/combat_stance.h
@@ -167,4 +168,11 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
     )
     add_test(NAME native_hand_texture_asset COMMAND riddick_vr_native_hand_texture_tests)
+
+    # GH #64 / GH #46: hand cue tint and weapon fade helpers.
+    add_executable(riddick_vr_hand_visuals_tests tests/hand_visuals_tests.cpp)
+    target_include_directories(riddick_vr_hand_visuals_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
+    )
+    add_test(NAME hand_visuals COMMAND riddick_vr_hand_visuals_tests)
 endif()

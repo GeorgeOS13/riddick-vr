@@ -119,7 +119,7 @@ def main():
     # per-vertex GL lighting) with a tunable orientation correction, and the
     # procedural interaction boxes must not float on the native path.
     require("RotateNativeHandPlacement" in pose_header and
-            "const bool native = DrawNativeHand(side);" in hands and
+            "const bool native = DrawNativeHand(side, cue);" in hands and
             "s_gl.glDisable(GL_CULL_FACE);" in hands and
             "GL_LIGHT_MODEL_TWO_SIDE" in hands and
             "GL_TRUE" in hands and
@@ -141,6 +141,22 @@ def main():
             "BIND-POSE PROVENANCE" in _mesh_hdr,
             "GH #64: the native-hand placement must use the baked mesh axis "
             "(ADR-0444), not the pose-sensitive AABB extent guess")
+
+    # GH #61 / #64 / #46 (ADR-0445): the native hand must sample its real texture
+    # despite engine GL state, show cues without stray boxes, and not fade while
+    # boxing.
+    _cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+    _tex_hdr = (ROOT / "src/hook/native_hand_texture.h").read_text(encoding="utf-8")
+    _cfg_hdr = (ROOT / "src/hook/vr_config.h").read_text(encoding="utf-8")
+    require("CheckNativeTextureIntegrity" in _tex_hdr and
+            "CheckNativeTextureIntegrity(" in hands and
+            "0x84C0" in hands and
+            "ComputeNativeHandCueTint(" in hands and
+            "ComputeHandFade(" in hands and
+            "hand_visuals_tests.cpp" in _cmake and
+            "nativeHandUpperArm" in _cfg_hdr and "nativeHandUpperArm" in config,
+            "GH #61/#64/#46: native hand GL-state sanitising, texture integrity check, "
+            "cue tint, upper-arm option and boxing-safe fade must be wired (ADR-0445)")
 
     # GH #66 (approach 2): per-draw engine viewmodel suppression must be
     # off-by-default, intercept RndrGL's geometry draw entry points, forward to

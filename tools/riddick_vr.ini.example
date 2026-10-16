@@ -58,6 +58,8 @@ NativeHandRoll=0
 ; the fallback when the texture is disabled or unavailable.
 ; VFlip is PROVISIONAL (UV orientation is not yet validated on a headset);
 ; set to 1 if the texture reads vertically mirrored.
+; GH #61: if the hand still reads white, paste the `NativeHand GL state:` line
+; from the log into the issue.
 NativeHandTexture=1
 NativeHandTextureVFlip=0
 ; --- Native hand pose (GH #58) ---
@@ -66,6 +68,12 @@ NativeHandTextureVFlip=0
 ; geometry. 0 = bind (default). The baked pose is an evidence-backed but
 ; unvalidated VR fit -- compare both on a headset before enabling it.
 NativeHandPose=0
+; GH #64: 1 = also draw the IK upper-arm tube (shoulder to elbow) with native
+; hands. 0 = off (the tube does not join the native mesh and reads as a stray block).
+NativeHandUpperArm=0
+; GH #46: 1 = fade the hands to 25% while a weapon is held (trigger or two-handed
+; grip); a boxer guard never fades. 0 = never fade.
+HandFadeWhenWeapon=1
 ; --- Front-of-HMD block/guard window (GH #62) ---
 ; Head-local hand window (metres relative to the HMD: +Y up, -Z forward into the
 ; view). Block = both fists held in front of the face within this window; a low
