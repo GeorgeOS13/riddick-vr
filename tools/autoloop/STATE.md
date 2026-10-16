@@ -2,6 +2,53 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 35 — 2026-10-16 17:00 (scheduled loop)
+- **Unit:** GH **#58** (→ #46/#60) — take wake 34's "Next" and make the offline FK
+  recipe *executable*: land `tools/xmd_fk.py`, the offline forward-kinematics +
+  skinning evaluator for `.xmd` models, and confirm ADR-0441 over the whole
+  shipped corpus. No C++/asset change (the native draw stays rigid, ADR-0436).
+- Change (tool/tests/docs/CI):
+  - `tools/xmd_fk.py` (new, dependency-free): the ADR-0441 algebra as code —
+    `quat_to_mat3`, `local_from_bind(bindpos,quat,move)` = `v ↦ R·(v−bindpos)+
+    bindpos+t`, `world_matrices` (`world=parent·local`, cycle-guarded),
+    `skin_positions`/`skin_normals` (influence **weighted sum**, rotation-only
+    normals), and `pose_from_sequence` which maps a clip's `rotation`/`movement`
+    window slots to each node's `rotation_slot`/`movement_slot` (ADR-0422) and
+    samples via `xsa_anim`. CLI: `--bind`, `--anim/--sequence/--time`,
+    `--joints`, `--obj` (posed Wavefront), `--check`, `--inventory`, `--json`.
+  - `tools/test_xmd_fk.py` (new): **10** synthetic-container tests (no game).
+  - `.github/workflows/vr-worker.yml` runs the new test;
+    `docs/adr/0442-offline-fk-skinning-recipe.md` (new) + an "Implemented offline
+    (ADR-0442)" paragraph in `docs/rea/mos-xmd-format.md`.
+- Evidence (read-only, 2004 EFBB):
+  - **Bind == file geometry corpus-wide (decisive for ADR-0441):**
+    `xmd_fk.py --inventory <game>\Content\Models --check` → **268 models / 3454
+    clusters / 3103 skinned / 915508 vertices**, worst bind **pose** drift
+    **1.42e-14**, worst weight error 3.92e-3, **0 problems**. The file mesh *is*
+    the bind pose everywhere (no bind-inverse, no load-time rebase).
+  - `Riddick_B05.xmd`: per-cluster bind drift ≤ 7.95e-15.
+  - A real clip poses the arms: `--cluster 1 --anim Content\Anim\Main\Use.xsa
+    --sequence use_pad_rid --time 0.2` → 12.4 model-unit displacement on the left
+    arm (≈0.4 m at 0.033), no mapping notes; posed OBJ written (526 verts).
+  - Design honesty: weights are **not** renormalised (the engine sums the maps);
+    `pose_drift_max = |blend − pos·Σw|` isolates the *pose* from the weights so
+    the corpus check tests the RE, not the content; the QUATERNIONS-pool movement
+    slot (TRACK_FLAG_MOVEMENT) is reported, not guessed.
+  - All `tools/test_*.py` (8 incl. the new one), `validate_addresses`,
+    `verify_hook_init`, `verify_reported_fixes`, `scenario_tests.py --check` PASS.
+    No C++/asset changed → no `build-all.ps1`/CTest rerun.
+- Blocker: none. Caveat (not claimed): the draw path is unchanged (rigid,
+  ADR-0436) and no headset was used; `.xsa` sampling stays the nlerp/lerp
+  approximation (ADR-0422), not the engine's Hermite spline; the FP-arm **pose
+  source** (which clip/predicate) and the runtime matrix vector (GH #34) remain
+  unidentified.
+- **Next:** pick the first-person arm pose source (GH #58 — inventory
+  `Content\Anim\Main` for the Riddick FP/weapon clips keyed to `Riddick_B05`'s
+  arm bones) and drive a skinned variant of `DrawNativeHand` from `xmd_fk`-style
+  deltas behind a flag; or land the GH #34 runtime read and cross-check it against
+  `xmd_fk`. Player-visible #64/#61/#65/#62/#63 still need a headset pass.
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 34 — 2026-10-16 16:42 (scheduled loop)
 - **Unit:** GH **#60** step 1 (RE, read-only) — resolve the ADR-0440 "Next probe":
   does the draw's `poseDesc+0x14` matrix list alias the FK output `+0x30`/`+0x34`,

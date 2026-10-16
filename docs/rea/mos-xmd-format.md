@@ -286,6 +286,15 @@ transform exists to find** (confirming the negative in ADR-0424/0428/0429). Beca
 the delta is identity at bind, the file mesh *is* the rest-pose model, so the
 current rigid draw (ADR-0436) is a valid baseline.
 
+**Implemented offline (ADR-0442):** `tools/xmd_fk.py` evaluates exactly this
+recipe — `local = v ↦ R·(v − bindpos) + bindpos + t`, `world = parent · local`,
+per-vertex influence weighted sum — and poses a cluster from a shipped `.xsa`
+clip (`rotation_slot`/`movement_slot` → the clip's window slots, ADR-0422),
+exporting a posed OBJ. Its `--check` confirms ADR-0441 over the shipped corpus:
+268 models / 3454 clusters / 915508 vertices all reproduce the file geometry at
+bind with worst drift **1.42e-14** (0 problems) — i.e. the file geometry *is* the
+bind pose everywhere, with no bind-inverse and no load-time rebase.
+
 ## Related container: the `.xtc` texture packs (ADR-0431, GH #61)
 The shipped textures are *not* loose files; they live in
 `Content/{GUI,Models,Levels}.xtc` (plus
