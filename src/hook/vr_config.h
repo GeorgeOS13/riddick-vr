@@ -77,6 +77,14 @@ struct VRConfig {
     float strikeUppercutMaxY = -0.10f;
     float strikeUppercutVz = -0.20f;
     float strikeCrossVx = 1.10f;
+    // GH #66 (approach 2): suppress the engine's own first-person viewmodel
+    // (arms/hands) at the draw level, since approach 1 (the RPG `noviewmodel`
+    // bit) was falsified in ADR-0438. Default OFF: the pass signature is a
+    // PROVISIONAL depth-only-clear window (ADR-0439) and must be confirmed on a
+    // headset before it is trusted. ViewmodelDepthClearWindow selects the
+    // depth-only-clear opener (1) or disables the window entirely (0).
+    int suppressEngineViewmodel = 0;
+    int viewmodelDepthClearWindow = 1;
 };
 
 extern VRConfig g_vrConfig;

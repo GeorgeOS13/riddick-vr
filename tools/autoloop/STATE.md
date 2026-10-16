@@ -2,6 +2,53 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 32 — 2026-10-16 15:27 (scheduled loop)
+- **Unit:** GH **#66** (approach 2) — land the per-draw infrastructure to suppress
+  the engine's own first-person viewmodel, plus the RE evidence for *which* draw
+  entry points the engine actually uses. Off by default; merged and tested.
+- Finding (decisive, read-only, all 4 RndrGL builds incl. x86): **`RndrGL.dll` is
+  the only shipped module that imports OpenGL** (MXR/MSystem/MCCDyn/SbzEngine/
+  GameClasses/GameWorld import none). Its 3D mesh path is **`glDrawElements`**;
+  **`glDrawArrays` is imported by no shipped module** (the proxy's forwarder is
+  dead for this title). It also imports `glCallList`, but **no** module imports
+  the list builders (`glNewList`/`glGenLists`/`glEndList`) nor the GL-metafile
+  playback names — `glCallList`'s origin is an open question (recorded). It does
+  **not** import `glDepthRange`/`glMultMatrixf`/`glRotatef`, so the depth-bias
+  trick is not used and depth-range is not a usable signal.
+- Change (code/tests/docs):
+  - `src/hook/viewmodel_suppressor.h` (new, header-only, dependency-free):
+    `ViewmodelSuppressor` + `ViewmodelWindowOpener`. Frame boundary = full colour
+    clear + swap; a **depth-only** clear opens the window (PROVISIONAL opener);
+    the next projection load or the swap closes it. Inert (pure `false`) when
+    disabled.
+  - `dllmain.cpp`: `InstallRndrGLHooks` now IAT-hooks `OPENGL32.dll!
+    glDrawElements` + `glCallList` in `RndrGL.dll` (same `IATHook` as
+    `GDI32!SwapBuffers`), forwarding to the **saved original** (the proxy's own
+    forwarder) when the window is closed → no export/`.def`/forwarder change.
+  - `opengl_proxy.{h,cpp}`: drive the window from the already-intercepted
+    `glClear` (colour vs depth-only), `glLoadMatrixf`/`glFrustum`/`glOrtho`
+    (projection load) and `Hook_wglSwapBuffers`; expose
+    `ShouldSuppressDrawCall()`; log per-frame tallies every 300 swaps.
+  - `vr_config.{h,cpp}`: `SuppressEngineViewmodel=0` (default off) +
+    `ViewmodelDepthClearWindow=1`; re-read on each `glClear` (live tuning).
+  - `tests/viewmodel_suppressor_tests.cpp` + CTest `viewmodel_suppressor_window`;
+    `CMakeLists.txt`; `riddick_vr.ini` + `tools/riddick_vr.ini.example`;
+    `src/hook/README.md`; `tools/verify_reported_fixes.py` #66 invariant;
+    `docs/rea/reference/RndrGL_GL_Path.txt`;
+    `docs/adr/0439-per-draw-viewmodel-suppression.md`.
+- Evidence: `build-all.ps1 -Config Release` OK (x86 `opengl32.dll` + x64 host);
+  CTest **9/9 PASS** x86 **and** x64 (new `viewmodel_suppressor_window`); all
+  `tools/test_*.py` PASS; `verify_reported_fixes`, `scenario_tests.py --check`,
+  `verify_hook_init`, `validate_addresses` all PASS.
+- Blocker: **not validated in-headset** — the depth-only-clear signature is a
+  hypothesis; the per-frame counters exist to confirm it in one run. Default off,
+  so no behaviour change ships.
+- **Next:** run once with `SuppressEngineViewmodel=1`, check the
+  `Viewmodel suppression [#N]: draws=N suppressed=M` log against the FP pass;
+  add a camera-space / projection-fingerprint opener if the depth-clear boundary
+  proves unreliable. Then #61 UV V-flip and #64 orientation headset passes.
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 31 — 2026-10-16 15:00 (scheduled loop)
 - **Unit:** GH **#63** (duplicate hands) — resolve the last open approach-1
   unknown (the `noviewmodel` **draw gate**) and re-direct the issue. Result:

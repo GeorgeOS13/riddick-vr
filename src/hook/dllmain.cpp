@@ -66,17 +66,57 @@ static BOOL WINAPI Hook_GdiSwapBuffers(HDC hdc) {
     return real_GdiSwapBuffers ? real_GdiSwapBuffers(hdc) : SwapBuffers(hdc);
 }
 
+// GH #63/#66 (approach 2): per-draw suppression of the engine's own first-person
+// viewmodel. RndrGL.dll is the only shipped module that imports OpenGL and its
+// geometry path is `glDrawElements` (vertex arrays) and `glCallList` (display
+// lists) -- see docs/rea/reference/RndrGL_GL_Path.txt. We hook those two IAT
+// entries and skip the call when the suppressor's window is open. These run only
+// after InstallRndrGLHooks (below), which runs inside the deferred init, so no
+// re-entrant EnsureHookInitialized is needed on this hot path. The saved
+// original is the proxy's own forwarder, so forwarding is unchanged when the
+// window is closed and the feature is off (the default).
+typedef void (WINAPI *PFN_glDrawElements)(GLenum mode, GLsizei count, GLenum type, const void* indices);
+typedef void (WINAPI *PFN_glCallList)(GLuint list);
+
+static PFN_glDrawElements real_glDrawElements = nullptr;
+static PFN_glCallList real_glCallList = nullptr;
+
+static void WINAPI Hook_glDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices) {
+    if (RiddickVR::OpenGLProxy::ShouldSuppressDrawCall()) return;
+    if (real_glDrawElements) real_glDrawElements(mode, count, type, indices);
+}
+
+static void WINAPI Hook_glCallList(GLuint list) {
+    if (RiddickVR::OpenGLProxy::ShouldSuppressDrawCall()) return;
+    if (real_glCallList) real_glCallList(list);
+}
+
 static void InstallRndrGLHooks() {
     HMODULE hRndrGL = GetModuleHandleA("RndrGL.dll");
-    if (hRndrGL) {
-        RiddickVR::IATHook::Hook(
-            hRndrGL,
-            "GDI32.dll",
-            "SwapBuffers",
-            reinterpret_cast<void*>(Hook_GdiSwapBuffers),
-            reinterpret_cast<void**>(&real_GdiSwapBuffers)
-        );
-    }
+    if (!hRndrGL) return;
+    RiddickVR::IATHook::Hook(
+        hRndrGL,
+        "GDI32.dll",
+        "SwapBuffers",
+        reinterpret_cast<void*>(Hook_GdiSwapBuffers),
+        reinterpret_cast<void**>(&real_GdiSwapBuffers)
+    );
+    // GH #66: intercept the engine's geometry draw entry points (forwarded
+    // verbatim when suppression is off).
+    RiddickVR::IATHook::Hook(
+        hRndrGL,
+        "OPENGL32.dll",
+        "glDrawElements",
+        reinterpret_cast<void*>(Hook_glDrawElements),
+        reinterpret_cast<void**>(&real_glDrawElements)
+    );
+    RiddickVR::IATHook::Hook(
+        hRndrGL,
+        "OPENGL32.dll",
+        "glCallList",
+        reinterpret_cast<void*>(Hook_glCallList),
+        reinterpret_cast<void**>(&real_glCallList)
+    );
 }
 
 static HMODULE g_hHookModule = nullptr;

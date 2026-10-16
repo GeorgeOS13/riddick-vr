@@ -84,3 +84,14 @@ StrikeUppercutVy=1.35   ; uppercut: hand Vy above this
 StrikeUppercutMaxY=-0.10 ; ...starting below the view (y < this)
 StrikeUppercutVz=-0.20  ; ...with some forward travel
 StrikeCrossVx=1.10      ; dual cross-slash: opposing |Vx| swing
+; --- Engine viewmodel suppression (GH #66, approach 2) ---
+; 1 = skip the engine's own first-person arms/hands at the draw level so only
+; the VR/native hands are visible (the duplicate-hands fix). Default 0.
+; The pass signature is PROVISIONAL (a mid-frame depth-only-clear window); the
+; hook logs "Viewmodel suppression [#N]: last frame draws=.. suppressed=.." so
+; you can confirm the window before trusting it. Approach 1 (the RPG
+; `noviewmodel` bit) was proven inert in ADR-0438.
+SuppressEngineViewmodel=0
+; Which boundary opens the suppression window: 1 = depth-only clear (default),
+; 0 = never open (inert even when suppression is enabled).
+ViewmodelDepthClearWindow=1

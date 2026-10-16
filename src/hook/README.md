@@ -73,4 +73,25 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   guard (`Vy>0`, `Vz~0`) matches no strike condition (ADR-0403). Unit-tested by
   `combat_strike_thresholds` (`tests/combat_strike_tests.cpp`). See ADR-0437.
 
+## Engine viewmodel suppression (GH #63 / #66, approach 2)
+- Approach 1 (forcing the RPG item's `noviewmodel` bit) was falsified in
+  ADR-0438: the flag is an engine output and no shipped module reads it.
+- Approach 2 suppresses the engine's own first-person arms/hands **at the draw
+  level**. `RndrGL.dll` is the only shipped module that imports OpenGL, and its
+  3D mesh path is `glDrawElements` (no `glDrawArrays` anywhere); see
+  `docs/rea/reference/RndrGL_GL_Path.txt`.
+- `InstallRndrGLHooks` (`dllmain.cpp`) IAT-hooks `OPENGL32.dll!glDrawElements`
+  and `OPENGL32.dll!glCallList` and forwards to the saved original (the proxy's
+  own forwarder) unless the suppressor says to skip the draw.
+- `viewmodel_suppressor.h`: header-only, dependency-free window state machine
+  (`ViewmodelSuppressor` + `ViewmodelWindowOpener`). A full colour clear and the
+  swap are frame boundaries; a mid-frame **depth-only** clear opens the window
+  and the next projection load (or swap) closes it. Unit-tested by
+  `viewmodel_suppressor_window` (`tests/viewmodel_suppressor_tests.cpp`).
+- **Off by default** (`SuppressEngineViewmodel=0`; `ViewmodelDepthClearWindow`
+  selects the opener). The signature is PROVISIONAL and is confirmed via the
+  per-frame `Viewmodel suppression [#N]: last frame draws=.. suppressed=..` log
+  line on a headset before it is trusted. See ADR-0439.
+
+
 

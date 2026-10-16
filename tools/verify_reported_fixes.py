@@ -112,6 +112,28 @@ def main():
             all(f"nativeHand{axis}" in config for axis in ("Yaw", "Pitch", "Roll")),
             "GH #64: native hands must be two-sided + lit with a tunable orientation")
 
+    # GH #66 (approach 2): per-draw engine viewmodel suppression must be
+    # off-by-default, intercept RndrGL's geometry draw entry points, forward to
+    # the saved original when the window is closed, and expose a unit-tested
+    # window state machine fed by the already-intercepted GL signals.
+    suppressor = (ROOT / "src/hook/viewmodel_suppressor.h").read_text(encoding="utf-8")
+    dllmain = (ROOT / "src/hook/dllmain.cpp").read_text(encoding="utf-8")
+    proxy = (ROOT / "src/hook/opengl_proxy.cpp").read_text(encoding="utf-8")
+    require("class ViewmodelSuppressor" in suppressor and
+            "ViewmodelWindowOpener" in suppressor and
+            "ShouldSuppressDraw()" in suppressor and
+            "suppressEngineViewmodel = 0" in (ROOT / "src/hook/vr_config.h").read_text(encoding="utf-8") and
+            "Hook_glDrawElements" in dllmain and "Hook_glCallList" in dllmain and
+            '"glDrawElements"' in dllmain and '"glCallList"' in dllmain and
+            "real_glDrawElements" in dllmain and "real_glCallList" in dllmain and
+            "ShouldSuppressDrawCall()" in dllmain and
+            "s_viewmodelSuppressor.NoteDepthOnlyClear()" in proxy and
+            "s_viewmodelSuppressor.NoteProjectionLoad()" in proxy and
+            "s_viewmodelSuppressor.NoteSwap()" in proxy and
+            "ShouldSuppressDrawCall()" in proxy and
+            "viewmodel_suppressor_tests.cpp" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8"),
+            "GH #66: engine viewmodel suppression must be off-by-default, intercept RndrGL draws, and be unit-tested")
+
     print("[issue-fixes] source invariants passed (#40, #43-47, #52-54)")
     return 0
 

@@ -52,6 +52,7 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4 AND RIDDICKVR_BUILD_PROXY)
         src/hook/combat_guard.h
         src/hook/combat_strike.h
         src/hook/dialogue_navigation.h
+        src/hook/viewmodel_suppressor.h
         src/hook/camera_hook.cpp
         src/hook/camera_hook.h
         src/hook/vr_config.cpp
@@ -118,6 +119,13 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
     )
     add_test(NAME combat_strike_thresholds COMMAND riddick_vr_combat_strike_tests)
+
+    # GH #66 (approach 2): per-draw viewmodel suppression window state machine.
+    add_executable(riddick_vr_viewmodel_suppressor_tests tests/viewmodel_suppressor_tests.cpp)
+    target_include_directories(riddick_vr_viewmodel_suppressor_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
+    )
+    add_test(NAME viewmodel_suppressor_window COMMAND riddick_vr_viewmodel_suppressor_tests)
 
     add_executable(riddick_vr_dialogue_navigation_tests tests/dialogue_navigation_tests.cpp)
     target_include_directories(riddick_vr_dialogue_navigation_tests PRIVATE

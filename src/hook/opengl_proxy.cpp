@@ -2,6 +2,8 @@
 #include "opengl_forwarders.h"
 #include "stereo_renderer.h"
 #include "camera_hook.h"
+#include "vr_config.h"
+#include "viewmodel_suppressor.h"
 #include "logging.h"
 #include <string>
 
@@ -99,6 +101,21 @@ bool OpenGLProxy::HasMenuCursor() {
 }
 static uint32_t s_projMatrixCount = 0;
 static uint32_t s_modelviewMatrixCount = 0;
+
+// GH #63/#66 (approach 2): the per-draw viewmodel suppression window (see
+// viewmodel_suppressor.h). Fed by the intercepted glClear / projection / swap
+// calls below; queried once per draw by the RndrGL draw hooks. Configured from
+// the INI on every clear so a config edit takes effect without a rebuild.
+static ViewmodelSuppressor s_viewmodelSuppressor;
+
+static ViewmodelSuppressionConfig BuildViewmodelSuppressionConfig() {
+    ViewmodelSuppressionConfig cfg;
+    cfg.enabled = (g_vrConfig.suppressEngineViewmodel != 0);
+    cfg.opener = (g_vrConfig.viewmodelDepthClearWindow != 0)
+        ? ViewmodelWindowOpener::DepthOnlyClear
+        : ViewmodelWindowOpener::None;
+    return cfg;
+}
 
 static void RawProxyLog(const char* msg) {
     // GH #26: %TEMP% instead of a hardcoded developer path.
@@ -255,6 +272,14 @@ BOOL WINAPI OpenGLProxy::Hook_wglMakeCurrent(HDC hdc, HGLRC hglrc) {
 BOOL WINAPI OpenGLProxy::Hook_wglSwapBuffers(HDC hdc) {
     RiddickVR_EnsureHookInitialized();
     s_swapFrameCount++;
+    // GH #66: end of frame - close the viewmodel window and latch the tallies.
+    s_viewmodelSuppressor.NoteSwap();
+    if (s_viewmodelSuppressor.Enabled() && (s_swapFrameCount % 300) == 0) {
+        VR_LOG_INFO("Viewmodel suppression [#%llu]: last frame draws=%u suppressed=%u total=%llu",
+            static_cast<unsigned long long>(s_swapFrameCount),
+            s_viewmodelSuppressor.LastFrameDraws(), s_viewmodelSuppressor.LastFrameSuppressed(),
+            s_viewmodelSuppressor.TotalSuppressed());
+    }
     StereoRenderer::Instance().OnSwapBuffers(hdc);
     return real_wglSwapBuffers ? real_wglSwapBuffers(hdc) : SwapBuffers(hdc);
 }
@@ -316,6 +341,7 @@ void WINAPI OpenGLProxy::Hook_glLoadMatrixf(const GLfloat *m) {
     if (!m) return;
 
     if (s_currentMatrixMode == 0x1701 /* GL_PROJECTION */) {
+        s_viewmodelSuppressor.NoteProjectionLoad(); // GH #66: the first-person pass ends here
         memcpy(s_lastProjection, m, sizeof(s_lastProjection));
         s_hasProjection = true;
         s_projMatrixCount++;
@@ -374,6 +400,7 @@ void WINAPI OpenGLProxy::Hook_glFrustum(GLdouble left, GLdouble right, GLdouble 
     RiddickVR_EnsureHookInitialized();
     VR_LOG_INFO("glFrustum called: L=%.2f R=%.2f B=%.2f T=%.2f Near=%.2f Far=%.2f", left, right, bottom, top, zNear, zFar);
     if (s_currentMatrixMode == 0x1701 /* GL_PROJECTION */) {
+        s_viewmodelSuppressor.NoteProjectionLoad(); // GH #66: the first-person pass ends here
         memset(s_lastProjection, 0, sizeof(s_lastProjection));
         s_lastProjection[0] = static_cast<float>((2.0 * zNear) / (right - left));
         s_lastProjection[5] = static_cast<float>((2.0 * zNear) / (top - bottom));
@@ -397,6 +424,7 @@ void WINAPI OpenGLProxy::Hook_glFrustum(GLdouble left, GLdouble right, GLdouble 
 void WINAPI OpenGLProxy::Hook_glOrtho(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble zNear, GLdouble zFar) {
     RiddickVR_EnsureHookInitialized();
     if (s_currentMatrixMode == 0x1701 /* GL_PROJECTION */) {
+        s_viewmodelSuppressor.NoteProjectionLoad(); // GH #66: the first-person pass ends here
         memset(s_lastProjection, 0, sizeof(s_lastProjection));
         s_lastProjection[0] = static_cast<float>(2.0 / (right - left));
         s_lastProjection[5] = static_cast<float>(2.0 / (top - bottom));
@@ -414,6 +442,15 @@ void WINAPI OpenGLProxy::Hook_glOrtho(GLdouble left, GLdouble right, GLdouble bo
 
 void WINAPI OpenGLProxy::Hook_glClear(GLbitfield mask) {
     RiddickVR_EnsureHookInitialized();
+    // GH #66: the frame boundary (full colour clear) re-bases the viewmodel
+    // suppression window; a mid-frame depth-only clear opens it (see
+    // viewmodel_suppressor.h). Configured here so an INI edit takes effect live.
+    s_viewmodelSuppressor.Configure(BuildViewmodelSuppressionConfig());
+    if (mask & 0x00004000u /* GL_COLOR_BUFFER_BIT */) {
+        s_viewmodelSuppressor.NoteColorClear();
+    } else if (mask & 0x00000100u /* GL_DEPTH_BUFFER_BIT */) {
+        s_viewmodelSuppressor.NoteDepthOnlyClear();
+    }
     if (real_glClear) {
         real_glClear(mask);
     }
@@ -450,6 +487,10 @@ const float* OpenGLProxy::GetLastProjectionMatrix() {
 
 const float* OpenGLProxy::GetLastViewMatrix() {
     return s_lastView;
+}
+
+bool OpenGLProxy::ShouldSuppressDrawCall() {
+    return s_viewmodelSuppressor.ShouldSuppressDraw();
 }
 
 } // namespace RiddickVR

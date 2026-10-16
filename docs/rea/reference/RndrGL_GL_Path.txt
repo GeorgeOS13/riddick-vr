@@ -1,0 +1,101 @@
+# RndrGL.dll — OpenGL draw path (which entry points the engine actually uses)
+
+# purpose : GH #63 / GH #66 (approach 2). Approach 1 (forcing the RPG item's
+#           `noviewmodel` bit) was falsified (ADR-0438: engine-toggled, no reader).
+#           Approach 2 suppresses the first-person viewmodel at the draw level, so
+#           we must know which GL draw entry points the renderer (RndrGL.dll)
+#           actually calls. Read-only artefact of REA; no game file is modified.
+# target  : C:\Program Files (x86)\Starbreeze Studios\Riddick EFBB
+#           (2004 *Escape from Butcher Bay*; see ADR-0413/0414 for the build pin)
+# method  : raw ASCII/import-name scan of every shipped code module for the
+#           null-terminated import names and string literals. Reproduce with:
+#
+#             import glob, os
+#             root = r"C:\Program Files (x86)\Starbreeze Studios\Riddick EFBB"
+#             files = [f for f in glob.glob(root + r"\**\*", recursive=True)
+#                      if f.lower().endswith((".dll", ".exe"))]
+#             for p in (b"glDrawElements", b"glDrawArrays", b"glCallList",
+#                       b"glNewList", b"glDepthRange", b"OPENGL32.dll"):
+#                 hits = [os.path.relpath(f, root) for f in files if p in open(f, "rb").read()]
+#                 print(p, hits)
+#
+#           Alternatively `rea inspect-binary-layout` / `rea search-bytes`.
+
+## 1. Which module imports OpenGL
+
+Only **RndrGL.dll** imports OpenGL entry points (x86 `System/Win32_x86/RndrGL.dll`,
+plus the SSE / SSE2 / Win64 builds). MXR.dll, MSystem.dll, MCCDyn.dll,
+SbzEngine.exe, GameClasses_Win32_x86.dll and GameWorld_Win32_x86.dll contain no
+`gl*`/`wgl*` import names. => RndrGL is the single GL client, so a hook installed
+in RndrGL.dll's import table sees every engine draw.
+
+## 2. The geometry (mesh) path is glDrawElements
+
+| entry point            | x86 RndrGL | any shipped module |
+|------------------------|-----------|--------------------|
+| `glDrawElements`       | present   | present (all RndrGL builds) |
+| `glDrawArrays`         | **absent**| **absent**         |
+| `glDrawRangeElements`  | absent    | absent             |
+| `glInterleavedArrays`  | absent    | absent             |
+| `glBegin` / `glEnd`    | present   | present (RndrGL)   |
+| `glCallList`           | present   | present (all RndrGL builds) |
+| `glNewList`/`glGenLists`/`glEndList` | **absent** | **absent** |
+
+- `.xmd` meshes ship indexed geometry (`TRIANGLES` = `u32 count` + `u16`
+  indices; ADR-0415/0416), consistent with an **indexed vertex-array** path.
+- `glDrawArrays` is used by **no** shipped module, so indexing `glDrawElements`
+  is the reliable per-mesh gate. (The proxy still exports `glDrawArrays`
+  (`src/hook/opengl32.def`), but it is dead for this title.)
+- `glBegin`/`glEnd` are imported (immediate-mode / 2D path). They are **not**
+  intercepted in this pass: suppressing `glBegin` without the matching `glEnd`
+  would be a GL error, so a begin/end pair gate is left as a follow-up if the
+  first-person arms turn out to use immediate mode.
+
+### Open question: the display-list path
+`glCallList` is imported by RndrGL, but **no** shipped module imports the list
+*building* entry points (`glNewList`/`glGenLists`/`glEndList`) and the OpenGL
+metafile playback names (`GlmfPlayGlsRecord`, `GlmfBeginGlsBlock`, ...) appear in
+**no** module either. So either `glCallList` is an unused import, or the list IDs
+come from a path not yet located. `glCallList` is intercepted opportunistically
+(it is a no-op change when the suppressor is off); nothing depends on it.
+
+## 3. The matrix / state vocabulary (constrains the signature)
+
+Present in RndrGL: `glLoadMatrixf`, `glLoadIdentity`, `glPushMatrix`,
+`glPopMatrix`, `glTranslatef`, `glFrustum`, `glClear`, `glClearDepth`,
+`glViewport`, `glScissor`, `glDepthFunc`, `glDepthMask`, `glPolygonOffset`,
+`glColorMask`, `glStencilFunc`, `glTexEnv*`, `glCallList`.
+
+**Absent** (notable negatives): `glDepthRange`, `glMultMatrixf`,
+`glMultMatrixd`, `glRotatef`.
+
+- Because `glDepthRange` is not imported, the "bias the viewmodel into a
+  sub-range" trick is **not** used, so depth-range is *not* a usable signature.
+- Object transforms are composed from `glLoadMatrixf` + `glPushMatrix`/
+  `glTranslatef`/`glPopMatrix` (no `glMultMatrixf`/`glRotatef`), i.e. the engine
+  loads/translates matrices directly; both `glLoadMatrixf` and `glFrustum` are
+  already intercepted by the hook (projection loads close the suppression
+  window).
+
+## 4. Consequence for the suppressor (GH #66)
+
+- Interception targets: **`glDrawElements`** (primary; every 3D mesh) and
+  **`glCallList`** (opportunistic). Both are IAT-hooked in `RndrGL.dll`
+  (`src/hook/dllmain.cpp`, `InstallRndrGLHooks`) via the same `IATHook` used for
+  `GDI32!SwapBuffers`.
+- Window signals come from entry points the hook **already** intercepts:
+  `glClear` (a mid-frame depth-only clear opens; a full colour clear re-bases the
+  frame) and the projection loads `glLoadMatrixf`/`glFrustum`/`glOrtho` (close).
+- The window logic is in `src/hook/viewmodel_suppressor.h` (unit-tested by
+  `viewmodel_suppressor_window`, `tests/viewmodel_suppressor_tests.cpp`).
+- PROVISIONAL: the "depth-only clear opens the first-person pass" signature is a
+  hypothesis. It is off by default (`SuppressEngineViewmodel=0`) and the hook
+  logs per-frame draw/suppressed counters so one in-headset run confirms it
+  before it is trusted (see ADR-0439).
+
+## not claimed
+- Not verified in-game (no launch): the depth-only-clear boundary, the count of
+  draws in the window, and whether `glDrawElements` alone hides the arms.
+- The origin of the `glCallList` list IDs is unresolved (section 2).
+- These offsets are for the 2004 EFBB x86 build; the Dark Athena build is not
+  scanned here (ADR-0413 target mismatch).

@@ -81,6 +81,13 @@ public:
     static const float* GetLastProjectionMatrix();
     static const float* GetLastViewMatrix();
 
+    // GH #63/#66 (approach 2): per-draw suppression of the engine's own
+    // first-person viewmodel. The window state machine lives in
+    // viewmodel_suppressor.h and is fed by the already-intercepted glClear /
+    // projection / swap calls; the RndrGL draw hooks call this once per draw.
+    // Pure `false` when the INI flag is off (the default).
+    static bool ShouldSuppressDrawCall();
+
     // GL 1.1 functions retrieved dynamically
     static PFN_glBindTexture glBindTexture;
     static PFN_glGenTextures glGenTextures;
