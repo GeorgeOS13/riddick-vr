@@ -68,6 +68,12 @@ NativeHandTextureVFlip=0
 ; geometry. 0 = bind (default). The baked pose is an evidence-backed but
 ; unvalidated VR fit -- compare both on a headset before enabling it.
 NativeHandPose=0
+; GH #64: 1 = also draw the IK upper-arm tube (shoulder to elbow) with native
+; hands. 0 = off (the tube does not join the native mesh and reads as a stray block).
+NativeHandUpperArm=0
+; GH #46: 1 = fade the hands to 25% while a weapon is held (trigger or two-handed
+; grip); a boxer guard never fades. 0 = never fade.
+HandFadeWhenWeapon=1
 ; --- Front-of-HMD block/guard window (GH #62) ---
 ; Head-local hand window (metres relative to the HMD: +Y up, -Z forward into the
 ; view). Block = both fists held in front of the face within this window; a low

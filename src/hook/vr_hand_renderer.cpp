@@ -5,6 +5,8 @@
 #include "native_hand_pose.h" // GH #46: model-space -> hand-local placement
 #include "native_hand_texture.h" // GH #61: baked Riddick skin diffuse (DXT1)
 #include "bc1.h" // GH #61: BC1/DXT1 block decoder
+#include "hand_visuals.h" // GH #64/#46: cue tint and fade helpers
+#include "combat_guard.h" // GH #46: shared guard envelope (boxer-guard fade exemption)
 #include "opengl_proxy.h"
 #include "logging.h"
 #include <cmath>
@@ -515,7 +517,12 @@ void VRHandRenderer::RenderHands(const RiddickVRSharedState& state, bool isLeftE
         m_currentFade = isLeft ? m_leftFade : m_rightFade;
         // Prisoner uniform cloth, tapering at elbow and wrist. Hand geometry
         // continues from the same tracked wrist target.
-        DrawArmSegment(shoulder, elbow, 0.050f * armScale, 0.040f * armScale, 0.45f, 0.43f, 0.37f);
+        // GH #64: the native mesh is placed from its own bounds, so the IK
+        // upper-arm tube does not join it and reads as a stray block. Draw it
+        // only for the procedural arm, or when NativeHandUpperArm opts in.
+        if (!g_vrConfig.nativeHands || g_vrConfig.nativeHandUpperArm) {
+            DrawArmSegment(shoulder, elbow, 0.050f * armScale, 0.040f * armScale, 0.45f, 0.43f, 0.37f);
+        }
         // GH #46: when the native arm mesh is enabled it carries the forearm,
         // so only the upper-arm cloth is drawn procedurally (no doubling).
         if (!g_vrConfig.nativeHands) {
@@ -548,8 +555,20 @@ void VRHandRenderer::RenderHands(const RiddickVRSharedState& state, bool isLeftE
     // view (firing grip, ADS pose, two-handed hold) so we don't double-render
     // over the game's arms. Full opacity for open/interacting hands.
     bool twoHanded = (leftCtrl.grip > 0.70f && rightCtrl.grip > 0.70f);
-    float leftFade = (leftCtrl.trigger > 0.60f || twoHanded) ? 0.25f : 1.0f;
-    float rightFade = (rightCtrl.trigger > 0.60f || twoHanded) ? 0.25f : 1.0f;
+    // GH #46: a boxer guard (both fists up in front of the face, no trigger
+    // pulled) also has both grips closed; it must not fade the hands out.
+    GuardEnvelope guardVolume;
+    guardVolume.yMin = g_vrConfig.guardYMin;
+    guardVolume.yMax = g_vrConfig.guardYMax;
+    guardVolume.zMin = g_vrConfig.guardZMin;
+    guardVolume.zMax = g_vrConfig.guardZMax;
+    guardVolume.maxHandSpan = g_vrConfig.guardMaxHandSpan;
+    const bool fadeBoxerGuard = twoHanded && leftCtrl.trigger <= 0.60f && rightCtrl.trigger <= 0.60f &&
+        InGuardEnvelope(guardVolume, leftLocal.y, leftLocal.z, rightLocal.y, rightLocal.z,
+                        leftLocal.x - rightLocal.x);
+    const int fadeEnabled = g_vrConfig.handFadeWhenWeapon;
+    float leftFade = ComputeHandFade(leftCtrl.trigger, twoHanded, fadeBoxerGuard, fadeEnabled);
+    float rightFade = ComputeHandFade(rightCtrl.trigger, twoHanded, fadeBoxerGuard, fadeEnabled);
     VRHandRenderer::Instance().SetHandFade(leftFade, rightFade);
     // Grab proximity (vents, biometric terminals, guard throat-grip corridor):
     // hand forward of chest with grip closed (grab) or index extended (poke).
@@ -678,7 +697,9 @@ void VRHandRenderer::DrawTacticalHand(HandSide side, float grip, float trigger, 
     // which are authored for the procedural geometry and otherwise float as
     // stray blocks (GH #64). `native` reflects an actual native draw (flag on,
     // mesh + placement valid); anything else keeps the full procedural hand.
-    const bool native = DrawNativeHand(side);
+    // GH #64: interaction cues show as a skin tint on the native mesh.
+    const HandCueTint cue = ComputeNativeHandCueTint(interactionGlow, holdingCartridge, palmHeal, grabGlow);
+    const bool native = DrawNativeHand(side, cue);
     if (!native) {
         DrawForearmGauntlet(side);
 
@@ -977,7 +998,7 @@ void VRHandRenderer::VerifyNativeHandTexture() {
 // is unavailable the flat skin tone is kept. Deliberately built on the
 // already-loaded immediate-mode GL entry points, matching the rest of this
 // renderer: it mutates no state that RenderHands does not already restore.
-bool VRHandRenderer::DrawNativeHand(HandSide side) {
+bool VRHandRenderer::DrawNativeHand(HandSide side, const HandCueTint& cue) {
     if (!g_vrConfig.nativeHands) {
         return false;
     }
@@ -1052,9 +1073,10 @@ bool VRHandRenderer::DrawNativeHand(HandSide side) {
     // Fallback skin tone approximating the RIDDICK_ARMSCAR_D diffuse. When the
     // baked texture is bound the tint goes to white so MODULATE shows the real
     // texture at full strength (the fade still scales alpha/colour).
-    const float r = textured ? 1.0f : 0.55f;
-    const float g = textured ? 1.0f : 0.42f;
-    const float b = textured ? 1.0f : 0.33f;
+    // GH #64: the cue tint multiplies the base so glow/heal/grab cues stay visible.
+    const float r = (textured ? 1.0f : 0.55f) * cue.r;
+    const float g = (textured ? 1.0f : 0.42f) * cue.g;
+    const float b = (textured ? 1.0f : 0.33f) * cue.b;
     // GH #64: native hands must never inherit the overlay's cull-away fade.
     // The 0.25 fade existed to hide the *procedural* hands when the engine's own
     // arms dominate; with native hands there is nothing to hide from, and the

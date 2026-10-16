@@ -99,6 +99,11 @@ void LoadVRConfig() {
         cfg.nativeHandTextureVFlip = ReadInt(iniPath, "NativeHandTextureVFlip", cfg.nativeHandTextureVFlip) ? 1 : 0;
         // GH #58: select the offline-posed mesh variant (ADR-0443).
         cfg.nativeHandPose = ReadInt(iniPath, "NativeHandPose", cfg.nativeHandPose) ? 1 : 0;
+        // GH #64: IK upper-arm tube with native hands; GH #46: weapon fade.
+        cfg.nativeHandUpperArm = ReadInt(iniPath, "NativeHandUpperArm", cfg.nativeHandUpperArm) ? 1 : 0;
+        cfg.handFadeWhenWeapon = ReadInt(iniPath, "HandFadeWhenWeapon", cfg.handFadeWhenWeapon) ? 1 : 0;
+        VR_LOG_INFO("Hand visuals: native_upper_arm=%d fade_when_weapon=%d",
+                    cfg.nativeHandUpperArm, cfg.handFadeWhenWeapon);
         // GH #62: front-of-HMD block/guard envelope (head-local metres). The
         // guard must sit in front of the face, not below the view, so Y is
         // clamped well above the old -0.42 m low-hold floor.

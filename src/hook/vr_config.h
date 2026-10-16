@@ -61,6 +61,13 @@ struct VRConfig {
     // backed but unvalidated VR fit; tune/compare on a headset. Ignored when no
     // posed variant exists for a mesh.
     int nativeHandPose = 0;
+    // GH #64: draw the IK upper-arm tube (shoulder to elbow) with native hands.
+    // Default OFF: the native mesh is placed from its own bounds, so the tube
+    // does not join it and floats as a stray block.
+    int nativeHandUpperArm = 0;
+    // GH #46: fade the overlay hands to 0.25 while a weapon is held (trigger
+    // pulled or two-handed grip). Never applies to a boxer guard. 0 = never fade.
+    int handFadeWhenWeapon = 1;
     // GH #62: front-of-HMD block/guard envelope (head-local metres; +Y up,
     // -Z forward). Block is a hand *pose* held in front of the face, never a
     // low hold. Both the guard pose and the strike-suppression gate share these

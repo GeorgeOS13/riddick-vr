@@ -3,6 +3,7 @@
 #include "riddick_vr_protocol.h"
 #include <windows.h>
 #include <GL/gl.h>
+#include "hand_visuals.h"
 
 namespace RiddickVR {
 
@@ -48,7 +49,9 @@ private:
     // GH #64: rendered two-sided (culling off + GL two-sided lighting) with the
     // baked normals driving per-vertex GL lighting, and the on-headset
     // orientation correction (NativeHandYaw/Pitch/Roll) applied hand-local.
-    bool DrawNativeHand(HandSide side);
+    // GH #64: `cue` tints the skin to show interaction cues (the procedural
+    // hand-local cue boxes are not drawn on the native mesh).
+    bool DrawNativeHand(HandSide side, const HandCueTint& cue);
 
     // GH #61: create (once) the GL texture for the baked Riddick skin diffuse
     // (native_hand_texture.h). Returns false while the texture is unavailable
