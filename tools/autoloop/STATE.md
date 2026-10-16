@@ -2,6 +2,55 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 33 — 2026-10-16 16:21 (scheduled loop)
+- **Unit:** GH **#60** step 1 (RE, read-only) — identify the owner class + builder
+  of the live per-bone matrix array and decide `world·bind_inverse` vs raw
+  `world` (the "Next probe" left by ADR-0430).
+- Finding (decisive for #60 step 1): the builder is the `CXR_SkeletonInstance`
+  **forward kinematics** chain `FUN_10021650` (a **virtual** method: its code
+  pointer sits at file `0x14354C` in `.rdata`, immediately before
+  `"Obsolete function"`/`".\XRSkeleton.cpp"`/`"EvalAnim"`/`"NODEINDICES"`/`"NODES"`;
+  RTTI `.?AVCXR_SkeletonInstance@@` @ `0x1016a4c0`) → `FUN_10020b50` (evaluate the
+  local pose: quaternion pool → `poseDesc+0x24`, translation pool → `+0x2c`) →
+  `FUN_1001f340` (tree walk). It composes
+  **`world[node] = world[parent] · local[node]`** via `FUN_1001db60` (3×4 concat,
+  algebra verified) and stores **raw world** matrices at `*(poseDesc+0x30)+node*
+  0x30` (local at `*(poseDesc+0x34)+node*0x30`). **No bind/reference/inverse is
+  composed anywhere in the chain.** `FUN_10021650` also validates a caller root
+  4×4 (finite) and pre-multiplies it into the pose (`flags` modes). Node records
+  are 0x20 B (`this+0x14` list; `this+0xc` = child-index list): pos `[0..2]`,
+  child start `short @+0x0e`, child count `byte @+0x10`, connect `short @+0x12`,
+  rotation slot `short @+0x1c`, movement slot `short @+0x1e`. The draw
+  (`FUN_1002dcc0`) consumes `*(*(poseDesc+0x14)+0x18)+bone*0x30` where
+  `poseDesc = modelInstance[0x94]` (override `*(arg6+0x3c)`) and `bone` = the
+  per-cluster bone index.
+- Tension recorded (NOT resolved): `Riddick_B05` skinned clusters are authored in
+  **model space** (`--mesh` refboxes: arm clusters `y −25.4..6.4`, `z 32.8..52.5`,
+  matching the `NODES`/live extents) — so *if* the mesh buffer handed to
+  `FUN_100254e0` is that data, the consumed matrix must be `world·bind_inverse`;
+  the FK output is raw `world`. Either the engine rebases the vertex buffer to
+  bone-local at load, or a bind-inverse step exists between the FK output and the
+  consumed `poseDesc+0x14` list (which was not resolved to alias `+0x30`/`+0x34`).
+- Change (docs only, no C++/asset): new
+  `docs/rea/reference/MXR_SkeletonInstance_WorldMatrices.txt` and
+  `docs/adr/0440-skeleton-instance-world-matrix-builder.md`;
+  `docs/rea/mos-xmd-format.md` provider "Next probe" answered + re-pointed.
+- Evidence: `wake33_search_skeleton_*`, `wake33_func_10021650/10020b50/1001f340/
+  1001db60.*`, `wake33_a2o_vtable.json`, `wake33_b05_skeleton.json`,
+  `wake33_b05_mesh.json` under `tools/autoloop/logs/`. No C++/asset changed → no
+  `build-all.ps1`/CTest; `test_mos_xmd`, `test_mos_xtc`, `test_xmd_export`,
+  `test_xmd_bake`, `test_xmd_pose`, `test_xsa_anim`, `test_xtc_bake`,
+  `validate_addresses`, `verify_hook_init`, `verify_reported_fixes`,
+  `scenario_tests.py --check` all PASS. (`python -m pytest tools` errors at
+  collection — pre-existing harness/path quirk; the loop runs the scripts
+  directly, which PASS.)
+- Blocker: the `poseDesc+0x14` vs `+0x30`/`+0x34` aliasing and the model-space vs
+  bone-local question need either more RE or a runtime read (GH #34). **Next:**
+  find the writer of `poseDesc+0x14` (or the load-time vertex rebase); then a
+  skinned native hand can be built offline as FK(`NODES`+`.xsa`) with a known
+  bind step.
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 32 — 2026-10-16 15:27 (scheduled loop)
 - **Unit:** GH **#66** (approach 2) — land the per-draw infrastructure to suppress
   the engine's own first-person viewmodel, plus the RE evidence for *which* draw

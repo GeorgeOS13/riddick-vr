@@ -254,9 +254,21 @@ overridden by `*(int*)(param_6 + 0x3c)` when non-null — **not** `param_1[0x2c]
 The container is shaped like the engine's `TList_Vector<TMatrix43<float,float>>`
 (`{+0x04 count; +0x18 data}`, `0x30`-byte elements).
 
-**Next probe:** the builder of that live per-bone array (field `+0x18` of
-`*(*(param_1+0x94))+0x14`, or of `*(*(param_6+0x3c))+0x14`) - does it compose
-`world*bind_inverse`, or must the native path read it at runtime (GH #34)?
+**Answered (ADR-0440):** the builder of that live per-bone array is the
+`CXR_SkeletonInstance` **forward kinematics** chain
+`FUN_10021650` (virtual, `XRSkeleton.cpp`) → `FUN_10020b50` (evaluate the local
+pose) → `FUN_1001f340` (tree walk). It composes
+**`world[node] = world[parent] · local[node]`** (`FUN_1001db60`), i.e. **raw
+world** matrices — **no bind-inverse** — writing world to `*(poseDesc+0x30)+node*
+0x30` and local to `*(poseDesc+0x34)+node*0x30`. Pseudocode:
+`docs/rea/reference/MXR_SkeletonInstance_WorldMatrices.txt`.
+
+**Next probe (corrected):** the draw reads the per-node 0x30-byte matrix list at
+`poseDesc+0x14`, which is **not resolved** to alias `+0x30`/`+0x34`; and the
+shipped skinned geometry is authored in **model space** (`Riddick_B05` arm
+clusters `y −25.4..6.4`, `z 32.8..52.5`). So locate either the load-time rebase
+of the mesh vertex buffer to bone-local space, or the bind-inverse step between
+the FK output and the consumed list.
 
 ## Related container: the `.xtc` texture packs (ADR-0431, GH #61)
 The shipped textures are *not* loose files; they live in

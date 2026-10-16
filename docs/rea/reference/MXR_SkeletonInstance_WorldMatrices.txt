@@ -1,0 +1,203 @@
+# MXR_SkeletonInstance_WorldMatrices
+# provider: ghidra 12.1.4
+# subject : MXR.dll sha256=06424f55f5a0f85eb09b5fbd69491c7f6a88de808c26c513e8dac180f3c2052d
+# evidence_id: ev_8a49e84ecdc88783999d9e64d0072b67b42dfc15006a94bdda05f8e90a0a9c41 (procedures search)
+#              ev_922f149ef3390073b767ba71ddf9605d016394c4575636ac090741d2dec1cdf1 (vtable address->offset)
+# NOTE: this is the *builder* of the live per-bone matrix array that ADR-0430
+#       traced to `*(*(param_1+0x94))+0x14` (the model draw FUN_1002dcc0) and that
+#       FUN_100238a0 wraps as the per-cluster provider consumed by
+#       Cluster_TransformBones_V_N_TgU_TgV (FUN_100254e0, ADR-0428).
+#
+# CONCLUSION (see ADR-0440): the builder is standard *forward kinematics* on the
+#   skeleton node tree and it composes **raw world** matrices -- there is NO
+#   bind/reference/inverse matrix anywhere in this chain:
+#     world[node] = world[parent]  *  local[node]
+#   where local[node] = quat(rotationPool[node.rotation_slot]) -> 3x4, plus the
+#   animated translation (negated) from translationPool[node.movement_slot].
+#
+#   It writes world matrices to  *(poseDesc+0x30) + node*0x30  and the
+#   intermediate local matrices to  *(poseDesc+0x34) + node*0x30.
+#
+#   The class that owns the node tree / drives this is `CXR_SkeletonInstance`
+#   (XRSkeleton.cpp): FUN_10021650 is a *virtual* method -- its code pointer is
+#   stored in .rdata immediately before the strings "Obsolete function",
+#   ".\XRSkeleton.cpp", "EvalAnim", "ATTACHPOINTS", "NODEINDICES", "NODES".
+# Ghidra pseudocode, not original source. Read-only artefact of REA analysis.
+# ------------------------------------------------------------------------------
+
+; ---------------------------------------------------------------------------
+; vtable / class evidence (file offsets from a raw byte scan of MXR.dll)
+;   file 0x143548 : dword 0x1001F720
+;   file 0x14354C : dword 0x10021650   <- FUN_10021650 (this method)
+;   file 0x143550 : "Obsolete function"  (ASCII)
+;   file 0x143564 : ".\XRSkeleton.cpp"
+;   file 0x143578 : "EvalAnim"
+;   file 0x143584 : "ATTACHPOINTS"
+;   file 0x143594 : "NODEINDICES"
+;   file 0x1435A0 : "NODES"
+; RTTI: 0x1016a4c0 = "?AVCXR_SkeletonInstance@@"  (Ghidra symbol 0x10142fc8).
+; The exact vtable *base* is not resolved (RTTI/COL pointers are interleaved in
+; this region); only the slot holding FUN_10021650 is proven.
+; ---------------------------------------------------------------------------
+
+; ---------------------------------------------------------------------------
+; FUN_10021650 (CXR_SkeletonInstance virtual)  -- MXR.dll 0x10021650
+;   signature (Ghidra): undefined __thiscall
+;       FUN_10021650(void *this, int *pose, uint count,
+;                    void *poseDesc, float *rootMatrix4x4, uint flags)
+; ---------------------------------------------------------------------------
+
+void FUN_10021650(void *this,int *pose,uint count,void *poseDesc,float *root4x4,uint flags)
+{
+  // node count = this+0x14 list -> +0x04 (the instance's node array)
+  iVar5 = *(int *)(*(int *)((int)this + 0x14) + 4);   // nodes
+  iVar2 = *(int *)(*(int *)((int)poseDesc + 0xc) + 4);
+  if (iVar5 > iVar2 ||
+      iVar5 > *(int *)(*(int *)((int)poseDesc + 0x14) + 4)) {
+    FUN_1001de10(poseDesc, iVar5);                     // resize poseDesc arrays
+  }
+  // validate root4x4 is a finite 4x4 (16 floats, no Inf/NaN):
+  //   (param_4[0..0xf] & 0x7f800000) != 0x7f800000  checked for every element
+  if (root_is_finite_and_this_bone_animates(pose, count)) {
+    FUN_10020b50(this, pose, count, poseDesc, flags);  // 1) evaluate local pose
+    int   *q = *(int **)(*(int *)((int)poseDesc + 0x24) + 0x18);  // quaternion pool
+    float *t = *(float **)(*(int *)((int)poseDesc + 0x2c) + 0x18); // translation pool
+    if ((flags & 1) == 0) {
+      if ((flags & 2) == 0) {                          // rotate + translate mode
+        FUN_10011ae0(q, root4x4);                      // q = root_rot * q
+        t[0] = root4x4[0xc]; t[1] = root4x4[0xd]; t[2] = root4x4[0xe];
+        FUN_10014910(q + 4, local_48);                 // matrix from? (helper)
+        FUN_10011a30(local_48, root4x4, local_88);
+      } else {                                         // translate-only mode
+        FUN_10014910(q, local_48);
+        FUN_10011a30(local_48, root4x4, local_88);
+        FUN_10011ae0(q, local_88);
+      }
+      copy 16 floats local_88 -> root4x4;
+    } else {                                           // position-only mode
+      FUN_10014910(q, root4x4);
+      root4x4[0xc] = t[0]; root4x4[0xd] = t[1]; root4x4[0xe] = t[2];
+    }
+    // 2) forward kinematics -> per-node world + local 3x4 matrices
+    FUN_1001f340(this, 0 /*root node*/, poseDesc, q, t,
+                 *(int *)((int)this + 0x24),   // rotation-pool count
+                 *(int *)((int)this + 0x28));  // translation-pool count
+    return;
+  }
+  // else: fill poseDesc+0xc and poseDesc+0x14 arrays with NaN (0x7fc00000)
+  MemSetD(*(int*)(*(int*)((int)poseDesc+0xc)+0x18), 0x7fc00000, ...);
+  MemSetD(*(int*)(*(int*)((int)poseDesc+0x14)+0x18), 0x7fc00000, ...);
+}
+
+; ---------------------------------------------------------------------------
+; FUN_1001f340 (CXR_SkeletonInstance::BuildWorldMatrices)  -- MXR.dll 0x1001f340
+;   signature (Ghidra): undefined __thiscall
+;       FUN_1001f340(void *this, ushort rootNode, int poseDesc,
+;                    int quatPool, int transPool, int quatCount, int transCount)
+; ---------------------------------------------------------------------------
+
+void FUN_1001f340(void *this,ushort rootNode,int poseDesc,
+                  int quatPool,int transPool,int quatCount,int transCount)
+{
+  nodeCount = *(ushort *)(*(int *)((int)this + 0x14) + 4);   // this+0x14 list count
+  if (rootNode < 0 || rootNode >= nodeCount) return;
+
+  int  *childIdx = *(int *)(*(int *)((int)this + 0xc)  + 0x18); // child-index array
+  byte *nodes    = *(int *)(*(int *)((int)this + 0x14) + 0x18); // 0x20-byte node records
+  float *weights = *(int *)(*(int *)(poseDesc + 0x1c)  + 0x18); // per-node weight
+  float *localOut = *(int *)(poseDesc + 0x34);                  // local 3x4 (0x30 stride)
+  float *worldOut = *(int *)(poseDesc + 0x30);                  // world 3x4 (0x30 stride)
+
+  // BFS/stack from rootNode over the skeleton's child table.
+  stack[0] = rootNode; parentMat[0] = &identity;
+  do {
+    node = stack[--sp];
+    rec  = (byte *)(node*0x20 + nodes);
+
+    // local rotation matrix from the quaternion pool
+    int rotSlot = (short)*(ushort *)(rec + 0x1c);
+    float *m = worldOut /* local buffer */ + node*0x30;   // NOTE: buffer written is poseDesc+0x34
+    if (rotSlot < 0 || rotSlot >= quatCount) set_identity(m);
+    else FUN_1001dc30(quatPool + rotSlot*0x10, m);       // quaternion -> 3x4 rotation
+    m[9]=m[10]=m[0xb]=0;
+    int moveSlot = (short)*(ushort *)(rec + 0x1e);       // animated translation
+    if (0 <= moveSlot && moveSlot < transCount) {
+      float *tr = transPool + moveSlot*0xc;
+      m[9] = -tr[0]; m[10] = -tr[1]; m[0xb] = -tr[2];
+    }
+    // node bind position (model-space, from NODES) drives the FK translation
+    float px = *(float*)(rec+0x00), py = *(float*)(rec+0x04), pz = *(float*)(rec+0x08);
+    copy12(m, local_60);
+    // world-component accumulation with the connected/parent node (rec+0x12)
+    // and the per-node weight (weights[node]) -- see ADR-0440 for the caveat
+    ...
+    // world = parentWorld * local
+    FUN_1001db60(local_60, (float *)parentMat[sp], worldOut + node*0x30);
+    // push children (rec+0x0e = first child index, rec+0x10 = child count)
+    for (k = 0; k < *(byte*)(rec+0x10); ++k) {
+      if (childIdx[(short)*(ushort*)(rec+0x0e) + k] < nodeCount) {
+        stack[sp] = childIdx[...]; parentMat[sp] = worldOut + node*0x30; ++sp;
+      }
+    }
+  } while (sp > 0);
+}
+
+; ---------------------------------------------------------------------------
+; FUN_1001db60 (3x4 matrix concat)  -- MXR.dll 0x1001db60
+;   VERIFIED algebra:  out = this(local) . param_1(parent)
+;     out.r[i][c] = sum_k local.r[i][k] * parent.r[k][c]      (i in 0..2, c in 0..2)
+;     out.t      = local.r * parent.t + local.t
+;   i.e. `out = parent * local` for a row-vector (v * M) convention.
+; ---------------------------------------------------------------------------
+
+void __thiscall FUN_1001db60(void *this /*local 3x4*/, float *parent, int out)
+{
+  pfVar1 = (float *)((int)this + 4);   pfVar2 = (float *)(out + 8);
+  for (i = 3; i--; ) {
+    pfVar2[-2] = pfVar1[-1]*parent[0] + parent[3]*pfVar1[0] + pfVar1[1]*parent[6];
+    pfVar2[-1] = pfVar1[-1]*parent[1] + parent[7]*pfVar1[1] + parent[4]*pfVar1[0];
+    pfVar2[ 0] = pfVar1[-1]*parent[2] + pfVar1[1]*parent[8] + pfVar1[0]*parent[5];
+    pfVar1 += 3; pfVar2 += 3;
+  }
+  *(float*)(out+0x24) = parent[3]**(float*)((int)this+0x28) + parent[0]**(float*)((int)this+0x24)
+                      + parent[6]**(float*)((int)this+0x2c) + parent[9];
+  *(float*)(out+0x28) = parent[1]**(float*)((int)this+0x24) + parent[4]**(float*)((int)this+0x28)
+                      + parent[7]**(float*)((int)this+0x2c) + parent[10];
+  *(float*)(out+0x2c) = parent[2]**(float*)((int)this+0x24) + parent[8]**(float*)((int)this+0x2c)
+                      + parent[5]**(float*)((int)this+0x28) + parent[0xb];
+}
+
+; ---------------------------------------------------------------------------
+; The draw-side consumer (FUN_1002dcc0), re-read for this wake:
+;
+;   local_a0 = piVar8[0x25];                                   // modelInstance+0x94
+;   if (*(int*)(local_80 + 0x3c) != 0)
+;       local_a0 = *(int *)(local_80 + 0x3c);                  // override (arg6+0x3c)
+;   iVar15 = *(int *)(local_a0 + 0x14);                        // list object
+;   local_84 = *(int *)(iVar15 + 0x18);                        // -> 0x30-byte matrices
+;   local_94 = *(int *)(iVar15 + 4);                           // count
+;   ...
+;   uVar14 = *(ushort *)(clusterBoneArray + cluster*2 + 2);    // bone (node) index
+;   if (*(int*)(local_a0+0x14)==0 || *(int*)(*(int*)(local_a0+0x14)+4) <= uVar14)
+;       CListVectorCore::RangeCheckError((CListVectorCore*)(local_a0+0x10), uVar14);
+;   pfVar9 = (float *)(uVar14 * 0x30 + *(int*)(*(int*)(iVar15 + 0x14) + 0x18));
+;   copy 12 floats pfVar9 -> a 4x4 (row padding 0, [0xf]=1);
+;
+; So the skinning consumes a per-node 0x30-byte 3x4 matrix list reached from
+; `poseDesc+0x14`. The FK builder FUN_1001f340 writes its matrices to
+; `poseDesc+0x30` (world) / `poseDesc+0x34` (local). [NOT RESOLVED: whether the
+; `poseDesc+0x14` list aliases +0x30, +0x34, or a distinct skin array.]
+; ------------------------------------------------------------------------------
+
+; ---------------------------------------------------------------------------
+; Riddick_B05 reference boxes (tools/mos_xmd.py --mesh) -- the skinned geometry
+; is authored in MODEL space, matching the NODES/live extents:
+;   c0 PA1_INMATE_P17   refbox [-4.35,-6.89,0.00 .. 7.68,6.89,36.26]
+;   c1 PA1_INMATE_P17_D refbox [-4.69,-25.45,32.85 .. 5.41,6.42,52.50]
+;   c2 PA1_INMATE_P17_S refbox [-3.97,5.47,32.85 .. 3.75,25.45,51.03]
+; (c1/c2 are the arms: |y| up to ~25, z 33..52 -- not clustered near the origin,
+;  so not bone-local.) Consequence for #60: if the mesh buffer handed to
+; FUN_100254e0 is exactly this model-space data, the consumed matrix must be
+; world*bind_inverse; if the engine rebases the buffer to bone-local at load,
+; the raw FK world matrices are correct. See ADR-0440 "not claimed".
+# ------------------------------------------------------------------------------
