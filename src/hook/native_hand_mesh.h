@@ -12,15 +12,21 @@
 // unit-tested headlessly (``tests/native_hand_mesh_tests.cpp``) without a GL
 // context or the game. The geometry is the engine's raw model space (Z-up).
 //
-// Correction (ADR-0441/0442, wake 35): the stored geometry *is* the skeleton's
-// ``NODES`` bind pose — the offline FK check proves the blended mesh equals the
-// file geometry to 1.4e-14 over 268 shipped models, so there is no per-cluster
-// reference transform and no bind-inverse. The arm clusters merely *look* like a
-// separate reference pose because the bind pose itself has the arms held out
-// (the Riddick ``NODES`` bind translations spread the arms along +/-Y). ``.xmd``
-// still stores no bone rotations (``KEYS`` is a string metadata map, ADR-0421),
-// so a consumer that poses the mesh supplies bone animation from an ``.xsa``
-// clip and applies it as bind-relative deltas (ADR-0441).
+// BIND-POSE PROVENANCE (corrected, GH #64 / ADR-0444). An earlier revision of
+// this header claimed the stored geometry *is* the ``NODES`` bind pose on the
+// strength of ``tools/xmd_fk.py --check``. That check cannot support the claim:
+// at the bind pose every FK world map is the identity, so the influence-weighted
+// blend equals ``position * sum(weights)`` by construction and its
+// ``pose_drift`` is identically zero for *any* stored geometry. The direct
+// measurement (``tools/xmd_pose.py``, ADR-0424) instead shows the two
+// ``Riddick_B05`` arm clusters are **not** at the ``NODES`` bind pose: on their
+// shared bones their per-bone geometry offsets differ from the body cluster's by
+// ~26-27 units (vs <1 unit for legs/body) and their geometry AABBs are disjoint
+// from the body -- a raised reference pose. This does not invalidate the
+// ADR-0441 recipe: it mirrors the engine (``FUN_1001f340``), which applies the
+// same bind-relative world deltas to the *stored* geometry, so the posed bake
+// below is the engine's own transform. It only means the phrase "the bind pose"
+// must not be used for the file geometry.
 //
 // GH #58 (ADR-0443): ``tools/xmd_bake.py`` can additionally bake a **posed**
 // variant of each skinned cluster from a shipped first-person ``.xsa`` clip
@@ -28,6 +34,12 @@
 // posed arrays are optional (``posed_vertices == nullptr`` when no pose was
 // baked, or for unskinned clusters); the renderer still defaults to the bind
 // geometry until ``NativeHandPose`` is enabled.
+//
+// GH #64 / ADR-0444: each mesh carries ``arm_axis``, the model-space axis
+// (0 = X, 1 = Y, 2 = Z) of the arm/hand's long direction, baked from the mesh's
+// *file* geometry so it is stable across poses. The placement no longer
+// re-derives this axis from the (deforming) AABB, which flipped for the posed
+// right arm and produced a rotated, mis-anchored hand.
 
 namespace RiddickVR {
 
@@ -42,6 +54,9 @@ struct NativeHandMesh {
     const char* source;               // .xmd path relative to Content/Models
     int cluster;                      // source cluster index within that model
     int surface_index;                // CLUSTER/MISCELLANEOUS surface id
+    int arm_axis;                     // GH #64: model axis (0/1/2) of the arm's
+                                      // long direction, baked from file geometry
+                                      // (-1 = none; fall back to largest extent)
     const NativeHandVertex* vertices; // vertex_count entries (bind pose)
     unsigned int vertex_count;
     const unsigned short* indices;    // index_count entries (triangles)

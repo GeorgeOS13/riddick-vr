@@ -274,9 +274,42 @@ def test_main_requires_output(tmp_dir):
         os.remove(path)
 
 
+def test_bake_arm_axis(tmp_dir):
+    """GH #64: the mesh's long axis is baked into the record/header/manifest."""
+    path = tm._write_tmp(te._single_cluster())
+    try:
+        rec = xmd_bake.bake_mesh(path, 0, "Axis", "synth.xmd")
+        ext = [rec["bounds_max"][c] - rec["bounds_min"][c] for c in range(3)]
+        want = 0
+        if ext[1] > ext[want]:
+            want = 1
+        if ext[2] > ext[want]:
+            want = 2
+        assert rec["arm_axis"] == want, (rec["arm_axis"], want, ext)
+        header = xmd_bake.render_header([rec])
+        # The positional initializer carries surface_index then arm_axis.
+        assert re.search(r'"Axis",\s*"synth.xmd",\s*0,\s*-?\d+,\s*%d,' % want,
+                         header), header
+        assert "arm_axis %d" % want in header, header
+        man = xmd_bake.render_manifest([rec], "synthetic")
+        assert man["meshes"][0]["arm_axis"] == want, man["meshes"][0]
+    finally:
+        os.remove(path)
+
+
+def test_long_axis_ties_and_ordering(tmp_dir):
+    """_long_axis picks the largest extent, ties resolve to the lowest index."""
+    del tmp_dir
+    assert xmd_bake._long_axis((0.0, 0.0, 0.0), (10.0, 2.0, 3.0)) == 0
+    assert xmd_bake._long_axis((0.0, 0.0, 0.0), (2.0, 10.0, 3.0)) == 1
+    assert xmd_bake._long_axis((0.0, 0.0, 0.0), (2.0, 3.0, 10.0)) == 2
+    assert xmd_bake._long_axis((0.0, 0.0, 0.0), (5.0, 5.0, 5.0)) == 0
+
+
 def main() -> int:
     tests = (test_format_float_literals, test_bake_roundtrip,
              test_bake_without_uv, test_manifest_totals,
+             test_bake_arm_axis, test_long_axis_ties_and_ordering,
              test_verify_detects_stale, test_main_requires_output,
              test_bake_pose_matches_xmd_fk, test_bake_pose_unskinned_is_skipped,
              test_bake_pose_cli_and_verify, test_bake_no_pose_flag)

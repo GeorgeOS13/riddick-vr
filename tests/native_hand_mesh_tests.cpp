@@ -39,13 +39,14 @@ struct Expected {
     unsigned int vertices;
     unsigned int index_count;
     int surface_index;
+    int arm_axis;   // GH #64: baked model-space long axis (0/1/2)
 };
 
 const Expected kExpected[] = {
-    { "Riddick_LeftArm", 526, 2421, 1 },
-    { "Riddick_RightArm", 344, 1641, 2 },
-    { "Pa2_Hand", 138, 540, 0 },
-    { "Pa2_Hand_Detail", 540, 3228, 0 },
+    { "Riddick_LeftArm", 526, 2421, 1, 1 },
+    { "Riddick_RightArm", 344, 1641, 2, 1 },
+    { "Pa2_Hand", 138, 540, 0, 1 },
+    { "Pa2_Hand_Detail", 540, 3228, 0, 1 },
 };
 
 } // namespace
@@ -172,6 +173,24 @@ int main() {
         }
         if (mesh->surface_index != e.surface_index) {
             return Fail("surface index drift", e.name);
+        }
+        if (mesh->arm_axis != e.arm_axis) {
+            return Fail("arm axis drift", e.name);
+        }
+        // GH #64: the baked axis must actually be the long direction of the file
+        // geometry (guards the baked value against the source AABB).
+        {
+            const float ext[3] = {
+                mesh->bounds_max[0] - mesh->bounds_min[0],
+                mesh->bounds_max[1] - mesh->bounds_min[1],
+                mesh->bounds_max[2] - mesh->bounds_min[2],
+            };
+            int longest = 0;
+            if (ext[1] > ext[longest]) longest = 1;
+            if (ext[2] > ext[longest]) longest = 2;
+            if (mesh->arm_axis != longest) {
+                return Fail("arm axis is not the file-geometry long axis", e.name);
+            }
         }
     }
 

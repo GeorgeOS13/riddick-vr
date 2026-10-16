@@ -98,7 +98,8 @@
         "RIDDICK_ARMSCAR_D   ",
         "RIDDICK_ARMSCAR_S   ",
         "RIDDICK_ARMSCAR_N   "
-      ]
+      ],
+      "arm_axis": 1
     },
     {
       "name": "Riddick_RightArm",
@@ -160,7 +161,8 @@
         "RIDDICK_ARMSCAR_D   ",
         "RIDDICK_ARMSCAR_S   ",
         "RIDDICK_ARMSCAR_N   "
-      ]
+      ],
+      "arm_axis": 1
     },
     {
       "name": "Pa2_Hand",
@@ -191,7 +193,8 @@
       "surfaces": [
         "PA2_INMATE_B01  ",
         "PA2_INMATE_B01  "
-      ]
+      ],
+      "arm_axis": 1
     },
     {
       "name": "Pa2_Hand_Detail",
@@ -222,7 +225,8 @@
       "surfaces": [
         "PA2_INMATE_B01  ",
         "PA2_INMATE_B01  "
-      ]
+      ],
+      "arm_axis": 1
     }
   ],
   "totals": {

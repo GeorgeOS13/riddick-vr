@@ -119,6 +119,20 @@ in-engine first-person pose.
 - **`FPSMelee:Mel_ShaUnEquip` is a reproducible choice, not the "correct" one.**
   Re-bake any other clip with `--anim/--sequence/--pose-key`.
 
+## Update (GH #64, ADR-0444)
+Two corrections:
+
+- **"Bind pose" wording.** The asset is baked from the *file* geometry, which is
+  **not** the `NODES` bind pose for the arm clusters (ADR-0424 measured ~26-27
+  unit same-bone offsets vs the body; the arms are a raised reference pose). The
+  phrase "in the bind pose" above should read "in the file (raised-reference)
+  pose". This does **not** invalidate the ADR-0441 pose recipe, which mirrors the
+  engine and applies the same bind-relative world deltas to the stored geometry.
+- **Placement.** `DrawNativeHand` no longer derives the model→hand-local basis
+  from the (posed) AABB's largest extent — that flipped for the posed right arm.
+  It now uses the mesh's baked `arm_axis` (native_hand_mesh.h), so both hands are
+  mirror-symmetric and pose-stable. See ADR-0444.
+
 ## Consequences
 - GH #58's pose source is pinned and the asset now carries a real first-person
   pose; `NativeHandPose=1` is a one-key headset A/B against the bind geometry.

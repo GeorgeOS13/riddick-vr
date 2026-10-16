@@ -12,6 +12,7 @@
 #include <cstdio>
 
 using RiddickVR::ComputeNativeHandPlacement;
+using RiddickVR::ComputeNativeHandPlacementAlongAxis;
 using RiddickVR::FindNativeHandMesh;
 using RiddickVR::MapNativeHandNormal;
 using RiddickVR::MapNativeHandPoint;
@@ -199,6 +200,63 @@ int main() {
         Check(rp.valid, "baked right arm placement valid");
         Check(Near(rp.anchor[1], rightArm->bounds_max[1]),
               "baked right arm anchors at the max-Y hand end");
+    }
+
+    // --- GH #64: an explicit long axis overrides the largest-extent guess ----
+    {
+        // Largest extent is Z, but the mesh declares Y as its arm axis: the
+        // placement must follow Y (this is exactly the posed right arm's shape).
+        const float zmn[3] = { -4.0f, -8.0f, -10.0f };
+        const float zmx[3] = { 4.0f, 8.0f, 10.0f };
+        NativeHandPlacement heuristic = ComputeNativeHandPlacement(zmn, zmx, false, scale);
+        Check(Near(heuristic.basis[2][2], -1.0f), "largest-extent axis follows Z");
+        NativeHandPlacement forced = ComputeNativeHandPlacementAlongAxis(zmn, zmx, false, 1, scale);
+        Check(forced.valid, "explicit Y axis placement valid");
+        Check(Near(forced.basis[2][1], -1.0f), "explicit Y axis overrides the guess");
+        CheckOrthonormalRightHanded(forced, "explicit-axis basis orthonormal");
+        Check(Near(forced.anchor[1], zmx[1]), "explicit-axis right hand anchors at +Y");
+        // Out-of-range / degenerate axes are rejected, never guessed.
+        Check(!ComputeNativeHandPlacementAlongAxis(zmn, zmx, false, -1, scale).valid,
+              "negative axis rejected");
+        Check(!ComputeNativeHandPlacementAlongAxis(zmn, zmx, false, 3, scale).valid,
+              "axis > 2 rejected");
+        const float flat[3] = { -4.0f, -8.0f, 0.0f };  // zero extent on Y
+        Check(!ComputeNativeHandPlacementAlongAxis(zmn, flat, true, 1, scale).valid,
+              "zero-extent baked axis rejected");
+    }
+
+    // --- GH #64: the baked arm axis makes both hands mirror-symmetric for the
+    // bind AND posed AABBs (the posed right AABB would otherwise flip to Z) ---
+    {
+        const NativeHandMesh* arms[2] = { FindNativeHandMesh("Riddick_LeftArm"),
+                                          FindNativeHandMesh("Riddick_RightArm") };
+        for (int i = 0; i < 2; ++i) {
+            const NativeHandMesh* m = arms[i];
+            if (!m) continue;
+            const bool isLeft = (i == 0);
+            for (int posed = 0; posed < 2; ++posed) {
+                if (posed && !m->has_pose()) continue;
+                const float* bmn = posed ? m->posed_bounds_min : m->bounds_min;
+                const float* bmx = posed ? m->posed_bounds_max : m->bounds_max;
+                NativeHandPlacement p = ComputeNativeHandPlacementAlongAxis(
+                    bmn, bmx, isLeft, m->arm_axis, scale);
+                Check(p.valid, "baked arm axis placement valid");
+                if (!p.valid) continue;
+                // Mirror: left backward is +Y, right backward is -Y; both up is
+                // +Z model, both right (local X) is -X model on the left / +X on
+                // the right.
+                Check(Near(p.basis[1][2], 1.0f), "arm up is model +Z");
+                Check(Near(p.basis[0][0], isLeft ? -1.0f : 1.0f),
+                      "arm right mirrors across the body");
+                Check(Near(p.basis[2][1], isLeft ? 1.0f : -1.0f),
+                      "arm backward is +/-model Y (never flipped to Z)");
+                Check(Near(p.basis[2][2], 0.0f), "arm backward has no Z component");
+                // Anchor is the hand end along the baked axis.
+                const float handEnd = isLeft ? bmn[m->arm_axis] : bmx[m->arm_axis];
+                Check(Near(p.anchor[m->arm_axis], handEnd),
+                      "baked arm anchors at its hand end");
+            }
+        }
     }
 
     if (g_failures != 0) {

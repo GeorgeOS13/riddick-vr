@@ -22,13 +22,16 @@ clusters from ``Riddick_B05.xmd`` (the in-game body arms, surface
 
 Coordinate system: the engine's raw model-space floats (Z-up), unconverted.
 
-Geometry: the baked positions **are** the ``NODES`` bind pose — the offline FK
-evaluator (``tools/xmd_fk.py``, ADR-0441/0442) proves the influence-weighted
-blend equals the file geometry to ~1e-14 over the whole shipped corpus, so there
-is no per-cluster reference transform and no bind-inverse. (The Riddick arms
-merely look like a separate reference pose because the bind pose itself holds
-the arms out along +/-Y.) ``.xmd`` stores no bone rotations (``KEYS`` is a string
-metadata map, ADR-0421).
+Geometry: the baked positions are the engine's raw per-cluster model-space
+floats. An earlier revision of this note claimed they *are* the ``NODES`` bind
+pose, citing ``tools/xmd_fk.py --check``; that check cannot support the claim
+(at the bind pose every FK world map is the identity, so the influence-weighted
+blend equals the file geometry by construction for *any* input). The direct
+measurement (``tools/xmd_pose.py``, ADR-0424) shows the two ``Riddick_B05`` arm
+clusters are not at the ``NODES`` bind pose (raised reference pose, ~26-27 unit
+same-bone offsets vs the body). ``.xmd`` stores no bone rotations (``KEYS`` is a
+string metadata map, ADR-0421); the ADR-0441 recipe applies the engine's own
+bind-relative world deltas to the stored geometry, so it remains faithful.
 
 GH #58: ``--pose`` additionally bakes a **posed** variant of every skinned
 cluster from a shipped first-person ``.xsa`` clip. The pose is the ADR-0441
@@ -114,6 +117,22 @@ def _cf(v: float) -> str:
     return s + "f"
 
 
+def _long_axis(bounds_min, bounds_max) -> int:
+    """GH #64: the mesh's long (arm/hand) axis, from its *file* geometry AABB.
+
+    Baked rather than re-derived at draw time: the FK pose (ADR-0443) can deform
+    a cluster's AABB enough that the "largest extent" axis flips (the posed right
+    ``Riddick`` arm becomes nearly cubic), which rotated and mis-anchored the
+    hand. The axis is a property of the mesh, not of a particular pose."""
+    ext = [bounds_max[c] - bounds_min[c] for c in range(3)]
+    axis = 0
+    if ext[1] > ext[axis]:
+        axis = 1
+    if ext[2] > ext[axis]:
+        axis = 2
+    return axis
+
+
 def bake_mesh(model_path: str, cluster: int, name: str, rel_path: str,
               pose=None) -> dict:
     """Decode one cluster into a portable mesh record (no C++ yet).
@@ -133,6 +152,7 @@ def bake_mesh(model_path: str, cluster: int, name: str, rel_path: str,
         "source_size": os.path.getsize(model_path),
         "cluster": cluster,
         "surface_index": surface_index,
+        "arm_axis": _long_axis(mesh.bounds_min, mesh.bounds_max),
         "cluster_count": len(xmd_export.vertex_frame_nodes(x)),
         "vertices": mesh.vertex_count,
         "triangles": mesh.tri_count,
@@ -267,9 +287,15 @@ def render_header(records: list[dict]) -> str:
             out.append(f"//   {rec['source']}")
             out.append(f"//     sha256 {rec['source_sha256']}  size {rec['source_size']}")
     out.append("//")
-    out.append("// Bind pose: .xmd stores only bind-pose node translations (KEYS is a")
-    out.append("// string metadata map, ADR-0421). The file geometry IS the NODES bind pose")
-    out.append("// (tools/xmd_fk.py --check, ADR-0441) -- see docs/adr/0420/0443.")
+    out.append("// Geometry: raw per-cluster model-space floats (Z-up). Note: the file")
+    out.append("// geometry is NOT, in general, the NODES bind pose -- the arm clusters")
+    out.append("// are a raised reference pose (tools/xmd_pose.py, ADR-0424; see the")
+    out.append("// corrected note in native_hand_mesh.h). The ADR-0441 pose recipe")
+    out.append("// applies the engine's own bind-relative deltas to this geometry.")
+    out.append("//")
+    out.append("// arm_axis: the model axis (0=X 1=Y 2=Z) of the mesh's long direction,")
+    out.append("// baked from the file geometry so the native-hand placement is stable")
+    out.append("// across the bind and posed variants (GH #64 / ADR-0444).")
     posed = [rec for rec in records if rec["posed_positions"] is not None]
     if posed:
         first = posed[0]
@@ -291,7 +317,7 @@ def render_header(records: list[dict]) -> str:
         out.append(f"// {rec['name']}: {rec['source']} cluster {rec['cluster']} "
                    f"({rec['vertices']} verts, {rec['triangles']} tris, "
                    f"{rec['uvs']} uvs, {len(rec['bones_used'])} bones, "
-                   f"surface {rec['surface_index']})")
+                   f"surface {rec['surface_index']}, arm_axis {rec['arm_axis']})")
         _emit_vertices(out, ident, rec["positions"], rec["normals"], rec["uv"])
         if rec["posed_positions"] is not None:
             out.append(f"// {rec['name']} posed: {rec['pose_source']}")
@@ -312,9 +338,9 @@ def render_header(records: list[dict]) -> str:
             posed_ptr = "nullptr"
             pose_src = '""'
         out.append(
-            '    { "%s", "%s", %d, %d, %s_Vertices, %d, %s_Indices, %d,'
+            '    { "%s", "%s", %d, %d, %d, %s_Vertices, %d, %s_Indices, %d,'
             % (rec["name"], rec["source"].replace("\\", "\\\\"), rec["cluster"],
-               surface, ident, rec["vertices"], ident,
+               surface, rec["arm_axis"], ident, rec["vertices"], ident,
                len(rec["indices"])))
         out.append("      { %s, %s, %s }, { %s, %s, %s },"
                    % (_cf(mn[0]), _cf(mn[1]), _cf(mn[2]),
@@ -340,7 +366,7 @@ def render_manifest(records: list[dict], generated_from: str) -> dict:
             "name", "source", "source_sha256", "source_size", "cluster",
             "surface_index", "cluster_count", "vertices", "triangles", "uvs",
             "bounds_min", "bounds_max", "skinned", "influences", "bone_space",
-            "bones_used", "skeleton_nodes", "surfaces")}
+            "bones_used", "skeleton_nodes", "surfaces", "arm_axis")}
 
     posed = [rec for rec in records if rec["posed_positions"] is not None]
     return {

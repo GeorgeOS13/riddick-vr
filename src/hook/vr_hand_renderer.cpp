@@ -768,8 +768,18 @@ bool VRHandRenderer::DrawNativeHand(HandSide side) {
     const float* bmax = posed ? mesh->posed_bounds_max : mesh->bounds_max;
 
     const float metersPerUnit = GetWorldScale() * g_vrConfig.nativeHandScale;
-    NativeHandPlacement placement = ComputeNativeHandPlacement(
-        bmin, bmax, side == HandSide::Left, metersPerUnit);
+    // GH #64 / ADR-0444: use the mesh's baked long axis (stable across the bind
+    // and posed variants) instead of re-deriving it from the AABB -- the posed
+    // right arm's AABB is nearly cubic, so the largest-extent rule flipped the
+    // axis and produced a rotated, mis-anchored (non-mirrored) hand.
+    NativeHandPlacement placement;
+    if (mesh->arm_axis >= 0 && mesh->arm_axis <= 2) {
+        placement = ComputeNativeHandPlacementAlongAxis(
+            bmin, bmax, side == HandSide::Left, mesh->arm_axis, metersPerUnit);
+    } else {
+        placement = ComputeNativeHandPlacement(bmin, bmax, side == HandSide::Left,
+                                                metersPerUnit);
+    }
     if (!placement.valid) {
         return false;
     }

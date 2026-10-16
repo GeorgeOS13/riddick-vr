@@ -5,8 +5,9 @@ Builds synthetic ``MOS DATAFILE2.0`` containers (no game install, no input
 synthesis) and asserts the offline forward-kinematics / skinning recipe of
 ADR-0441 is faithful:
 
-  * the bind pose is the identity on every bone (the file geometry *is* the bind
-    pose; no bind-inverse, no load-time rebase);
+  * the bind pose is the identity on every bone (so the blend reproduces the file
+    geometry by construction; this does *not* test that the stored geometry is
+    the ``NODES`` bind pose -- ADR-0424/0444);
   * a bone-local map rotates about the bone's own ``NODES`` translation and adds
     the ``.xsa`` translation displacement directly;
   * ``world = parent . local`` composes down the tree;
@@ -220,6 +221,40 @@ def test_bind_is_identity_end_to_end(tmp_dir):
         os.remove(path)
 
 
+def test_bind_check_is_tautological(tmp_dir):
+    """GH #64/ADR-0444: the bind FK check cannot test whether the geometry is
+    the bind pose. At bind every world map is the identity, so the blend equals
+    ``position * sum(weights)`` for *any* input geometry and ``pose_drift`` is
+    identically zero -- a cluster whose geometry is NOT at the ``NODES`` bind
+    pose still "passes"."""
+    path = tm._write_tmp(_translated_cluster())
+    try:
+        x = mos_xmd.Xmd(path)
+        sk = x.skeleton()
+        worlds = xmd_fk.bind_worlds(sk)
+        for n in sk.used_nodes():
+            assert worlds[n.index] == xmd_fk.IDENTITY_MAT34, n.index
+        mesh = xmd_export.decode_cluster(x, 0)
+        # Shift the geometry far away from the bones' bind positions: this is a
+        # cluster stored in a *different* reference pose (as ADR-0424 measured
+        # for the Riddick arm clusters).
+        shifted = [(p[0] + 37.0, p[1] - 12.0, p[2] + 9.0) for p in mesh.positions]
+        # The shift is genuinely non-bind: every vertex is far from the nearest
+        # bone's bind translation.
+        binds = [sk.nodes[n.index].translation for n in sk.used_nodes()]
+        nearest = min(
+            min(math.dist(v, b) for b in binds) for v in shifted)
+        assert nearest > 5.0, nearest
+        # ... yet the bind FK "check" still reports zero pose drift, because at
+        # bind the blend equals ``position * sum(weights)`` for any geometry.
+        rep = xmd_fk.skin_report(shifted, mesh.skin, worlds)
+        assert rep["pose_drift_max"] < 1e-12, rep
+        # So ``check()``'s criterion would not flag this non-bind geometry.
+        assert not (rep["pose_drift_max"] > xmd_fk.BIND_EPS), rep
+    finally:
+        os.remove(path)
+
+
 def test_pose_rotates_about_bind(tmp_dir):
     path = tm._write_tmp(_translated_cluster())
     try:
@@ -381,7 +416,8 @@ def test_cli_anim_errors(tmp_dir):
 
 def main() -> int:
     tests = (test_quat_and_mat3, test_local_from_bind, test_world_composition,
-             test_bind_is_identity_end_to_end, test_pose_rotates_about_bind,
+             test_bind_is_identity_end_to_end, test_bind_check_is_tautological,
+             test_pose_rotates_about_bind,
              test_skin_weighted_sum, test_pose_from_sequence, test_cli,
              test_cli_requires_input, test_cli_anim_errors)
     with tempfile.TemporaryDirectory() as d:

@@ -112,6 +112,21 @@ def main():
             all(f"nativeHand{axis}" in config for axis in ("Yaw", "Pitch", "Roll")),
             "GH #64: native hands must be two-sided + lit with a tunable orientation")
 
+    # GH #64 / ADR-0444: the native-hand placement must use the mesh's *baked*
+    # long axis (stable across the bind and posed variants) rather than the
+    # largest-extent AABB guess, which flipped for the posed right arm; and the
+    # record must not re-assert the (unproven) "file geometry is the bind pose"
+    # claim.
+    _mesh_hdr = (ROOT / "src/hook/native_hand_mesh.h").read_text(encoding="utf-8")
+    _baker = (ROOT / "tools/xmd_bake.py").read_text(encoding="utf-8")
+    require("ComputeNativeHandPlacementAlongAxis" in pose_header and
+            "mesh->arm_axis" in hands and
+            "arm_axis" in _mesh_hdr and
+            "_long_axis" in _baker and "arm_axis" in _baker and
+            "BIND-POSE PROVENANCE" in _mesh_hdr,
+            "GH #64: the native-hand placement must use the baked mesh axis "
+            "(ADR-0444), not the pose-sensitive AABB extent guess")
+
     # GH #66 (approach 2): per-draw engine viewmodel suppression must be
     # off-by-default, intercept RndrGL's geometry draw entry points, forward to
     # the saved original when the window is closed, and expose a unit-tested

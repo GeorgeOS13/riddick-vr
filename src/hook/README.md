@@ -27,6 +27,11 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   `tests/native_hand_pose_tests.cpp`). GH #64 adds `RotateNativeHandPlacement`
   for an INI-tunable hand-local orientation correction
   (`NativeHandYaw/Pitch/Roll`, degrees).
+- The arm's long axis is **baked** into the asset (`NativeHandMesh::arm_axis`,
+  from the mesh's file geometry) and passed to
+  `ComputeNativeHandPlacementAlongAxis`; it is not re-derived from the AABB at
+  draw time, which flipped for the posed right arm and mis-placed it. See
+  ADR-0444.
 
 ## Native hand draw quality (GH #64)
 - `DrawNativeHand` renders the baked mesh **two-sided** (backface culling
@@ -47,9 +52,11 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   `KEYFRAMETIMES` index; re-bake any other clip with
   `--anim/--sequence/--pose-key`. See ADR-0443.
 - `DrawNativeHand` selects the posed arrays + posed AABB when
-  `[VR] NativeHandPose` is set and a pose exists, otherwise the bind geometry.
-  The pose is an evidence-backed but **unvalidated** VR fit — the placement is
-  still the provisional ADR-0427 mapping and headset tuning remains.
+  `[VR] NativeHandPose` is set and a pose exists, otherwise the file (un-posed)
+  geometry. The file geometry is **not** the `NODES` bind pose for the arm
+  clusters (a raised reference pose, ADR-0424; the `xmd_fk --check` identity is a
+  property of the recipe, ADR-0444). The pose is an evidence-backed but
+  **unvalidated** VR fit — headset tuning remains.
 
 ## Native hand diffuse texture (GH #61)
 - `native_hand_texture.h` + generated `native_hand_texture_data.h`: the real

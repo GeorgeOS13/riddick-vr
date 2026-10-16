@@ -23,11 +23,13 @@
 // arm is mirrored).
 //
 // INFERRED / PROVISIONAL (default OFF, INI-tunable): the arm's long axis is the
-// AABB's largest extent; model +Z is hand-local +Y; the *hand end* (the AABB
-// extreme on the side selected by `isLeft`) is anchored at the hand-local
-// origin; and the caller scales model units to metres. A human with a headset
-// must tune `NativeHandScale` / offsets -- nothing here claims a validated fit,
-// and the procedural `VRHandRenderer` overlay stays the default path.
+// AABB's largest extent -- or, on the draw path, the `arm_axis` baked into the
+// asset from the mesh's file geometry (GH #64), which is stable across poses;
+// model +Z is hand-local +Y; the *hand end* (the AABB extreme on the side
+// selected by `isLeft`) is anchored at the hand-local origin; and the caller
+// scales model units to metres. A human with a headset must tune
+// `NativeHandScale` / offsets -- nothing here claims a validated fit, and the
+// procedural `VRHandRenderer` overlay stays the default path.
 //
 // This header is header-only and only depends on <cmath> so the mapping can be
 // unit tested headlessly (tests/native_hand_pose_tests.cpp) without GL or the
@@ -59,14 +61,20 @@ struct NativeHandPlacement {
     float aabb_max[3] = { 0.0f, 0.0f, 0.0f };
 };
 
-// Derives the placement for a mesh whose model-space AABB is
-// [aabb_min, aabb_max]. `isLeft` selects the side the hand end is on;
-// `meters_per_unit` is the world scale applied to the geometry. Returns an
-// invalid placement for a degenerate (zero-extent / non-finite) AABB.
-inline NativeHandPlacement ComputeNativeHandPlacement(const float aabb_min[3],
-                                                      const float aabb_max[3],
-                                                      bool isLeft,
-                                                      float meters_per_unit) {
+// GH #64: derives the placement with an *explicit* model-space long axis
+// (0 = X, 1 = Y, 2 = Z). This is the form the draw path uses, fed the axis
+// baked into the asset from the mesh's *file* geometry (native_hand_mesh.h
+// `arm_axis`, written by tools/xmd_bake.py). Passing the axis in removes the
+// "largest AABB extent" guess that silently flipped between the bind and posed
+// variants: with the FK pose (ADR-0443) the right arm's AABB becomes nearly
+// cubic, so the largest-extent rule picked model Z for it and produced a
+// 90-degree-rotated, mis-anchored right hand that was no longer the mirror of
+// the left. The axis is a property of the mesh, not of a particular pose, so it
+// must not be re-derived from a deformed AABB. Returns an invalid placement for
+// a degenerate (zero-extent / non-finite) AABB or an out-of-range axis.
+inline NativeHandPlacement ComputeNativeHandPlacementAlongAxis(
+    const float aabb_min[3], const float aabb_max[3], bool isLeft,
+    int long_axis, float meters_per_unit) {
     NativeHandPlacement p;
     for (int c = 0; c < 3; ++c) {
         p.aabb_min[c] = aabb_min[c];
@@ -74,6 +82,9 @@ inline NativeHandPlacement ComputeNativeHandPlacement(const float aabb_min[3],
     }
     if (!(meters_per_unit > 0.0f)) {
         return p; // invalid: no scale
+    }
+    if (long_axis < 0 || long_axis > 2) {
+        return p; // invalid: no baked axis
     }
 
     float extent[3];
@@ -85,11 +96,6 @@ inline NativeHandPlacement ComputeNativeHandPlacement(const float aabb_min[3],
         }
         extent[c] = hi - lo;
     }
-
-    // Long axis = largest AABB extent (the arm runs along it).
-    int long_axis = 0;
-    if (extent[1] > extent[long_axis]) long_axis = 1;
-    if (extent[2] > extent[long_axis]) long_axis = 2;
     if (!(extent[long_axis] > 0.0f)) {
         return p; // invalid: flat mesh, no axis to orient with
     }
@@ -130,6 +136,25 @@ inline NativeHandPlacement ComputeNativeHandPlacement(const float aabb_min[3],
     p.scale = meters_per_unit;
     p.valid = true;
     return p;
+}
+
+// Legacy convenience: pick the long axis as the largest AABB extent (the rule
+// ADR-0427 shipped) and delegate. Kept for callers/tests that only have an AABB
+// (e.g. synthetic meshes); the draw path prefers ComputeNativeHandPlacementAlongAxis
+// with the baked `arm_axis`, which is stable across poses.
+inline NativeHandPlacement ComputeNativeHandPlacement(const float aabb_min[3],
+                                                      const float aabb_max[3],
+                                                      bool isLeft,
+                                                      float meters_per_unit) {
+    float extent[3];
+    for (int c = 0; c < 3; ++c) {
+        extent[c] = aabb_max[c] - aabb_min[c];
+    }
+    int long_axis = 0;
+    if (extent[1] > extent[long_axis]) long_axis = 1;
+    if (extent[2] > extent[long_axis]) long_axis = 2;
+    return ComputeNativeHandPlacementAlongAxis(aabb_min, aabb_max, isLeft,
+                                                long_axis, meters_per_unit);
 }
 
 // GH #64: compose an on-headset orientation correction onto a placement. The

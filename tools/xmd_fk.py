@@ -17,15 +17,19 @@ pose can be reproduced *offline* -- no running game, no runtime read (GH #34):
   * a vertex is the influence **weighted sum** of its bones' world maps
     (``FUN_100254e0``); a normal uses the rotation part only;
   * the world matrices are **bind-relative deltas applied directly to the
-    model-space file geometry**: there is no bind-inverse and no load-time vertex
-    rebase. At the bind pose every world map is the identity and the mesh is
-    *bit-identical* to the file -- the invariant :func:`check` verifies over the
-    whole shipped corpus.
+    model-space file geometry**: no bind-inverse and no load-time vertex rebase
+    sit between the FK output and the blend. At the bind pose every world map is
+    the identity, so the blend equals ``position * sum(weights)`` and
+    :func:`check` finds zero drift over the whole shipped corpus. (Caveat,
+    ADR-0444: that identity is a *property of the recipe*, not a test that the
+    stored geometry is the ``NODES`` bind pose -- see the note on :func:`check`.)
 
 This tool turns that recipe into a deterministic, dependency-free evaluator:
 
-  * ``bind``      - FK at the bind pose (every map identity); confirms the file
-                    geometry *is* the bind pose and reports the identity drift.
+  * ``bind``      - FK at the bind pose (every map identity) and the blend/weight
+                    diagnostics; it reproduces the file geometry by construction
+                    and reports the identity drift (it does not test whether the
+                    geometry is the bind pose -- ADR-0424/0444).
   * ``pose``      - FK from a shipped ``.xsa`` clip (``tools/xsa_anim.py``),
                     sampled at a time; the clip's ``rotation``/``movement`` window
                     slots are indexed by each node's ``rotation_slot`` /
@@ -439,9 +443,16 @@ def _iter_models(root):
 def check(root):
     """Verify the bind FK is the identity on every skinned cluster under ``root``.
 
-    This is ADR-0441's decisive claim made falsifiable over the shipped corpus:
-    with every bone delta at identity the blended positions must equal the file
-    geometry, i.e. there is no bind-inverse and no load-time rebase."""
+    This makes ADR-0441's algebra falsifiable over the shipped corpus: with every
+    bone delta at identity, ``world == local == identity`` and the blend collapses
+    to ``position * sum(weights)``, so a non-zero ``pose_drift`` would mean the FK
+    or the weighting is wrong.
+
+    Caveat (ADR-0444): a *zero* drift does **not** prove the stored geometry is
+    the ``NODES`` bind pose. The identity holds for any input geometry, so this
+    check cannot detect a cluster stored in a different reference pose (ADR-0424
+    measured exactly that for the Riddick arms). It tests the recipe, not the
+    content."""
     problems: list[str] = []
     totals = {"models": 0, "clusters": 0, "skinned_clusters": 0,
               "vertices": 0, "worst_pose_drift": 0.0, "worst_weight_error": 0.0}

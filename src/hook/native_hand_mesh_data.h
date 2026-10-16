@@ -9,9 +9,15 @@
 //   Characters/Pa2/Pa2_Hand_01.xmd
 //     sha256 bdd0dbd180e7aa8304b8da23b389319a910971615d3f115ba3d4bd444865531d  size 43221
 //
-// Bind pose: .xmd stores only bind-pose node translations (KEYS is a
-// string metadata map, ADR-0421). The file geometry IS the NODES bind pose
-// (tools/xmd_fk.py --check, ADR-0441) -- see docs/adr/0420/0443.
+// Geometry: raw per-cluster model-space floats (Z-up). Note: the file
+// geometry is NOT, in general, the NODES bind pose -- the arm clusters
+// are a raised reference pose (tools/xmd_pose.py, ADR-0424; see the
+// corrected note in native_hand_mesh.h). The ADR-0441 pose recipe
+// applies the engine's own bind-relative deltas to this geometry.
+//
+// arm_axis: the model axis (0=X 1=Y 2=Z) of the mesh's long direction,
+// baked from the file geometry so the native-hand placement is stable
+// across the bind and posed variants (GH #64 / ADR-0444).
 //
 // Posed variant (GH #58, ADR-0443): FK(clip) applied as bind-relative
 // deltas + influence-weighted skinning, evaluated offline by
@@ -25,7 +31,7 @@
 namespace RiddickVR {
 namespace NativeHandMeshData {
 
-// Riddick_LeftArm: Characters/Riddick/Riddick_B05.xmd cluster 1 (526 verts, 807 tris, 526 uvs, 24 bones, surface 1)
+// Riddick_LeftArm: Characters/Riddick/Riddick_B05.xmd cluster 1 (526 verts, 807 tris, 526 uvs, 24 bones, surface 1, arm_axis 1)
 inline constexpr NativeHandVertex kMesh0_Vertices[] = {
     { { -1.27831f, -12.7996f, 47.6004f }, { -0.227551f, -0.972976f, 0.0392329f }, { 0.903896f, 0.267686f } },
     { { 0.898035f, -13.3865f, 46.0748f }, { 0.251696f, -0.959589f, -0.125848f }, { 0.966682f, 0.226693f } },
@@ -1290,7 +1296,7 @@ inline constexpr unsigned short kMesh0_Indices[] = {
     458, 457, 460, 466, 467, 524, 360, 525, 359,
 };
 
-// Riddick_RightArm: Characters/Riddick/Riddick_B05.xmd cluster 2 (344 verts, 547 tris, 344 uvs, 20 bones, surface 2)
+// Riddick_RightArm: Characters/Riddick/Riddick_B05.xmd cluster 2 (344 verts, 547 tris, 344 uvs, 20 bones, surface 2, arm_axis 1)
 inline constexpr NativeHandVertex kMesh1_Vertices[] = {
     { { -1.2203f, 25.3636f, 44.3264f }, { 0.0157696f, 0.749054f, -0.662321f }, { 0.452923f, 0.0270156f } },
     { { -1.39599f, 25.3103f, 44.3306f }, { -0.833819f, 0.464107f, -0.298916f }, { 0.496301f, 0.039579f } },
@@ -2126,7 +2132,7 @@ inline constexpr unsigned short kMesh1_Indices[] = {
     74, 89, 268, 269, 267, 270, 234, 246, 233,
 };
 
-// Pa2_Hand: Characters/Pa2/Pa2_Hand_01.xmd cluster 0 (138 verts, 180 tris, 138 uvs, 0 bones, surface 0)
+// Pa2_Hand: Characters/Pa2/Pa2_Hand_01.xmd cluster 0 (138 verts, 180 tris, 138 uvs, 0 bones, surface 0, arm_axis 1)
 inline constexpr NativeHandVertex kMesh2_Vertices[] = {
     { { -1.15398f, 1.77774f, 2.1668f }, { 0.102223f, 0.770603f, 0.629064f }, { 0.9975f, 0.494077f } },
     { { -0.883863f, 2.1066f, 1.72047f }, { -0.00788551f, 0.749124f, 0.662383f }, { 0.9975f, 0.724095f } },
@@ -2316,7 +2322,7 @@ inline constexpr unsigned short kMesh2_Indices[] = {
     42, 46, 41, 68, 62, 63, 80, 83, 79, 4, 136, 137,
 };
 
-// Pa2_Hand_Detail: Characters/Pa2/Pa2_Hand_01.xmd cluster 1 (540 verts, 1076 tris, 0 uvs, 0 bones, surface 0)
+// Pa2_Hand_Detail: Characters/Pa2/Pa2_Hand_01.xmd cluster 1 (540 verts, 1076 tris, 0 uvs, 0 bones, surface 0, arm_axis 1)
 inline constexpr NativeHandVertex kMesh3_Vertices[] = {
     { { 0.196735f, -3.73136f, -1.79108f }, { -0.793653f, 0.353608f, -0.495051f }, { 0.0f, 0.0f } },
     { { 0.144385f, -2.59486f, -0.891003f }, { -0.793653f, 0.353608f, -0.495051f }, { 0.0f, 0.0f } },
@@ -3133,19 +3139,19 @@ inline constexpr unsigned short kMesh3_Indices[] = {
 };
 
 inline constexpr NativeHandMesh kMeshes[] = {
-    { "Riddick_LeftArm", "Characters/Riddick/Riddick_B05.xmd", 1, 1, kMesh0_Vertices, 526, kMesh0_Indices, 2421,
+    { "Riddick_LeftArm", "Characters/Riddick/Riddick_B05.xmd", 1, 1, 1, kMesh0_Vertices, 526, kMesh0_Indices, 2421,
       { -4.69004f, -25.4472f, 45.1451f }, { 3.5578f, -5.49224f, 52.5026f },
       kMesh0_Posed_Vertices, "FPSMelee.xsa:Mel_ShaUnEquip@key17=0.333400s",
       { 0.600626f, -26.0736f, 44.6371f }, { 12.2006f, -8.56649f, 53.028f } },
-    { "Riddick_RightArm", "Characters/Riddick/Riddick_B05.xmd", 2, 2, kMesh1_Vertices, 344, kMesh1_Indices, 1641,
+    { "Riddick_RightArm", "Characters/Riddick/Riddick_B05.xmd", 2, 2, 1, kMesh1_Vertices, 344, kMesh1_Indices, 1641,
       { -3.52542f, 17.6062f, 44.2224f }, { 1.29398f, 25.4471f, 50.5172f },
       kMesh1_Posed_Vertices, "FPSMelee.xsa:Mel_ShaUnEquip@key17=0.333400s",
       { -4.18334f, 11.9478f, 46.3676f }, { 3.74486f, 19.7703f, 54.6128f } },
-    { "Pa2_Hand", "Characters/Pa2/Pa2_Hand_01.xmd", 0, 0, kMesh2_Vertices, 138, kMesh2_Indices, 540,
+    { "Pa2_Hand", "Characters/Pa2/Pa2_Hand_01.xmd", 0, 0, 1, kMesh2_Vertices, 138, kMesh2_Indices, 540,
       { -1.50351f, -3.73136f, -1.99666f }, { 2.81197f, 2.34971f, 2.72413f },
       nullptr, "",
       { -1.50351f, -3.73136f, -1.99666f }, { 2.81197f, 2.34971f, 2.72413f } },
-    { "Pa2_Hand_Detail", "Characters/Pa2/Pa2_Hand_01.xmd", 1, 0, kMesh3_Vertices, 540, kMesh3_Indices, 3228,
+    { "Pa2_Hand_Detail", "Characters/Pa2/Pa2_Hand_01.xmd", 1, 0, 1, kMesh3_Vertices, 540, kMesh3_Indices, 3228,
       { -1.50351f, -3.73136f, -1.99666f }, { 2.81197f, 2.34971f, 2.72413f },
       nullptr, "",
       { -1.50351f, -3.73136f, -1.99666f }, { 2.81197f, 2.34971f, 2.72413f } },
