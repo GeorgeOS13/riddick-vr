@@ -673,12 +673,13 @@ bool VRHandRenderer::DrawNativeHand(HandSide side) {
                       g_vrConfig.nativeHandOffsetY,
                       g_vrConfig.nativeHandOffsetZ);
 
-    // Inmate sleeve/skin-neutral tone, honouring the same per-hand fade as the
-    // procedural primitives.
-    const float r = 0.52f, g = 0.47f, b = 0.41f;
+    // Warm inmate skin tone approximating the RIDDICK_ARMSCAR_D diffuse, with a
+    // two-sided lambert term from the baked normals so the mesh reads as a hand
+    // rather than a flat grey blob. The real .xtc diffuse texture is not yet
+    // bound (tracked as GH #60); this is the skin-tone fallback.
+    const float r = 0.55f, g = 0.42f, b = 0.33f;
     const float f = (std::clamp)(m_currentFade, 0.0f, 1.0f);
-    if (m_useAlphaFade) s_gl.glColor4f(r, g, b, f);
-    else s_gl.glColor3f(r * f, g * f, b * f);
+    const float lx = 0.35f, ly = 0.82f, lz = 0.45f; // hand-local light dir
 
     s_gl.glBegin(GL_TRIANGLES);
     for (unsigned int i = 0; i + 2 < mesh->index_count; i += 3) {
@@ -692,6 +693,13 @@ bool VRHandRenderer::DrawNativeHand(HandSide side) {
             float localNormal[3];
             MapNativeHandPoint(placement, v.position, localPos);
             MapNativeHandNormal(placement, v.normal, localNormal);
+
+            float ndl = localNormal[0] * lx + localNormal[1] * ly + localNormal[2] * lz;
+            if (ndl < 0.0f) ndl = -ndl; // two-sided (no backface culling guarantee)
+            const float shade = 0.35f + 0.65f * ndl;
+            if (m_useAlphaFade) s_gl.glColor4f(r * shade, g * shade, b * shade, f);
+            else s_gl.glColor3f(r * shade * f, g * shade * f, b * shade * f);
+
             s_gl.glNormal3f(localNormal[0], localNormal[1], localNormal[2]);
             s_gl.glVertex3f(localPos[0], localPos[1], localPos[2]);
         }
