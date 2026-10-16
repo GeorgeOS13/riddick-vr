@@ -6,6 +6,8 @@
 #include <chrono>
 #include <thread>
 #include <cmath>
+#include <cstdio>
+#include <cstdint>
 
 namespace RiddickVR {
 
@@ -1470,6 +1472,10 @@ bool OpenXRManager::LoadScenario(const std::string& path) {
 
 void OpenXRManager::ApplyScenarioFrame(RiddickVRSharedState& state, uint32_t frame) {
     if (!m_scenarioLoaded || m_scenarioKeys.empty()) return;
+    // GH #68: hold the timeline at its first key until gameplay is detected.
+    if (m_scenarioStartOnGameplay) {
+        frame = (m_scenarioStartFrame != UINT32_MAX) ? (frame - m_scenarioStartFrame) : 0;
+    }
     const ScenarioKey* a = &m_scenarioKeys.front();
     const ScenarioKey* b = &m_scenarioKeys.back();
     if (frame <= a->frame) { b = a; }
@@ -1552,6 +1558,7 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
         // GH #21/#38 coverage: observe hook->host haptic pulses in mock mode
         // to prove the publish path works end-to-end without a headset.
         bool sawHookHaptics = false;
+        bool lastFrameCinema = true; // GH #68: until the game says otherwise
         uint32_t hapticFrames = 0;
         auto lastClientSeen = std::chrono::steady_clock::now();
 
@@ -1698,6 +1705,19 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                     if (clientState.leftEyeSharedHandle && clientState.rightEyeSharedHandle) {
                         EnsureSharedTextures(clientState.leftEyeSharedHandle, clientState.rightEyeSharedHandle);
                     }
+                    // GH #68: cinema/menu frames are mono by design and must not
+                    // start the scenario or count toward the frame budget.
+                    lastFrameCinema = clientState.cinemaMode;
+                    if (clientState.cinemaMode) {
+                        m_gameplayStreak = 0;
+                    } else if (m_gameplayStreak < UINT32_MAX) {
+                        m_gameplayStreak++;
+                    }
+                    if (m_scenarioLoaded && m_scenarioStartFrame == UINT32_MAX && m_gameplayStreak >= 30) {
+                        m_scenarioStartFrame = totalFrames;
+                        std::cout << "[Mock Host] Gameplay detected at frame " << totalFrames
+                                  << "; scenario timeline starts" << std::endl;
+                    }
                     // GH #21/#38: consume-on-read mirror of RenderFrame — log
                     // hook pulses once, then clear so latching is detectable.
                     if (clientState.leftHapticPulse > 0.05f || clientState.rightHapticPulse > 0.05f) {
@@ -1725,7 +1745,8 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                     const auto nowTs = std::chrono::steady_clock::now();
                     const double dtMs = std::chrono::duration<double, std::milli>(nowTs - s_prevFrameTs).count();
                     s_prevFrameTs = nowTs;
-                    if (dtMs > 0.0 && dtMs < 1000.0) { // ignore idle gaps
+                    // GH #68: only gameplay frames count; cinema/menu pacing is not the mod's budget.
+                    if (!lastFrameCinema && dtMs > 0.0 && dtMs < 1000.0) { // ignore idle gaps
                         s_sumFrameMs += dtMs;
                         if (dtMs > s_maxFrameMs) s_maxFrameMs = dtMs;
                         if (dtMs > s_budgetMs) s_overBudget++;
@@ -1736,7 +1757,8 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                                       << (s_sumFrameMs / s_frameSamples)
                                       << " max_ms=" << s_maxFrameMs
                                       << " over_budget=" << s_overBudget
-                                      << " budget_ms=" << s_budgetMs << std::endl;
+                                      << " budget_ms=" << s_budgetMs
+                                      << " gameplay_only=1" << std::endl;
                         }
                     }
                 }
@@ -1754,7 +1776,32 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                     const bool okR = SaveTextureToBMP(m_d3d11Device, m_d3d11Context, m_sharedRightTex, rightPath);
                     std::cout << "[Mock Host] Captured stereo frame " << totalFrames
                               << " (L=" << (okL ? "ok" : "err") << " R=" << (okR ? "ok" : "err")
-                              << ") -> " << leftPath << " / " << rightPath << std::endl;
+                              << ") -> " << leftPath << " / " << rightPath
+                              << " mode=" << (lastFrameCinema ? "cinema" : "gameplay") << std::endl;
+                    // GH #68: per-frame pose/matrix sidecar so a capture can be checked offline.
+                    char metaPath[MAX_PATH];
+                    sprintf_s(metaPath, "%s\\frame_%04u.json", m_dumpDir.c_str(), totalFrames);
+                    FILE* meta = nullptr;
+                    if (fopen_s(&meta, metaPath, "w") == 0 && meta) {
+                        auto writeMat = [&](const char* name, const float* m, bool last) {
+                            fprintf(meta, "  \"%s\": [", name);
+                            for (int i = 0; i < 16; ++i)
+                                fprintf(meta, "%s%.6g", i ? ", " : "", static_cast<double>(m[i]));
+                            fprintf(meta, "]%s\n", last ? "" : ",");
+                        };
+                        fprintf(meta, "{\n  \"frame\": %u,\n  \"mode\": \"%s\",\n", totalFrames,
+                                lastFrameCinema ? "cinema" : "gameplay");
+                        fprintf(meta, "  \"hmd\": {\"pos\": [%.6g, %.6g, %.6g], \"quat\": [%.6g, %.6g, %.6g, %.6g]},\n",
+                                static_cast<double>(state.hmdPose.position.x), static_cast<double>(state.hmdPose.position.y),
+                                static_cast<double>(state.hmdPose.position.z),
+                                static_cast<double>(state.hmdPose.orientation.x), static_cast<double>(state.hmdPose.orientation.y),
+                                static_cast<double>(state.hmdPose.orientation.z), static_cast<double>(state.hmdPose.orientation.w));
+                        writeMat("leftEyeView", state.leftEyeView.m, false);
+                        writeMat("rightEyeView", state.rightEyeView.m, false);
+                        writeMat("leftEyeProjection", state.leftEyeProjection.m, true);
+                        fprintf(meta, "}\n");
+                        fclose(meta);
+                    }
                 }
 
                 ipcHost.SignalFrameConsumed();
