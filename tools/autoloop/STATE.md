@@ -2,6 +2,52 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 12 — 2026-10-16 02:25 (scheduled loop)
+- **Unit:** GH #58 → #46 — pin the `.xsa` **animation-set** payload
+  (`COMPRESSEDANIMATIONSET2`) to the shipped `MXR.dll` loader so per-bone
+  rotations have an **offline**, verifiable source (ADR-0421 left this open).
+- Finding (real evidence, read-only; Ghidra 12.1.4 via `rea`):
+  - `.xsa` is the same `MOS DATAFILE2.0` container; its first child node is
+    `COMPRESSEDANIMATIONSET2`. Dispatcher `FUN_1001d7c0` (`rea xrefs MXR.dll
+    0x10144580` → `{0x1001d8e2, 0x10076d4e}`) probes `ANIMATIONSET` /
+    `ANIMATIONTRACKSET` / `COMPRESSEDANIMATIONSET` / `COMPRESSEDANIMATIONSET2`;
+    for the last it allocates a `CXR_Anim_Compressed` (vtable `0x101442b8`) and
+    calls slot `+0x20` = **`FUN_10076d20`** (`.\XRAnimCompressed.cpp`), which
+    reads each chunk as `element_size * node.count` raw bytes.
+  - Element layout: `QUATERNIONS` 8 B (`CXR_Anim_Quatint16`, 4 x i16 → /32767
+    unit quaternion), `MOVES` 12 B (3 x f32 translation), `TRACKINDICES`/
+    `QUATERNIONINDICES` 2 B (u16), `KEYFRAMETIMES` 4 B (f32), `TRACKS` 4 B
+    (`CXR_Anim_CompressedTrack` = u16 `start` + u16 `flags`), `DATAKEYS`/
+    `SEQUENCES` variable. Sequence records = `CXR_Anim::ReadCompressed`
+    (`FUN_1001a5e0` + `FUN_100774f0`), version **0x103** for every shipped clip.
+  - RTTI strings (`.?AVCXR_Anim_Quatint16@@`, `CXR_Anim_CompressedTrack`, ...)
+    confirm the encodings.
+- Change:
+  - `tools/xsa_anim.py` (new): read-only decoder + `AnimSet.validate()`;
+    `--inventory`/`--check`/`--tracks`/`--quaternions`/`--json`.
+  - `tools/test_xsa_anim.py` (new): 9 synthetic-container tests.
+  - `docs/adr/0422-xsa-compressed-animation-set.md` (new);
+    `docs/rea/mos-xmd-format.md` `.xsa` section; ADR-0421 follow-up marked
+    resolved to path (a); `.github/workflows/vr-worker.yml` (+test step).
+- Evidence: `xsa_anim.py --inventory <game>\Content --check` → **313/313 `ok`**,
+  **0** failures (**23** non-anim files skipped: 3 legacy `ANIMATIONSET` `.xsa`
+  + 20 `.xag`). Corpus: **2,710,465** pooled quaternions (all unit, |norm−1| ≤
+  **3.0e-5**), **251,790** moves, **110,046** tracks (**0** `start` out of range,
+  flags ⊂ `{0,1,0x8000,0x8001}`), **3,232** sequences (names like `Gren_Active`,
+  `Hangrail`, `Ladder`), **105,801** keyframe times; **0** fixed-chunk tiling and
+  **0** `SEQUENCES` tiling violations. `mos_xmd.py --inventory <game>\Content\
+  Models --check` still **631/631 ok**; `test_mos_xmd.py`, `test_xmd_export.py`,
+  `test_xmd_bake.py`, `test_xsa_anim.py`, `validate_addresses.py`,
+  `verify_hook_init.py`, `verify_reported_fixes.py`, `scenario_tests.py --check`
+  all PASS. No C++ changed, so `build-all.ps1`/CTest were not rerun.
+- Blocker: none. **Next:** pin the **track → skeleton-node** mapping (how
+  `TRACKS[i]` binds to a `.xmd` `NODES` bone and its key-block length) and the
+  `QUATERNIONINDICES` indirection (`Grenade.xsa` has a 1-entry `QUATERNIONS`
+  pool yet `QUATERNIONINDICES` values up to 23 → not a plain pool index). Then
+  bake a rest/idle pose and wire `VRHandRenderer` behind a config flag
+  (procedural overlay retained as fallback).
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 11 — 2026-10-16 00:47 (scheduled loop)
 - **Unit:** GH #46 — pin the `.xmd` `KEYS` chunk to the shipped loader and prove
   it is a **string metadata map**, not bone rotations (ADR-0419/0420 and the

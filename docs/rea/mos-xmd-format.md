@@ -85,6 +85,28 @@ rea decompile "<game>\System\Win32_x86\MCCDyn.dll" --procedure 0x10082f15 --form
 ```
 Container-level inventory without a decompiler: `python tools/mos_xmd.py --inventory <Content/Models>`.
 
+## `.xsa` animation sets (`COMPRESSEDANIMATIONSET2`) — in `MXR.dll`
+`.xsa` clips are the same `MOS DATAFILE2.0` container; their first child node is
+`COMPRESSEDANIMATIONSET2`. Reader `FUN_10076d20` (`.\XRAnimCompressed.cpp`,
+vtable `0x101442b8 +0x20`), reached from the dispatcher `FUN_1001d7c0`. It is the
+offline source of per-bone **rotations** (ADR-0422). Layout:
+
+```
+QUATERNIONS        count * 4 x i16     -> /32767  (CXR_Anim_Quatint16, unit)
+MOVES              count * 3 x f32     (translation, model units)
+TRACKINDICES       count * u16
+QUATERNIONINDICES  count * u16         (per-key-slot index pool)
+KEYFRAMETIMES      count * f32         (keyframe times)
+TRACKS             count * { u16 start; u16 flags }   (CXR_Anim_CompressedTrack)
+DATAKEYS           variable            (opaque)
+SEQUENCES          variable, version 0x103
+```
+
+Decoded read-only by `tools/xsa_anim.py` (`--inventory <Content> --check` →
+313/313 ok). `.xag` files are animation **graphs** (states/actions/layers) and
+contain no `COMPRESSEDANIMATIONSET2`. See
+`docs/adr/0422-xsa-compressed-animation-set.md`.
+
 ## Next steps (for the loop/next agent)
 1. Finish the `VERTEXFRAMES` packing and `BONEDEFORM` stride by reading the
    remainder of `CTriangleMeshCore::Read` + `FUN_1007d260` and validating

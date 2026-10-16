@@ -122,6 +122,9 @@ corpus observation rather than a failure.
   (b) read the engine's live per-bone matrices out of the game process
   (in-process; cannot be validated headlessly). Deciding between them is the next
   scoping step for the native hand draw path (GH #46).
+  **Resolved toward (a)** by ADR-0422 / `tools/xsa_anim.py`: the `.xsa`
+  `COMPRESSEDANIMATIONSET2` sets decode offline (pooled `QUATERNIONS` +
+  `MOVES` + `TRACKS` + named `SEQUENCES`, `--check` 313/313 ok).
 - The 18 `MODEL`-vs-relpath mismatches and 7 `MODEL`-less models are not
   itemised; they are alias/shared models and do not affect the layout.
 
