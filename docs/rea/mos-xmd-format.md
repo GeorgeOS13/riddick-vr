@@ -208,3 +208,20 @@ transform, not one global `NODES` bind. `docs/adr/0424-xmd-cluster-reference-pos
    `BONEMATRIXMAP` palette/id is **not** it either (it is a bone-index palette
    plus a per-cluster id — ADR-0426), so the remaining candidate is a runtime
    per-cluster matrix in the model/skin class (built from the live skeleton).
+
+## Draw-side skinning (ADR-0428) — the per-cluster transform does not exist here
+`CXR_Model_TriangleMesh::Cluster_TransformBones_V_N_TgU_TgV` =
+**`FUN_100254e0(mesh, provider)`** in MXR.dll (named by its warning string at VA
+`0x10144a1d`; emitter `FUN_10025ced`, four call sites `0x10025595`..`0x100255ad`).
+It reads only the mesh's geometry (`FUN_1007ee20`/`1007f100`/`100825a0`/`10082750`),
+its per-vertex influence records (`FUN_1007f9f0`) and its influence pool
+(`FUN_1007fa40`, `{u16 bone; u16 pad; f32 weight}`), and fetches **one 3×4 matrix
+per bone** from the second argument via **`FUN_10022f90(provider, bone)`**. The
+vertex is then `Σ w_k·M_k` (a plain/weight-blended matrix sum): no
+bind/reference/inverse matrix is read from the mesh at all. So the hunt for a
+"per-cluster reference transform" in the `.xmd` is **closed (negative)**; the
+reference lives inside the matrix *provider*. Pseudocode:
+`docs/rea/reference/MXR_ClusterTransformBones.txt`.
+
+**Next probe (two functions):** `FUN_10022f90` (does it return `world` or
+`world·bind_inverse`?) and its caller `0x1002dcc0` (which object is the provider).

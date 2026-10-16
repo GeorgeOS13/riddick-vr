@@ -10,11 +10,18 @@
 //
 // This header is intentionally dependency-free and header-only so it can be
 // unit-tested headlessly (``tests/native_hand_mesh_tests.cpp``) without a GL
-// context or the game. The geometry is the engine's raw model space (Z-up) and
-// is the artist's bind pose: ``.xmd`` stores bind-pose translations only, so a
-// consumer that poses the mesh must animate the bones itself. Until that
-// pose pipeline lands the procedural ``VRHandRenderer`` stays the default and
-// this asset is consumed read-only.
+// context or the game. The geometry is the engine's raw model space (Z-up).
+//
+// IMPORTANT (ADR-0424): the stored geometry is **not** universally the
+// skeleton's ``NODES`` bind pose. Sibling clusters on shared bones (e.g. the
+// Riddick legs vs. the shadow body) agree to <1 unit, but the arm clusters are
+// disjoint from the body and carry a large baked reference pose (arms up/out),
+// so a skinned consumer cannot assume "bind pose in, identity out". ``.xmd``
+// stores no bone rotations at all (``KEYS`` is a string metadata map,
+// ADR-0421), so a consumer that poses the mesh must supply both the bone
+// animation **and** the per-cluster reference transform (ADR-0424/0426, GH #59).
+// Until that pipeline lands the procedural ``VRHandRenderer`` stays the default
+// and this asset is consumed read-only.
 
 namespace RiddickVR {
 

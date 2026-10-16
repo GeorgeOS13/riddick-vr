@@ -1,0 +1,312 @@
+# MXR_ClusterTransformBones
+# provider: ghidra 12.1.4
+# subject : MXR.dll sha256=06424f55f5a0f85eb09b5fbd69491c7f6a88de808c26c513e8dac180f3c2052d
+# evidence_id: ev_bd1a98804574a4f32ad2943cc6f8902daf38e9afc5d74e2f988d60b4e81c259b
+# NOTE: FUN_100254e0 = the draw-side skinning for
+#       CXR_Model_TriangleMesh::Cluster_TransformBones_V_N_TgU_TgV (the warning
+#       string at 0x10144a1d names that method; emitter FUN_10025ced).
+#       param_1 = mesh (CTriangleMeshCore): FUN_1007e770 -> vertex count,
+#       FUN_1007f9f0 -> per-vertex influence records {u8 count; u16 start} (stride 4),
+#       FUN_1007fa40 -> influence pool (8-byte entries {u16 bone; u16 pad; f32 weight}).
+#       param_2 = matrix provider (the live skeleton):
+#       FUN_10022f90(param_2, bone) -> const float* 3x4 (12-float) matrix.
+#       Per vertex: count==1 -> v' = M*v; count==2 -> weight-blend of two matrices;
+#       count>2 -> linear weighted sum of the up-to-4 matrices, applied once.
+#       NO bind/reference matrix is read from the mesh on this path.
+# calls fine: FUN_100254e0 is called from 0x1002dcc0.
+# Ghidra pseudocode, not original source. Read-only artefact of REA analysis.
+------------------------------------------------------------------------------
+
+void FUN_100254e0(void *param_1,void *param_2)
+
+{
+  float fVar1;
+  float fVar2;
+  float fVar3;
+  float fVar4;
+  float fVar5;
+  float *pfVar6;
+  float *pfVar7;
+  float *pfVar8;
+  int iVar9;
+  int iVar10;
+  int iVar11;
+  int iVar12;
+  int iVar13;
+  uint uVar14;
+  float *pfVar15;
+  float *pfVar16;
+  int iVar17;
+  undefined4 extraout_ECX;
+  undefined4 extraout_ECX_00;
+  float *pfVar18;
+  undefined4 extraout_EDX;
+  int iVar19;
+  int iVar20;
+  ulonglong uVar21;
+  float *pfStack0000000c;
+  int iStack_64;
+  int local_50;
+  uint local_4c;
+  float local_48;
+  float local_44;
+  float local_40;
+  float local_3c;
+  float local_38;
+  ushort *local_34;
+  ushort *local_1c;
+  float *local_10;
+  float *local_8;
+  
+  local_50 = FUN_1007e770((int)param_1);
+  local_10 = DAT_10172210;
+  iVar12 = DAT_1017220c;
+  iVar11 = DAT_10172208;
+  iVar13 = DAT_10172204;
+  if ((((DAT_10172204 != 0) && (DAT_10172208 != 0)) && (DAT_1017220c != 0)) &&
+     (DAT_10172210 != (float *)0x0)) {
+    FUN_10079ab0((int)param_1);
+    FUN_101208fa(extraout_ECX);
+    uVar21 = FUN_1011f520(extraout_ECX_00,extraout_EDX);
+    iVar9 = (int)uVar21;
+    pfStack0000000c = (float *)iVar9;
+    FUN_10079ab0((int)param_1);
+    iStack_64 = 0x1002556b;
+    pfVar6 = (float *)FUN_1007ee20(param_1,iVar9);
+    iStack_64 = 0x10025575;
+    pfVar7 = (float *)FUN_1007f100(param_1,iVar9);
+    iStack_64 = 0x10025582;
+    pfVar8 = (float *)FUN_100825a0(param_1,(int)pfStack0000000c);
+    iStack_64 = 0x10025590;
+    pfStack0000000c = (float *)FUN_10082750(param_1,(int)pfStack0000000c);
+    if (((pfVar6 == (float *)0x0) || (pfVar7 == (float *)0x0)) ||
+       ((pfVar8 == (float *)0x0 || (pfStack0000000c == (float *)0x0)))) {
+      FUN_10005990(&iStack_64,&DAT_10144a10);
+      ConsoleWrite();
+    }
+    else {
+      iVar9 = FUN_1007f9f0((int)param_1);
+      iVar10 = FUN_1007fa40((int)param_1);
+      if (0 < local_50) {
+        local_34 = (ushort *)(iVar9 + 2);
+        iVar9 = iVar13 - iVar11;
+        iVar19 = iVar12 - iVar11;
+        iVar20 = (int)local_10 - iVar11;
+        local_8 = (float *)(iVar12 + 8);
+        pfVar18 = (float *)(iVar11 + 4);
+        iVar11 = iVar13 - iVar12;
+        iVar12 = (int)local_10 - iVar12;
+        iVar13 = iVar13 - (int)local_10;
+        do {
+          fVar1 = 0.0;
+          local_4c = (uint)*(byte *)((int)local_34 + -1);
+          uVar14 = (uint)*local_34;
+          if (local_4c == 1) {
+            iStack_64 = 0x1002565b;
+            pfVar15 = (float *)FUN_10022f90(param_2,(uint)*(ushort *)(iVar10 + uVar14 * 8));
+            fVar1 = *pfVar6;
+            fVar2 = pfVar6[1];
+            fVar3 = pfVar6[2];
+            *(float *)(iVar13 + (int)local_10) =
+                 fVar2 * pfVar15[3] + fVar3 * pfVar15[6] + *pfVar15 * fVar1 + pfVar15[9];
+            *(float *)(iVar9 + (int)pfVar18) =
+                 fVar2 * pfVar15[4] + fVar3 * pfVar15[7] + pfVar15[1] * fVar1 + pfVar15[10];
+            *(float *)(iVar11 + (int)local_8) =
+                 fVar2 * pfVar15[5] + fVar3 * pfVar15[8] + pfVar15[2] * fVar1 + pfVar15[0xb];
+            fVar1 = *pfVar7;
+            fVar2 = pfVar7[1];
+            fVar3 = pfVar7[2];
+            pfVar18[-1] = fVar2 * pfVar15[3] + fVar3 * pfVar15[6] + *pfVar15 * fVar1;
+            *pfVar18 = fVar2 * pfVar15[4] + fVar3 * pfVar15[7] + pfVar15[1] * fVar1;
+            pfVar18[1] = fVar2 * pfVar15[5] + fVar3 * pfVar15[8] + pfVar15[2] * fVar1;
+            fVar1 = *pfVar8;
+            fVar2 = pfVar8[1];
+            fVar3 = pfVar8[2];
+            local_8[-2] = fVar2 * pfVar15[3] + fVar3 * pfVar15[6] + fVar1 * *pfVar15;
+            *(float *)(iVar19 + (int)pfVar18) =
+                 fVar2 * pfVar15[4] + fVar3 * pfVar15[7] + pfVar15[1] * fVar1;
+            *local_8 = fVar2 * pfVar15[5] + fVar3 * pfVar15[8] + pfVar15[2] * fVar1;
+            fVar1 = *pfStack0000000c;
+            fVar2 = pfStack0000000c[1];
+            fVar3 = pfStack0000000c[2];
+            *local_10 = fVar2 * pfVar15[3] + fVar3 * pfVar15[6] + fVar1 * *pfVar15;
+            *(float *)(iVar20 + (int)pfVar18) =
+                 fVar2 * pfVar15[4] + fVar3 * pfVar15[7] + pfVar15[1] * fVar1;
+            *(float *)(iVar12 + (int)local_8) =
+                 fVar2 * pfVar15[5] + fVar3 * pfVar15[8] + pfVar15[2] * fVar1;
+          }
+          else if (local_4c == 2) {
+            iStack_64 = 0x100257c4;
+            pfVar15 = (float *)FUN_10022f90(param_2,(uint)*(ushort *)(iVar10 + uVar14 * 8));
+            fVar1 = *(float *)(iVar10 + 4 + uVar14 * 8);
+            iStack_64 = 0x100257e2;
+            pfVar16 = (float *)FUN_10022f90(param_2,(uint)*(ushort *)(iVar10 + 8 + uVar14 * 8));
+            fVar2 = *(float *)(iVar10 + 0xc + uVar14 * 8);
+            fVar5 = fVar2 * *pfVar16 + *pfVar15 * fVar1;
+            fVar4 = pfVar15[3] * fVar1 + pfVar16[3] * fVar2;
+            fVar3 = pfVar15[6] * fVar1 + pfVar16[6] * fVar2;
+            *(float *)(iVar13 + (int)local_10) =
+                 *pfVar6 * fVar5 +
+                 pfVar6[2] * fVar3 + pfVar6[1] * fVar4 + pfVar15[9] * fVar1 + pfVar16[9] * fVar2;
+            pfVar18[-1] = *pfVar7 * fVar5 + pfVar7[2] * fVar3 + pfVar7[1] * fVar4;
+            local_8[-2] = pfVar8[1] * fVar4 + fVar5 * *pfVar8 + pfVar8[2] * fVar3;
+            *local_10 = fVar4 * pfStack0000000c[1] + fVar5 * *pfStack0000000c +
+                        pfStack0000000c[2] * fVar3;
+            fVar5 = pfVar15[1] * fVar1 + pfVar16[1] * fVar2;
+            fVar4 = pfVar15[4] * fVar1 + pfVar16[4] * fVar2;
+            fVar3 = pfVar15[7] * fVar1 + pfVar16[7] * fVar2;
+            *(float *)(iVar9 + (int)pfVar18) =
+                 *pfVar6 * fVar5 +
+                 pfVar6[2] * fVar3 + pfVar6[1] * fVar4 + pfVar15[10] * fVar1 + pfVar16[10] * fVar2;
+            *pfVar18 = *pfVar7 * fVar5 + pfVar7[2] * fVar3 + pfVar7[1] * fVar4;
+            *(float *)(iVar19 + (int)pfVar18) =
+                 pfVar8[1] * fVar4 + fVar5 * *pfVar8 + pfVar8[2] * fVar3;
+            *(float *)(iVar20 + (int)pfVar18) =
+                 fVar4 * pfStack0000000c[1] + fVar5 * *pfStack0000000c + pfStack0000000c[2] * fVar3;
+            fVar5 = pfVar15[2] * fVar1 + pfVar16[2] * fVar2;
+            fVar4 = pfVar15[5] * fVar1 + pfVar16[5] * fVar2;
+            fVar3 = pfVar15[8] * fVar1 + pfVar16[8] * fVar2;
+            *(float *)(iVar11 + (int)local_8) =
+                 *pfVar6 * fVar5 +
+                 pfVar6[2] * fVar3 + pfVar6[1] * fVar4 + pfVar16[0xb] * fVar2 + pfVar15[0xb] * fVar1
+            ;
+            pfVar18[1] = *pfVar7 * fVar5 + pfVar7[2] * fVar3 + pfVar7[1] * fVar4;
+            *local_8 = pfVar8[1] * fVar4 + fVar5 * *pfVar8 + pfVar8[2] * fVar3;
+            *(float *)(iVar12 + (int)local_8) =
+                 fVar4 * pfStack0000000c[1] + fVar5 * *pfStack0000000c + pfStack0000000c[2] * fVar3;
+          }
+          else {
+            local_44 = 0.0;
+            local_40 = 0.0;
+            local_3c = 0.0;
+            local_38 = 0.0;
+            fVar2 = fVar1;
+            fVar3 = fVar1;
+            if (local_4c != 0) {
+              local_48 = (float)local_4c;
+              local_1c = (ushort *)(iVar10 + uVar14 * 8);
+              do {
+                iStack_64 = 0x10025a07;
+                pfVar15 = (float *)FUN_10022f90(param_2,(uint)*local_1c);
+                local_48 = (float)((int)local_48 - 1);
+                fVar1 = *(float *)(local_1c + 2);
+                local_38 = *pfVar15 * fVar1 + local_38;
+                fVar3 = pfVar15[3] * fVar1 + local_3c;
+                fVar2 = pfVar15[6] * fVar1 + local_40;
+                fVar1 = pfVar15[9] * fVar1 + local_44;
+                local_44 = fVar1;
+                local_40 = fVar2;
+                local_3c = fVar3;
+                local_1c = local_1c + 4;
+              } while (local_48 != 0.0);
+            }
+            fVar4 = 0.0;
+            *(float *)(iVar13 + (int)local_10) =
+                 *pfVar6 * local_38 + pfVar6[2] * fVar2 + pfVar6[1] * fVar3 + fVar1;
+            pfVar18[-1] = *pfVar7 * local_38 + pfVar7[2] * fVar2 + pfVar7[1] * fVar3;
+            local_8[-2] = pfVar8[1] * fVar3 + local_38 * *pfVar8 + pfVar8[2] * fVar2;
+            *local_10 = fVar2 * pfStack0000000c[2] +
+                        fVar3 * pfStack0000000c[1] + local_38 * *pfStack0000000c;
+            local_3c = 0.0;
+            local_40 = 0.0;
+            local_44 = 0.0;
+            local_48 = 0.0;
+            fVar1 = fVar4;
+            fVar2 = fVar4;
+            fVar3 = fVar4;
+            if (local_4c != 0) {
+              local_38 = (float)local_4c;
+              local_1c = (ushort *)(iVar10 + uVar14 * 8);
+              do {
+                iStack_64 = 0x10025b07;
+                iVar17 = FUN_10022f90(param_2,(uint)*local_1c);
+                local_38 = (float)((int)local_38 - 1);
+                fVar1 = *(float *)(local_1c + 2);
+                fVar4 = *(float *)(iVar17 + 4) * fVar1 + local_48;
+                fVar3 = *(float *)(iVar17 + 0x10) * fVar1 + local_44;
+                fVar2 = *(float *)(iVar17 + 0x1c) * fVar1 + local_40;
+                fVar1 = *(float *)(iVar17 + 0x28) * fVar1 + local_3c;
+                local_48 = fVar4;
+                local_44 = fVar3;
+                local_40 = fVar2;
+                local_3c = fVar1;
+                local_1c = local_1c + 4;
+              } while (local_38 != 0.0);
+            }
+            *(float *)(iVar9 + (int)pfVar18) =
+                 *pfVar6 * fVar4 + pfVar6[2] * fVar2 + pfVar6[1] * fVar3 + fVar1;
+            *pfVar18 = *pfVar7 * fVar4 + pfVar7[2] * fVar2 + pfVar7[1] * fVar3;
+            *(float *)(iVar19 + (int)pfVar18) =
+                 pfVar8[1] * fVar3 + fVar4 * *pfVar8 + pfVar8[2] * fVar2;
+            *(float *)(iVar20 + (int)pfVar18) =
+                 fVar2 * pfStack0000000c[2] + fVar3 * pfStack0000000c[1] + fVar4 * *pfStack0000000c;
+            local_3c = 0.0;
+            local_40 = 0.0;
+            local_44 = 0.0;
+            local_48 = 0.0;
+            if (local_4c != 0) {
+              local_1c = (ushort *)(iVar10 + uVar14 * 8);
+              do {
+                iStack_64 = 0x10025c07;
+                iVar17 = FUN_10022f90(param_2,(uint)*local_1c);
+                local_4c = local_4c - 1;
+                fVar1 = *(float *)(local_1c + 2);
+                local_48 = *(float *)(iVar17 + 8) * fVar1 + local_48;
+                local_44 = *(float *)(iVar17 + 0x14) * fVar1 + local_44;
+                local_40 = *(float *)(iVar17 + 0x20) * fVar1 + local_40;
+                local_3c = *(float *)(iVar17 + 0x2c) * fVar1 + local_3c;
+                local_1c = local_1c + 4;
+              } while (local_4c != 0);
+            }
+            *(float *)(iVar11 + (int)local_8) =
+                 pfVar6[1] * local_44 + *pfVar6 * local_48 + local_40 * pfVar6[2] + local_3c;
+            pfVar18[1] = pfVar7[1] * local_44 + *pfVar7 * local_48 + local_40 * pfVar7[2];
+            *local_8 = pfVar8[2] * local_40 + local_48 * *pfVar8 + pfVar8[1] * local_44;
+            *(float *)(iVar12 + (int)local_8) =
+                 local_44 * pfStack0000000c[1] +
+                 local_48 * *pfStack0000000c + pfStack0000000c[2] * local_40;
+          }
+          local_34 = local_34 + 2;
+          pfStack0000000c = pfStack0000000c + 3;
+          local_8 = local_8 + 3;
+          local_10 = local_10 + 3;
+          pfVar18 = pfVar18 + 3;
+          pfVar6 = pfVar6 + 3;
+          pfVar7 = pfVar7 + 3;
+          pfVar8 = pfVar8 + 3;
+          local_50 = local_50 + -1;
+        } while (local_50 != 0);
+        return;
+      }
+    }
+  }
+  return;
+}
+
+
+------------------------------------------------------------------------------
+# FUN_10022f90 = the matrix getter used by FUN_100254e0:
+#   provider object: +0x00 = float* matrices (0x30 == 48 B == 12 floats == 3x4 affine per bone)
+#                    +0x04 = optional u8* palette remapping an influence bone -> matrix index
+# callers: 0x10024ca0, 0x100254e0
+------------------------------------------------------------------------------
+
+int __thiscall FUN_10022f90(void *this,int param_1)
+
+{
+  if (*(int *)((int)this + 4) != 0) {
+    return (uint)*(byte *)(*(int *)((int)this + 4) + param_1) * 0x30 + *(int *)this;
+  }
+  return param_1 * 0x30 + *(int *)this;
+}
+
+
+
+------------------------------------------------------------------------------
+# Call site (model draw method FUN_1002dcc0):
+#   FUN_100254e0(pfVar6, DAT_1016a7dc);      <- Cluster_TransformBones(mesh, provider)
+#   FUN_10024ca0(pfVar6, DAT_1016a7dc);      <- sibling path, same provider
+#   DAT_1016a7dc == the field at DAT_1016a7d0 + 0x0C (a renderer-level global).
+#   DAT_10172204/08/0c/10 = the V / N / TgU / TgV destination arrays (set here
+#   via virtual slot +0x7c calls), which is why FUN_100254e0 sees them as globals.
+------------------------------------------------------------------------------

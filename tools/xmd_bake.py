@@ -21,11 +21,15 @@ clusters from ``Riddick_B05.xmd`` (the in-game body arms, surface
   * ``Pa2_Hand_Detail``   Pa2_Hand_01.xmd cluster 1 (540 verts, untextured)
 
 Coordinate system: the engine's raw model-space floats (Z-up), unconverted.
-Skinning caveat: ``.xmd`` stores bind-pose translations only (no rotations
-anywhere in the file — ``KEYS`` is a string metadata map, ADR-0421), so the
-baked mesh is the artist bind pose; a consumer that poses it must supply the
-bone animation from the engine (or the ``.xsa``/``.xag`` groups). The C++ asset
-therefore carries the geometry **rigidly** today.
+Skinning caveat: ``.xmd`` stores bind-pose node **translations** only (no
+rotations anywhere in the file — ``KEYS`` is a string metadata map, ADR-0421),
+so a consumer that poses the mesh must supply the bone animation from the
+engine (or the ``.xsa``/``.xag`` groups). Note (ADR-0424) that the baked
+geometry is **not** universally the ``NODES`` bind pose: sibling clusters on
+shared bones agree, but the Riddick arm clusters carry a large baked reference
+pose disjoint from the body, so a skinned consumer also needs a per-cluster
+reference transform (GH #59). The C++ asset therefore carries the geometry
+**rigidly** today.
 
 Usage::
 

@@ -2,6 +2,61 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 21 — 2026-10-16 09:05 (scheduled loop)
+- **Note on numbering:** the 08:27 run (which labelled itself "wake 20") pursued
+  this same `#59` draw-side track but ended with only RE artefacts and no state
+  record; this wake completed it. Artifacts from that run are in
+  `tools/autoloop/logs/wake20_*`.
+- **Unit:** GH #59 (→ #46) — **close the "per-cluster reference/bind-inverse
+  transform" hunt**: decompile the draw-side skinning consumer
+  `CXR_Model_TriangleMesh::Cluster_TransformBones_V_N_TgU_TgV`.
+- Finding 1 (real evidence, read-only; Ghidra 12.1.4 via `rea`): the warning
+  string `WARNING: (CXR_Model_TriangleMesh::Cluster_TransformBones_V_N_TgU_TgV)
+  Missing vertex component.` is MXR.dll **VA `0x10144a1d`** (file offset
+  `0x143837`; present in **no** other DLL — raw byte scan of `RndrGL/MSystem/
+  MCCDyn` finds none; `rea search --kind procedures` finds **no** named
+  `Cluster_TransformBones*`, the PDB is not loadable). Its only code ref is
+  `0x10025cf5` → emitter **`FUN_10025ced`** (39 B); `rea xrefs` on it →
+  `{0x10025595, 0x1002559d, 0x100255a5, 0x100255ad}`, all inside
+  **`FUN_100254e0`** (`0x100254e0..0x10025cec`) — i.e. the method is
+  `FUN_100254e0(void* mesh, void* provider)`; only caller `0x1002dcc0`.
+- Finding 2 (decisive, #59): `FUN_100254e0` reads **only** the mesh's geometry
+  (`FUN_1007ee20/1007f100/100825a0/10082750`), its per-vertex influence records
+  (`FUN_1007f9f0`) and its influence pool (`FUN_1007fa40`, 8-byte
+  `{u16 bone; u16 pad; f32 weight}`), and fetches **one 3×4 matrix per bone from
+  the second argument** via `FUN_10022f90(provider, bone)`. Per vertex: `count==1`
+  → `v' = M·v`; `count==2` → inline weight-blend; `count>2` → linear weighted sum
+  of the ≤4 matrices. **No bind/reference/inverse matrix is read from the mesh,
+  the cluster, `MISCELLANEOUS`, or `matrix_map`/`matrix_map_id`.** So #59's
+  "missing per-cluster transform" is **resolved negatively**: it does not exist on
+  the `.xmd` draw path; the reference must be inside the provider.
+- Finding 3: `FUN_10022f90(this, bone)` = `matrices[palette ? palette[bone] :
+  bone]` where `this+0x00` = a **`0x30`-byte (12-float 3×4) per-bone matrix array**
+  and `this+0x04` = an **optional `u8` palette** (callers `0x10024ca0`,
+  `0x100254e0`). So the "matrix map" that matters is the provider's, built at
+  runtime — not the mesh's stored `matrix_bones` (ADR-0423/0426).
+- Change:
+  - `docs/rea/reference/MXR_ClusterTransformBones.txt` (new): the
+    `FUN_100254e0` + `FUN_10022f90` pseudocode with the field/call table.
+  - `docs/adr/0428-xmd-draw-side-skinning-matrix-blend.md` (new) — the finding,
+    the negative resolution of #59, the two remaining probes, and an explicit
+    "not claimed" list.
+  - Corrected the stale "the baked asset is the artist bind pose" wording that
+    ADR-0424 had already disproved for the arm clusters in
+    `src/hook/native_hand_mesh.h`, `tools/xmd_bake.py`, `docs/adr/0420-…md`;
+    `docs/rea/mos-xmd-format.md` "Next steps" now points at the provider.
+- Evidence: `build-all.ps1 -Config Release` OK (x86 `opengl32.dll` + x64 host);
+  `ctest` **5/5 PASS** on x86 **and** x64; `xmd_bake --verify` OK (4 meshes /
+  1548 verts — the header edit was comment-only); `test_mos_xmd.py` (50),
+  `test_xmd_export.py`, `test_xmd_bake.py`, `test_xmd_pose.py` (7),
+  `test_xsa_anim.py` (19), `validate_addresses.py`, `verify_hook_init.py`,
+  `verify_reported_fixes.py`, `scenario_tests.py --check` all PASS.
+- Blocker: none for landing. **Next:** decompile the provider's *builder* (does it
+  multiply in `bind_inverse`?) and the caller `0x1002dcc0`, then decide whether a
+  skinned native hand needs the provider's matrices read at runtime (#34) or can
+  stay rigid (ADR-0427).
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 19 — 2026-10-16 08:21 (scheduled loop)
 - **Unit:** GH #46 (highest priority) — stop leaving the ten wakes of baked
   native arm/hand RE unused: wire the baked mesh into `VRHandRenderer` behind a
