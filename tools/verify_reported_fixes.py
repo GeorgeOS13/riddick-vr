@@ -82,6 +82,21 @@ def main():
                 ("ForwardVz", "HookVx", "UppercutVy", "CrossVx")) and
             "combat_strike_tests.cpp" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8"),
             "GH #65: strikes must be swing-classified by shared, INI-tunable thresholds")
+    cmake_text = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+    send_key_body = camera.split("static void SendKey(WORD vk, bool isDown", 1)[1][:240] \
+        if "static void SendKey(WORD vk, bool isDown" in camera else ""
+    require("ToHeadYawLocal(" in strike_header and "ToHeadYawLocal(" in camera and
+            "SendMouseTap(true)" in camera and "SendKeyHeld(" in camera and
+            "FlushHeldInputs()" in camera and "MELEE STRIKE DISPATCHED" in camera and
+            "class InputHoldScheduler" in (ROOT / "src/hook/input_hold.h").read_text(encoding="utf-8") and
+            "input_hold_tests.cpp" in cmake_text and "aim_pull_tests.cpp" in cmake_text and
+            "SimModeNoInput()" in send_key_body and
+            # 18 unpaired SendMouseClick(true, true) remain: grenade cook, fire,
+            # and pairs interleaved with gesture taps. Paired clicks must stay held taps.
+            camera.count("SendMouseClick(true, true)") <= 18 and
+            "ComputeAimPull(" in camera and "UpdateGuardPose(" in camera and
+            "CombatStanceThresholds" in stance,
+            "GH #65/#62/#52/#50/#51: head-local strikes, held clicks, guard hysteresis, stance and aim pull")
     require("using VRArmIK::ClampWristOrientation" in hands and "MIN_ELBOW_ANGLE" in ik_header and
             "arm_ik_tests.cpp" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8") and
             "DrawArmSegment(shoulder, elbow" in hands and "m_lastIkFrame" in hand_header and
