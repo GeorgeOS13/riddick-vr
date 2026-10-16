@@ -140,6 +140,29 @@ slot -> track -> pool table). `.xag` files are animation **graphs**
 (states/actions/layers) and contain no `COMPRESSEDANIMATIONSET2`. See
 `docs/adr/0422-xsa-compressed-animation-set.md`.
 
+## Cluster header (`CLUSTER`/`MISCELLANEOUS`)
+Every `CLUSTER` node begins with a 44-byte `MISCELLANEOUS` child that carries the
+cluster's surface id and a **reference bounding box** (ADR-0425):
+
+| off | type | field | shipped value |
+|---|---|---|---|
+| `+0x00` | u32 | `version` | `0x102` on every cluster |
+| `+0x04` | u32 | `flags` | `0` exactly when a UV set is present (`{0:2099,1:839,3:1724}`) |
+| `+0x08` | u32 | `surface_index` | `< SURFACES.count`, covers every surface |
+| `+0x0C` | u32 | `reserved` | `0` |
+| `+0x10` | f32[3] | `box_min` | reference lower corner |
+| `+0x1C` | f32[3] | `box_max` | reference upper corner |
+| `+0x28` | f32 | `trailer` | `0.0` |
+
+The `version` word is the only byte `CTriangleMeshCore::Read` inspects (it drives
+the model-version branches). The six floats are **exactly the paired
+`VERTEXFRAMES` frame's quantization range** (`bounds_min`/`bounds_max`, ADR-0415)
+on all 4662 shipped clusters, so the header mirrors the cluster's reference /
+dequantization box; it encloses the decoded geometry but is a **bound, not** the
+per-cluster reference transform (GH #59 stays open). Decoded by
+`tools/mos_xmd.py` (`ClusterInfo.box_min/box_max/encloses`; `--check` enforces
+the box == frame-bounds equality).
+
 ## Cluster reference pose vs `NODES` bind pose
 A cluster's stored `VERTEXFRAMES` geometry is **not** in general the `NODES`
 bind pose: the bind skeleton is one shared array, but each cluster may be stored
@@ -171,4 +194,7 @@ transform, not one global `NODES` bind. `docs/adr/0424-xmd-cluster-reference-pos
    come from the engine or the `.xsa`/`.xag` groups, **not** `KEYS`, which is a
    metadata map; see ADR-0421). A **skinned** path additionally needs a
    per-cluster reference transform, because the shipped clusters are not all in
-   the `NODES` bind pose (ADR-0424, `tools/xmd_pose.py`).
+   the `NODES` bind pose (ADR-0424, `tools/xmd_pose.py`). The `MISCELLANEOUS`
+   header is **not** that transform (it is a reference bound — ADR-0425), so the
+   remaining candidates are the `matrix_map_id` registry (ADR-0423) or a runtime
+   per-cluster matrix in the model/skin class.

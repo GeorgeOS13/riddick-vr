@@ -1777,7 +1777,18 @@
         -8.005503633592948
       ],
       "bind_offset_spread": 6.641092742618058,
-      "surface_index": 0
+      "surface_index": 0,
+      "reference_box_min": [
+        -4.3519158363342285,
+        -6.894895553588867,
+        0.0015501230955123901
+      ],
+      "reference_box_max": [
+        7.6841230392456055,
+        6.894895553588867,
+        36.25871658325195
+      ],
+      "reference_box_encloses_geometry": true
     },
     {
       "cluster": 1,
@@ -1841,7 +1852,18 @@
         9.249323212734053
       ],
       "bind_offset_spread": 5.413723885239635,
-      "surface_index": 1
+      "surface_index": 1,
+      "reference_box_min": [
+        -4.690040111541748,
+        -25.447187423706055,
+        32.848602294921875
+      ],
+      "reference_box_max": [
+        5.412429332733154,
+        6.421110153198242,
+        52.502586364746094
+      ],
+      "reference_box_encloses_geometry": true
     },
     {
       "cluster": 2,
@@ -1901,7 +1923,18 @@
         8.634440908900114
       ],
       "bind_offset_spread": 5.925414721338937,
-      "surface_index": 2
+      "surface_index": 2,
+      "reference_box_min": [
+        -3.9729652404785156,
+        5.470498085021973,
+        32.8485221862793
+      ],
+      "reference_box_max": [
+        3.7494630813598633,
+        25.4471492767334,
+        51.02784729003906
+      ],
+      "reference_box_encloses_geometry": true
     },
     {
       "cluster": 3,
@@ -1951,7 +1984,18 @@
         -8.005503633592948
       ],
       "bind_offset_spread": 6.641092742618058,
-      "surface_index": 0
+      "surface_index": 0,
+      "reference_box_min": [
+        -4.3519158363342285,
+        -6.894895553588867,
+        0.0015501230955123901
+      ],
+      "reference_box_max": [
+        7.6841230392456055,
+        6.894895553588867,
+        36.25871658325195
+      ],
+      "reference_box_encloses_geometry": true
     },
     {
       "cluster": 4,
@@ -2015,7 +2059,18 @@
         9.249323212734053
       ],
       "bind_offset_spread": 5.413723885239635,
-      "surface_index": 1
+      "surface_index": 1,
+      "reference_box_min": [
+        -4.690040111541748,
+        -25.447187423706055,
+        32.848602294921875
+      ],
+      "reference_box_max": [
+        5.412429332733154,
+        6.421110153198242,
+        52.502586364746094
+      ],
+      "reference_box_encloses_geometry": true
     },
     {
       "cluster": 5,
@@ -2075,7 +2130,18 @@
         8.634440908900114
       ],
       "bind_offset_spread": 5.925414721338937,
-      "surface_index": 2
+      "surface_index": 2,
+      "reference_box_min": [
+        -3.9729652404785156,
+        5.470498085021973,
+        32.8485221862793
+      ],
+      "reference_box_max": [
+        3.7494630813598633,
+        25.4471492767334,
+        51.02784729003906
+      ],
+      "reference_box_encloses_geometry": true
     },
     {
       "cluster": 6,
@@ -2164,7 +2230,18 @@
         -10.87335463706812
       ],
       "bind_offset_spread": 14.12072781606943,
-      "surface_index": 0
+      "surface_index": 0,
+      "reference_box_min": [
+        -4.3519158363342285,
+        -6.894895553588867,
+        0.0015501230955123901
+      ],
+      "reference_box_max": [
+        7.6841230392456055,
+        6.894895553588867,
+        36.25871658325195
+      ],
+      "reference_box_encloses_geometry": true
     }
   ],
   "relations": [

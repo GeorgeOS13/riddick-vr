@@ -2,6 +2,63 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 17 — 2026-10-16 05:40 (scheduled loop)
+- **Unit:** GH #59 → #46 — rule out the "per-`CLUSTER`/`MISCELLANEOUS` matrix"
+  candidate for the missing per-cluster reference/bind-inverse transform by
+  decoding the record's 28 previously "opaque" trailing bytes.
+- Finding (real evidence, read-only; `tools/mos_xmd.py`):
+  - `CLUSTER`/`MISCELLANEOUS` is 44 bytes:
+    `{u32 version=0x102; u32 flags; u32 surface_index; u32 reserved=0;
+    f32 box_min[3]; f32 box_max[3]; f32 trailer=0.0}`. The 28 trailing bytes are
+    **six floats, not a matrix**: `version/reserved/trailer` are constant on
+    **4662/4662** shipped records (631 models, one per cluster).
+  - **[box] == the paired `VERTEXFRAMES` frame's quantization range**
+    (`bounds_min`/`bounds_max`, ADR-0415) component-wise on **4662/4662**
+    clusters — the header just mirrors the cluster's reference/dequantization
+    box. `--check` now enforces that equality.
+  - The box encloses the *decoded* geometry AABB on **4662/4662** (guaranteed by
+    dequantization) but equals it exactly on only **1751/4662** (2911 clusters
+    have a quantization range strictly larger than their geometry).
+  - Decisive (`Riddick_B05.xmd`): cluster 0's frame bounds
+    (`-4.3519,-6.8949,0.0016 .. 7.6841,6.8949,36.2587`) equal its `MISCELLANEOUS`
+    box exactly, while its *decoded* geometry AABB is much smaller
+    (`-4.02,-1.87,0 .. 7.68,1.87,25.04`); the left/right-arm reference boxes
+    (`z 32.85..52.50`) are not the bind AABB of their 24/20 arm nodes.
+  - Loader support: `CTriangleMeshCore::Read` (`MXR.dll` `FUN_10080f50`) reads
+    only the leading `u32` of `MISCELLANEOUS` (the model version that gates the
+    version branches); the rest is cluster metadata. (Exploratory: a `Kabsch`
+    bind→centroid fit and a shoulder-rotation scan are inconclusive as
+    transforms — the T-pose/A-pose reading stays an inference, not claimed.)
+- Change:
+  - `tools/mos_xmd.py`: `ClusterInfo.box_min/box_max/trailer` + `encloses()`;
+    `decode_cluster_info` decodes the 6 floats + trailer; `cluster_meshes()`
+    carries `reference_box_min/max` + `reference_box_matches_frame_bounds`;
+    `validate()` enforces the box == frame-bounds equality;
+    `geometry_stats()`/`geometry_summary()` report
+    `reference_box_clusters`/`reference_box_mismatch_clusters`/
+    `reference_box_missing_clusters`; `--mesh` prints the reference box;
+    docstrings.
+  - `tools/test_mos_xmd.py`: **+4** tests (box decode + `encloses`, box == frame
+    bounds, mismatch rejection, box/trailer decode) → **47** total, PASS.
+  - `tools/xmd_pose.py`: `analyze()` attaches the reference box +
+    `reference_box_encloses_geometry` per cluster; `check()` fails when a box
+    fails to enclose the decoded geometry; report prints `refbox=`.
+  - `docs/adr/0425-xmd-cluster-miscellaneous-bounds.md` (new);
+    `docs/rea/mos-xmd-format.md` `MISCELLANEOUS` section + Next-steps update.
+  - `docs/rea/reference/riddick_b05_pose.json` regenerated (per-cluster boxes).
+- Evidence: `mos_xmd.py --inventory <game>\Content\Models --check` → **631/631
+  ok, 0 FAIL** (with the new equality invariant). `test_mos_xmd.py` (47),
+  `test_xmd_export.py`, `test_xmd_bake.py`, `test_xmd_pose.py`,
+  `test_xsa_anim.py`, `validate_addresses.py`, `verify_hook_init.py`,
+  `verify_reported_fixes.py`, `scenario_tests.py --check` all PASS. No C++
+  changed → no `build-all.ps1`/CTest rerun.
+- Blocker: none. **Next:** #59 now narrows to the `matrix_map_id` registry
+  (ADR-0423) or a runtime per-cluster matrix in the model/skin class — trace the
+  consumer of the mesh's `matrix_map` (`+0x24`) / `matrix_map_id` (`+0x28`)
+  (reached from `FUN_10081b10` "CreateMatrixIW" → `FUN_1002a1d0`); the reference
+  box can constrain a candidate transform but does not give one.
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 16 — 2026-10-16 05:00 (scheduled loop)
 - **Unit:** GH #46 → #55/#58 — pin the **pose/base pairing** left open by
   ADR-0422/0423: is a `.xmd` cluster's stored `VERTEXFRAMES` geometry in the

@@ -118,6 +118,30 @@ Geometry (recovered from MXR.dll ``CTriangleMeshCore::Read`` +
                  submesh, in traversal order; every index must be < the paired
                  frame's vertex count and a non-empty UV frame's count must
                  equal its position frame's count (validated by ``--check``).
+                 Each ``CLUSTER``'s ``MISCELLANEOUS`` header additionally mirrors
+                 the cluster frame's quantization range as a 6-float reference
+                 bounding box (ADR-0425; see ``ClusterInfo``).
+
+  MISCELLANEOUS: the 44-byte per-cluster header (see ``ClusterInfo`` /
+                 :func:`decode_cluster_info`)::
+
+                     u32  version         (0x102 on every shipped cluster)
+                     u32  flags           (0 exactly when a UV set is present)
+                     u32  surface_index   (< the SURFACES count)
+                     u32  reserved        (0 on every shipped cluster)
+                     f32  box_min[3]      reference bound, lower corner
+                     f32  box_max[3]      reference bound, upper corner
+                     f32  trailer         (0.0 on every shipped cluster)
+
+                 The six floats are **exactly** the paired ``VERTEXFRAMES``
+                 frame's quantization range (``bounds_min``/``bounds_max``,
+                 ADR-0415): they match on all 4662 shipped clusters, so the
+                 ``MISCELLANEOUS`` header mirrors the cluster's reference /
+                 dequantization box. That box encloses the decoded geometry, but
+                 it is a **bound, not a matrix** - the per-cluster
+                 reference/bind-inverse transform is not stored here (GH #59).
+                 ``--check`` enforces the box == frame-bounds equality. See
+                 ``ClusterInfo``.
 
   SKELETON     : the ``NODES`` and ``NODEINDICES`` chunks, recovered from
                  MXR.dll ``FUN_100219d0`` (skeleton reader), ``FUN_1001f7a0``
@@ -660,27 +684,63 @@ def decode_keys(b: bytes, off: int,
 
 
 # CLUSTER/MISCELLANEOUS (the per-cluster header that precedes VERTEXFRAMES).
-# 44 bytes on every shipped model: u32 model version (0x102, the same value the
-# BONEDEFORM reader branches on), u32 flags, u32 surface_index, u32 reserved,
-# then 24 opaque bytes. Recovered from the on-disk bytes + an aggregate check
-# over all 631 models: surface_index is always < the SURFACES count and the
-# number of distinct values equals that count in every model; flags == 0 exactly
-# when the cluster carries a non-empty TVERTEXFRAMES UV set (2099/2099 textured,
-# 2563/2563 untextured). See docs/adr/0420-native-hand-mesh-asset.md.
+# 44 bytes on every shipped model. Recovered from the on-disk bytes + the loader
+# (MXR.dll FUN_10080f50 reads only the leading u32 model version) + an aggregate
+# check over all 631 models:
+#
+#   u32 model version   (0x102 on every shipped cluster; the value the
+#                        BONEDEFORM reader branches on)
+#   u32 flags           (0 exactly when the cluster carries a non-empty
+#                        TVERTEXFRAMES UV set: 2099/2099 textured, 2563/2563
+#                        untextured)
+#   u32 surface_index   (always < the SURFACES count; the distinct values cover
+#                        every surface)
+#   u32 reserved        (0 on every shipped cluster)
+#   f32 box_min[3]      \ the cluster's reference box - it MIRRORS the paired
+#   f32 box_max[3]       \ VERTEXFRAMES frame's quantization range exactly on
+#                         all 4662 clusters (and encloses the decoded geometry)
+#   f32 trailer         (0.0 on every shipped cluster)
+#
+# See docs/adr/0420-native-hand-mesh-asset.md and
+# docs/adr/0425-xmd-cluster-miscellaneous-bounds.md.
 MISC_RECORD_LEN = 44
+MISC_BOX_OFFSET = 16           # first box float, right after the 4 u32s
+MISC_BOX_FLOATS = 6            # box_min[3] + box_max[3]
 
 
 class ClusterInfo:
-    """Decoded ``CLUSTER``/``MISCELLANEOUS`` header (one per cluster)."""
+    """Decoded ``CLUSTER``/``MISCELLANEOUS`` header (one per cluster).
 
-    __slots__ = ("version", "flags", "surface_index", "reserved", "payload")
+    Beyond the model/surface/flag words, the record carries a 6-float bounding
+    box (``box_min``/``box_max``) plus a trailing float. The box is a *reference*
+    bound that mirrors the cluster's ``VERTEXFRAMES`` quantization range exactly
+    on every shipped cluster (ADR-0425); it encloses the decoded geometry but is
+    not a transform. ``payload`` keeps the raw 28 trailing bytes for callers that
+    want the undecoded bytes.
+    """
 
-    def __init__(self, version, flags, surface_index, reserved, payload):
+    __slots__ = ("version", "flags", "surface_index", "reserved",
+                 "box_min", "box_max", "trailer", "payload")
+
+    def __init__(self, version, flags, surface_index, reserved,
+                 box_min, box_max, trailer, payload):
         self.version = version
         self.flags = flags
         self.surface_index = surface_index
         self.reserved = reserved
-        self.payload = payload          # the trailing opaque bytes
+        self.box_min = box_min          # (x, y, z) reference lower bound
+        self.box_max = box_max          # (x, y, z) reference upper bound
+        self.trailer = trailer          # the trailing f32 (0.0 shipped)
+        self.payload = payload          # the trailing 28 raw bytes
+
+    def encloses(self, mn, mx, tol=0.0) -> bool:
+        """True when this reference box contains the AABB ``[mn, mx]``.
+
+        The box mirrors the cluster's ``VERTEXFRAMES`` quantization range, so the
+        decoded geometry AABB always lies inside it; a caller can still use this
+        to cross-check a box against geometry it decoded itself."""
+        return all(self.box_min[k] <= mn[k] + tol
+                   and self.box_max[k] >= mx[k] - tol for k in range(3))
 
     def as_dict(self):
         return {
@@ -688,15 +748,24 @@ class ClusterInfo:
             "flags": self.flags,
             "surface_index": self.surface_index,
             "reserved": self.reserved,
+            "box_min": list(self.box_min),
+            "box_max": list(self.box_max),
+            "trailer": self.trailer,
         }
 
 
 def decode_cluster_info(b: bytes, off: int, size: int) -> ClusterInfo:
-    if size < 16:
-        raise GeometryError(f"MISCELLANEOUS size {size} < 16")
+    if size < MISC_RECORD_LEN:
+        raise GeometryError(f"MISCELLANEOUS size {size} < {MISC_RECORD_LEN}")
     version, flags, surface_index, reserved = struct.unpack_from("<IIII", b, off)
+    box = struct.unpack_from(
+        "<%df" % (MISC_BOX_FLOATS + 1), b, off + MISC_BOX_OFFSET)
+    box_min = tuple(box[0:3])
+    box_max = tuple(box[3:6])
+    trailer = box[MISC_BOX_FLOATS]
     return ClusterInfo(version, flags, surface_index, reserved,
-                       b[off + 16:off + size])
+                       box_min, box_max, trailer,
+                       b[off + MISC_BOX_OFFSET:off + size])
 
 
 
@@ -1070,6 +1139,11 @@ class Xmd:
         summary["decoded_influences"] = dec["decoded_influences"]
         summary["max_influences_per_vertex"] = dec["max_influences_per_vertex"]
         summary["bad_clusters"] = dec["bad_clusters"]
+        summary["reference_box_clusters"] = dec["reference_box_matched_clusters"]
+        summary["reference_box_mismatch_clusters"] = (
+            dec["reference_box_mismatch_clusters"])
+        summary["reference_box_missing_clusters"] = (
+            dec["reference_box_missing_clusters"])
         try:
             skel = self.skeleton()
         except GeometryError:
@@ -1280,6 +1354,13 @@ class Xmd:
                     problems.append(
                         f"cluster {c['index']}: MISCELLANEOUS flags "
                         f"{info.flags} disagrees with UV presence")
+                if c.get("reference_box_matches_frame_bounds") is False:
+                    problems.append(
+                        f"cluster {c['index']}: MISCELLANEOUS reference box "
+                        f"{list(info.box_min)}..{list(info.box_max)} != the "
+                        f"VERTEXFRAMES quantization range "
+                        f"{c['frames'][-1]['bounds_min']}.."
+                        f"{c['frames'][-1]['bounds_max']}")
             if surface_total and meshes and len(used_surfaces) != surface_total:
                 problems.append(
                     f"cluster surface indices cover {len(used_surfaces)} of "
@@ -1569,6 +1650,11 @@ class Xmd:
                 "vertex_chunk": vn.as_dict(),
                 "surface_index": infos[i].surface_index if aligned else None,
                 "cluster_flags": infos[i].flags if aligned else None,
+                "reference_box_min": (list(infos[i].box_min)
+                                      if aligned else None),
+                "reference_box_max": (list(infos[i].box_max)
+                                      if aligned else None),
+                "reference_box_matches_frame_bounds": None,
                 "frames": [],
                 "uv_chunk": None,
                 "uv_count": None,
@@ -1641,6 +1727,14 @@ class Xmd:
                 except GeometryError as e:
                     entry["error"] = (entry["error"] or "") + f"; {e}"
                     entry["error_kind"] = "corrupt"
+            if aligned and entry["frames"]:
+                fr = entry["frames"][-1]
+                info = infos[i]
+                entry["reference_box_matches_frame_bounds"] = (
+                    all(abs(fr["bounds_min"][k] - info.box_min[k]) <= 1e-3
+                        for k in range(3))
+                    and all(abs(fr["bounds_max"][k] - info.box_max[k]) <= 1e-3
+                            for k in range(3)))
             clusters.append(entry)
         return clusters
 
@@ -1659,6 +1753,9 @@ class Xmd:
         palette_unused = 0
         max_infl = 0
         bad = 0
+        box_ok = 0
+        box_bad = 0
+        box_missing = 0
         for c in clusters:
             if c["frames"]:
                 total_verts += c["frames"][-1]["vertex_count"]
@@ -1667,6 +1764,13 @@ class Xmd:
             if c["uv_count"] is not None:
                 total_uvs += c["uv_count"]
                 uv_clusters += 1
+            match = c.get("reference_box_matches_frame_bounds")
+            if match is None:
+                box_missing += 1
+            elif match:
+                box_ok += 1
+            else:
+                box_bad += 1
             if c.get("skin") is not None:
                 skinned += 1
                 total_infl += c["skin"]["influence_count"]
@@ -1696,7 +1800,14 @@ class Xmd:
             "decoded_influences": total_infl,
             "max_influences_per_vertex": max_infl,
             "bad_clusters": bad,
+            "reference_box_matched_clusters": box_ok,
+            "reference_box_mismatch_clusters": box_bad,
+            "reference_box_missing_clusters": box_missing,
         }
+
+
+def _fmt3(v) -> str:
+    return "(%6.2f,%6.2f,%6.2f)" % (v[0], v[1], v[2])
 
 
 def _printable(b: bytes, minlen: int) -> list[str]:
@@ -1777,6 +1888,9 @@ def report_file(path: str, want_json: bool, with_strings: bool,
               f"decoded_influences={g['decoded_influences']}  "
               f"max_influences_per_vertex={g['max_influences_per_vertex']}  "
               f"bad_clusters={g['bad_clusters']}")
+        print(f"   reference_box_clusters={g['reference_box_clusters']}  "
+              f"mismatch={g['reference_box_mismatch_clusters']}  "
+              f"missing={g['reference_box_missing_clusters']}")
         if with_skeleton and skel is not None:
             print(f"   skeleton: nodes={len(skel.nodes)} "
                   f"used={len(skel.used_nodes())} "
@@ -1809,11 +1923,16 @@ def report_file(path: str, want_json: bool, with_strings: bool,
                       f"in_range={c['index_in_range']} "
                       f"uvs={c['uv_count']} uv_match={c['uv_matches']} "
                       f"surface={c['surface_index']} flags={c['cluster_flags']} "
+                      f"refbox_match={c.get('reference_box_matches_frame_bounds')} "
                       f"skin={c['skin'] and c['skin']['influence_count']} "
                       f"skin_match={c['skin_matches']} "
                       f"bone_space={c['bone_space']} max_bone={c['max_bone']} "
                       f"max_node={c['max_resolved_bone']}"
                       + (f"  ERR {c['error']}" if c["error"] else ""))
+                if c.get("reference_box_min") is not None:
+                    print("      reference box %s .. %s" % (
+                        _fmt3(c["reference_box_min"]),
+                        _fmt3(c["reference_box_max"])))
         if cluster is not None:
             for d in rec["cluster_detail"]:
                 print(f"   cluster {cluster} frame ver=0x{d['version']:x} "

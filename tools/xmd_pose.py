@@ -17,7 +17,9 @@ This tool answers that read-only and deterministically:
                           positions of the bones the cluster uses, the
                           weighted-centroid bind offset per bone, and summary
                           offsets (RMS/max) that quantify how far the stored
-                          geometry sits from the bind pose.
+                          geometry sits from the bind pose. Also carries the
+                          ``MISCELLANEOUS`` reference box and whether it encloses
+                          the stored geometry (ADR-0425).
   * ``cluster_relation``- two clusters' shared bones: how far their stored
                           per-bone centroids are from each other and whether
                           their geometry AABBs overlap.
@@ -314,8 +316,13 @@ def analyze(x, clusters=None):
     poses = [cluster_pose(x, c, table) for c in clusters]
     for p in poses:
         ci = p["cluster"]
-        p["surface_index"] = (infos[ci].surface_index
-                              if ci < len(infos) else None)
+        info = infos[ci] if ci < len(infos) else None
+        p["surface_index"] = info.surface_index if info else None
+        if info is not None:
+            p["reference_box_min"] = list(info.box_min)
+            p["reference_box_max"] = list(info.box_max)
+            p["reference_box_encloses_geometry"] = info.encloses(
+                p["bounds_min"], p["bounds_max"], tol=1e-3)
     relations = []
     for i in range(len(poses)):
         for j in range(i + 1, len(poses)):
@@ -362,6 +369,10 @@ def check(root):
         totals["models"] += 1
         table = bind_table(sk)
         idx = {t["index"] for t in table}
+        try:
+            infos = x.cluster_infos()
+        except GeometryError:
+            infos = []
         for c in range(len(xmd_export.vertex_frame_nodes(x))):
             try:
                 p = cluster_pose(x, c, table)
@@ -371,6 +382,13 @@ def check(root):
             totals["clusters"] += 1
             if p["skinned"]:
                 totals["skinned_clusters"] += 1
+            if c < len(infos) and not infos[c].encloses(
+                    p["bounds_min"], p["bounds_max"], tol=1e-3):
+                problems.append(
+                    f"{path} cluster {c}: reference box "
+                    f"{list(infos[c].box_min)}..{list(infos[c].box_max)} does "
+                    f"not enclose geometry {p['bounds_min']}.."
+                    f"{p['bounds_max']}")
             for o in p["offsets"]:
                 if o["node"] not in idx:
                     problems.append(
@@ -394,7 +412,8 @@ def _print_pose(p):
           f"geom_z={p['bounds_min'][2]:7.2f}..{p['bounds_max'][2]:7.2f} "
           f"bind_z={p['bind_bounds_min'][2]:7.2f}..{p['bind_bounds_max'][2]:7.2f} "
           f"bind_overlap={p['bind_overlap']:5.2f} "
-          f"off_rms={p['bind_offset_rms']:7.3f}")
+          f"off_rms={p['bind_offset_rms']:7.3f} "
+          f"refbox={p.get('reference_box_encloses_geometry')}")
 
 
 def main(argv=None) -> int:

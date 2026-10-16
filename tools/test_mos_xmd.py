@@ -843,7 +843,10 @@ def test_skeleton_detects_parent_table_mismatch(tmp_dir):
 
 
 def _misc_payload(version=0x102, flags=0, surface_index=0, reserved=0,
-                  tail=b"\x00" * 28) -> bytes:
+                  box_min=(0.0, 0.0, 0.0), box_max=(100.0, 200.0, 300.0),
+                  trailer=0.0, tail=None) -> bytes:
+    if tail is None:
+        tail = struct.pack("<7f", *box_min, *box_max, trailer)
     out = struct.pack("<4I", version, flags, surface_index, reserved) + tail
     assert len(out) == mos_xmd.MISC_RECORD_LEN, len(out)
     return out
@@ -884,10 +887,17 @@ def test_cluster_info_roundtrip(tmp_dir):
         assert infos[0].version == 0x102 and infos[0].flags == 3, infos[0]
         assert infos[0].surface_index == 0 and infos[0].reserved == 0
         assert len(infos[0].payload) == 28, len(infos[0].payload)
+        assert infos[0].box_min == (0.0, 0.0, 0.0), infos[0].box_min
+        assert infos[0].box_max == (100.0, 200.0, 300.0), infos[0].box_max
+        assert infos[0].trailer == 0.0
         c = x.cluster_meshes()[0]
         assert c["surface_index"] == 0 and c["cluster_flags"] == 3, c
+        assert c["reference_box_min"] == [0.0, 0.0, 0.0], c
+        assert c["reference_box_matches_frame_bounds"] is True, c
         assert x.validate() == [], x.validate()
         assert x.geometry_summary()["distinct_cluster_surfaces"] == 1
+        assert x.geometry_summary()["reference_box_clusters"] == 1
+        assert x.geometry_summary()["reference_box_mismatch_clusters"] == 0
     finally:
         os.remove(path)
 
@@ -937,6 +947,82 @@ def test_cluster_info_detects_surface_index_out_of_range(tmp_dir):
         problems = x.validate()
         assert any("surface index 2 >= SURFACES count 1" in p
                    for p in problems), problems
+    finally:
+        os.remove(path)
+
+
+def test_cluster_reference_box_equals_frame_bounds(tmp_dir):
+    verts = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)]
+    normals = [(0, 0, 0)] * 4
+    blob = _cluster_info_container(
+        _misc_payload(flags=3, surface_index=0,
+                      box_min=(0.0, 0.0, 0.0), box_max=(100.0, 200.0, 300.0)),
+        _vf204_frame(verts, normals), b"", b"PA1_INMATE_P17", 1)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        assert x.validate() == [], x.validate()
+        assert x.geometry_summary()["reference_box_clusters"] == 1
+        info = x.cluster_infos()[0]
+        assert info.encloses((0.0, 0.0, 0.0), (100.0, 200.0, 300.0))
+        assert info.as_dict()["box_max"] == [100.0, 200.0, 300.0]
+    finally:
+        os.remove(path)
+
+
+def test_cluster_reference_box_detects_frame_bounds_mismatch(tmp_dir):
+    verts = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)]
+    normals = [(0, 0, 0)] * 4
+    # the box (max == 1) does not mirror the frame quantization range (max x 100)
+    blob = _cluster_info_container(
+        _misc_payload(flags=3, surface_index=0,
+                      box_min=(0.0, 0.0, 0.0), box_max=(1.0, 1.0, 1.0)),
+        _vf204_frame(verts, normals), b"", b"PA1_INMATE_P17", 1)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        problems = x.validate()
+        assert any("reference box" in p for p in problems), problems
+        assert x.geometry_summary()["reference_box_mismatch_clusters"] == 1
+    finally:
+        os.remove(path)
+
+
+def test_cluster_reference_box_decodes_box_and_trailer(tmp_dir):
+    verts = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)]
+    normals = [(0, 0, 0)] * 4
+    blob = _cluster_info_container(
+        _misc_payload(flags=3, surface_index=0,
+                      box_min=(-2.5, -1.0, 0.0), box_max=(150.0, 250.0, 350.0),
+                      trailer=0.0),
+        _vf204_frame(verts, normals), b"", b"PA1_INMATE_P17", 1)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        info = x.cluster_infos()[0]
+        assert info.box_min == (-2.5, -1.0, 0.0), info.box_min
+        assert info.box_max == (150.0, 250.0, 350.0), info.box_max
+        assert info.trailer == 0.0
+        assert info.encloses((0.0, 0.0, 0.0), (100.0, 200.0, 300.0))
+    finally:
+        os.remove(path)
+
+
+def test_cluster_info_detects_truncated_misc(tmp_dir):
+    verts = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)]
+    normals = [(0, 0, 0)] * 4
+    short = struct.pack("<4I", 0x102, 3, 0, 0) + b"\x00" * 20   # 36 bytes
+    blob = _cluster_info_container(short, _vf204_frame(verts, normals),
+                                   b"", b"PA1_INMATE_P17", 1)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        try:
+            x.cluster_infos()
+        except mos_xmd.GeometryError:
+            pass
+        else:
+            raise AssertionError("truncated MISCELLANEOUS was accepted")
     finally:
         os.remove(path)
 
@@ -1085,6 +1171,10 @@ def main() -> int:
              test_cluster_info_flags_match_uv,
              test_cluster_info_detects_flags_uv_mismatch,
              test_cluster_info_detects_surface_index_out_of_range,
+             test_cluster_reference_box_equals_frame_bounds,
+             test_cluster_reference_box_detects_frame_bounds_mismatch,
+             test_cluster_reference_box_decodes_box_and_trailer,
+             test_cluster_info_detects_truncated_misc,
              test_keys_roundtrip, test_keys_absent_is_ok,
              test_keys_detects_bad_tiling, test_keys_detects_count_overrun,
              test_keys_detects_missing_terminator,
