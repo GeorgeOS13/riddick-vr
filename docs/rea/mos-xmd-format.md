@@ -77,6 +77,15 @@ names `VERTEXFRAMES`, `TVERTEXFRAMES`, `BONEDEFORM`, `SKELETON`, `NODEINDICES`.
    running prefix sum and `weight = wq/255`. The `bone` byte is a **palette
    index into `matrix_bones`** when that palette is non-empty, and a direct
    skeleton node index only when it is empty (ADR-0423).
+   **Field identity (ADR-0426):** this trailing block is the engine's
+   **`BONEMATRIXMAP`** — `CTriangleMeshCore::Read` stores it at mesh `+0x24`
+   and its signed id at `+0x28`; the legacy path (version ≤ `0x100`) reads it as
+   a literal `GetNext("BONEMATRIXMAP")` chunk alongside `BONEVERTEXINFO`/
+   `BONEINFLUENCE`. `FUN_1007c150` (`MXR_ReadBoneInfluence.txt`) stores the pool
+   bytes **verbatim** (no palette lookup), so palette→node resolution happens in
+   the runtime skinning consumer; `FUN_10081b10` (`MXR_CreateMatrixIW.txt`) packs
+   ≤4 indices/vertex into mesh `+0x30` with 3 weights/vertex at `+0x34`. The
+   `matrix_map_id` is a **per-cluster id**, not a shared palette key (ADR-0426).
 - `VERTEXFRAMES` positions are byte-packed (not plain float3 arrays); the
   reader sizes the list then fills it in `CTriangleMeshCore::Read`. The precise
   packing (likely per-frame deltas) is the remaining decode target.
@@ -195,6 +204,7 @@ transform, not one global `NODES` bind. `docs/adr/0424-xmd-cluster-reference-pos
    metadata map; see ADR-0421). A **skinned** path additionally needs a
    per-cluster reference transform, because the shipped clusters are not all in
    the `NODES` bind pose (ADR-0424, `tools/xmd_pose.py`). The `MISCELLANEOUS`
-   header is **not** that transform (it is a reference bound — ADR-0425), so the
-   remaining candidates are the `matrix_map_id` registry (ADR-0423) or a runtime
-   per-cluster matrix in the model/skin class.
+   header is **not** that transform (it is a reference bound — ADR-0425), and the
+   `BONEMATRIXMAP` palette/id is **not** it either (it is a bone-index palette
+   plus a per-cluster id — ADR-0426), so the remaining candidate is a runtime
+   per-cluster matrix in the model/skin class (built from the live skeleton).

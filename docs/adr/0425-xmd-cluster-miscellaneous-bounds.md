@@ -116,9 +116,10 @@ so no transform is claimed here.
 
 ## Consequences
 - **GH #59 narrows:** the per-cluster reference/bind-inverse transform is not in
-  the `MISCELLANEOUS` header. The remaining candidates are the `matrix_map_id`
-  registry (ADR-0423) or a runtime-per-cluster matrix built by the model/skin
-  class.
+  the `MISCELLANEOUS` header. **Update (ADR-0426):** nor is it the
+  `BONEMATRIXMAP` palette/`matrix_map_id` (the id is a per-cluster id, not a
+  shared palette key). The remaining candidate is a runtime per-cluster matrix
+  built by the model/skin class from the live skeleton.
 - `--check` gains a new corpus invariant (box == frame quantization range,
   4662/4662) that guards future parser/decoder changes and pins the redundancy.
 - The reference box is available to a native renderer as a ready-made

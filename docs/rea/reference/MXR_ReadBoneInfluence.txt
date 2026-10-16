@@ -1,0 +1,79 @@
+# MXR_ReadBoneInfluence
+# provider: ghidra 12.1.4
+# subject : MXR.dll sha256=06424f55f5a0f85eb09b5fbd69491c7f6a88de808c26c513e8dac180f3c2052d
+# evidence_id: ev_a2b0cf11446077dc53e1a8bc0ee56c9fda999bd7092421116d04cac067eca203
+# NOTE: FUN_1007c150 = bone-influence pool reader (version 0x200): {u8 bone; u8 weight_q} -> {u16 bone; f32 weight}, palette NOT applied
+# Ghidra pseudocode, not original source. Read-only artefact of REA analysis.
+------------------------------------------------------------------------------
+
+/* WARNING: Function: __security_check_cookie replaced with injection: security_check_cookie */
+
+void __cdecl FUN_1007c150(CCFile *param_1,uint param_2,void *param_3,int param_4)
+
+{
+  int iVar1;
+  byte bVar2;
+  byte bVar3;
+  byte bVar4;
+  int iVar5;
+  ushort *puVar6;
+  int iVar7;
+  int iVar8;
+  byte local_108 [256];
+  uint local_8;
+  
+  local_8 = DAT_10170ae4 ^ (uint)&stack0xfffffffc;
+  if ((int)param_2 < 0x200) {
+    if (0 < param_4) {
+      do {
+        FUN_1007c030(param_3,param_1,param_2);
+        param_3 = (void *)((int)param_3 + 8);
+        param_4 = param_4 + -1;
+      } while (param_4 != 0);
+    }
+  }
+  else {
+    iVar7 = 0;
+    if (0 < param_4) {
+      do {
+        iVar8 = param_4 - iVar7;
+        if (0x80 < iVar8) {
+          iVar8 = 0x80;
+        }
+        CCFile::ReadLE(param_1,local_108,iVar8 * 2);
+        iVar5 = 0;
+        if (3 < iVar8) {
+          iVar1 = iVar7 * 8;
+          iVar7 = iVar7 + 4 + (iVar8 - 4U & 0xfffffffc);
+          puVar6 = (ushort *)((int)param_3 + iVar1 + 8);
+          do {
+            puVar6[-4] = (ushort)local_108[iVar5 * 2];
+            bVar2 = local_108[iVar5 * 2 + 1];
+            *puVar6 = (ushort)local_108[iVar5 * 2 + 2];
+            bVar3 = local_108[iVar5 * 2 + 3];
+            bVar4 = local_108[iVar5 * 2 + 4];
+            *(float *)(puVar6 + -2) = (float)bVar2 * 0.003921569;
+            puVar6[4] = (ushort)bVar4;
+            bVar2 = local_108[iVar5 * 2 + 5];
+            bVar4 = local_108[iVar5 * 2 + 6];
+            *(float *)(puVar6 + 2) = (float)bVar3 * 0.003921569;
+            puVar6[8] = (ushort)bVar4;
+            bVar3 = local_108[iVar5 * 2 + 7];
+            *(float *)(puVar6 + 6) = (float)bVar2 * 0.003921569;
+            iVar5 = iVar5 + 4;
+            *(float *)(puVar6 + 10) = (float)bVar3 * 0.003921569;
+            puVar6 = puVar6 + 0x10;
+          } while (iVar5 < iVar8 + -3);
+        }
+        for (; iVar5 < iVar8; iVar5 = iVar5 + 1) {
+          bVar2 = local_108[iVar5 * 2 + 1];
+          *(ushort *)((int)param_3 + iVar7 * 8) = (ushort)local_108[iVar5 * 2];
+          iVar7 = iVar7 + 1;
+          *(float *)((int)param_3 + iVar7 * 8 + -4) = (float)bVar2 * 0.003921569;
+        }
+      } while (iVar7 < param_4);
+      return;
+    }
+  }
+  return;
+}

@@ -1,0 +1,220 @@
+{
+  "tool": "tools/mos_xmd.py --matrix-map / geometry_summary",
+  "source": "MXR.dll BONEMATRIXMAP identification (ADR-0426)",
+  "reproduce": "aggregate of mos_xmd.Xmd.matrix_map_groups()/geometry_stats() over all 631 .xmd under <game>/Content/Models; see ADR-0426",
+  "models": 631,
+  "clusters": 4662,
+  "skinned_clusters": 3103,
+  "paletted_clusters": 2411,
+  "matrix_map_id_histogram": {
+    "-6": 1,
+    "-5": 2,
+    "-4": 6,
+    "-3": 2,
+    "-2": 1166,
+    "-1": 33,
+    "0": 721,
+    "1": 292,
+    "2": 137,
+    "3": 50,
+    "4": 1
+  },
+  "distinct_matrix_map_ids": 11,
+  "within_model_id_groups": 657,
+  "within_model_id_groups_multi": 488,
+  "within_model_id_groups_agreeing": 26,
+  "within_model_id_groups_conflicting": 462,
+  "within_model_palette_groups_multi": 1007,
+  "within_model_palette_groups_conflicting_ids": 1006,
+  "ids_with_varying_palette_across_models": 8,
+  "conflict_examples": [
+    {
+      "model": "Characters/Aliens/Alien2_Big.xmd",
+      "matrix_map_id": -2,
+      "clusters": 8,
+      "distinct_palettes": 8
+    },
+    {
+      "model": "Characters/Aliens/Alien2_Big.xmd",
+      "matrix_map_id": 0,
+      "clusters": 4,
+      "distinct_palettes": 4
+    },
+    {
+      "model": "Characters/Aliens/Alien2_Big.xmd",
+      "matrix_map_id": 1,
+      "clusters": 4,
+      "distinct_palettes": 4
+    },
+    {
+      "model": "Characters/Aliens/Alien_Big.xmd",
+      "matrix_map_id": -2,
+      "clusters": 8,
+      "distinct_palettes": 8
+    },
+    {
+      "model": "Characters/Aliens/Alien_Big.xmd",
+      "matrix_map_id": 0,
+      "clusters": 4,
+      "distinct_palettes": 4
+    }
+  ],
+  "riddick_b05_clusters": [
+    {
+      "cluster": 0,
+      "matrix_map_id": -2,
+      "matrix_bones": [
+        68,
+        4,
+        3,
+        2,
+        1,
+        8,
+        5,
+        6,
+        7,
+        69
+      ],
+      "bone_space": "palette"
+    },
+    {
+      "cluster": 1,
+      "matrix_map_id": -2,
+      "matrix_bones": [
+        43,
+        42,
+        41,
+        16,
+        44,
+        38,
+        45,
+        14,
+        39,
+        47,
+        50,
+        48,
+        51,
+        46,
+        40,
+        49,
+        52,
+        13,
+        12,
+        9,
+        8,
+        1,
+        17,
+        18
+      ],
+      "bone_space": "palette"
+    },
+    {
+      "cluster": 2,
+      "matrix_map_id": -2,
+      "matrix_bones": [
+        58,
+        57,
+        56,
+        21,
+        59,
+        53,
+        60,
+        19,
+        54,
+        62,
+        65,
+        63,
+        66,
+        61,
+        55,
+        64,
+        67,
+        18,
+        17,
+        9
+      ],
+      "bone_space": "palette"
+    },
+    {
+      "cluster": 3,
+      "matrix_map_id": 0,
+      "matrix_bones": [
+        68,
+        4,
+        3,
+        2,
+        1,
+        8,
+        5,
+        6,
+        7,
+        69
+      ],
+      "bone_space": "palette"
+    },
+    {
+      "cluster": 4,
+      "matrix_map_id": 1,
+      "matrix_bones": [
+        43,
+        42,
+        41,
+        16,
+        44,
+        38,
+        45,
+        14,
+        39,
+        47,
+        50,
+        48,
+        51,
+        46,
+        40,
+        49,
+        52,
+        13,
+        12,
+        9,
+        8,
+        1,
+        17,
+        18
+      ],
+      "bone_space": "palette"
+    },
+    {
+      "cluster": 5,
+      "matrix_map_id": 2,
+      "matrix_bones": [
+        58,
+        57,
+        56,
+        21,
+        59,
+        53,
+        60,
+        19,
+        54,
+        62,
+        65,
+        63,
+        66,
+        61,
+        55,
+        64,
+        67,
+        18,
+        17,
+        9
+      ],
+      "bone_space": "palette"
+    },
+    {
+      "cluster": 6,
+      "matrix_map_id": -1,
+      "matrix_bones": [],
+      "bone_space": "node"
+    }
+  ]
+}

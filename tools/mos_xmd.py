@@ -102,6 +102,14 @@ Geometry (recovered from MXR.dll ``CTriangleMeshCore::Read`` +
                  The trailing matrix-map block is present for every shipped
                  asset (model version 0x302); it is validated by ``--check``.
 
+                 **Field identity** (ADR-0426): the trailing block *is* the
+                 engine's **bone matrix map** (legacy chunk ``BONEMATRIXMAP``).
+                 ``CTriangleMeshCore::Read`` (`FUN_10080f50`) stores it at mesh
+                 ``+0x24`` and its id at ``+0x28``; the reader does **not** remap
+                 the influence bytes through it (``FUN_1007c150`` stores the raw
+                 ``u8`` verbatim), so palette->node resolution happens in the
+                 runtime skinning consumer, not at load time.
+
                  **Bone-index space** (ADR-0423): an influence's ``bone`` byte
                  is *not* always a skeleton node index. When the trailing
                  ``matrix_bones`` palette is **non-empty** the byte is an index
@@ -1144,6 +1152,10 @@ class Xmd:
             dec["reference_box_mismatch_clusters"])
         summary["reference_box_missing_clusters"] = (
             dec["reference_box_missing_clusters"])
+        summary["matrix_map_ids"] = dec["matrix_map_ids"]
+        summary["matrix_map_shared_id_groups"] = dec["matrix_map_shared_id_groups"]
+        summary["matrix_map_palette_conflict_groups"] = (
+            dec["matrix_map_palette_conflict_groups"])
         try:
             skel = self.skeleton()
         except GeometryError:
@@ -1738,6 +1750,38 @@ class Xmd:
             clusters.append(entry)
         return clusters
 
+    def matrix_map_groups(self) -> list[dict]:
+        """Group paletted skinned clusters by ``matrix_map_id`` (ADR-0426).
+
+        The trailing ``BONEMATRIXMAP`` block carries a signed ``matrix_map_id``
+        and a bone palette. This reports, per id, the clusters that share it and
+        whether their palettes agree. It exists to test the hypothesis that the
+        id names a *shared* bone-set registry: across the shipped corpus it does
+        **not** (a within-model id group usually holds different palettes), so
+        the id is a per-cluster identifier, not a palette key.
+
+        Only clusters whose palette is **non-empty** are considered (an empty
+        palette is the direct-node space and carries no bone matrix map)."""
+        groups: dict = {}
+        for c in self.cluster_meshes():
+            sk = c.get("skin")
+            if not sk or not sk["matrix_bone_count"]:
+                continue
+            groups.setdefault(sk["matrix_map_id"], []).append(
+                (c["index"], tuple(sk["matrix_bones"])))
+        out = []
+        for mid, members in groups.items():
+            palettes = {p for _i, p in members}
+            out.append({
+                "matrix_map_id": mid,
+                "clusters": [i for i, _p in members],
+                "palette_count": len(palettes),
+                "palettes_agree": len(palettes) == 1,
+            })
+        out.sort(key=lambda g: (g["matrix_map_id"] is None,
+                                g["matrix_map_id"] or 0))
+        return out
+
     def geometry_stats(self) -> dict:
         """Aggregate decoded-geometry totals + a pass/fail cross-check."""
         clusters = self.cluster_meshes()
@@ -1756,6 +1800,7 @@ class Xmd:
         box_ok = 0
         box_bad = 0
         box_missing = 0
+        map_groups: dict = {}
         for c in clusters:
             if c["frames"]:
                 total_verts += c["frames"][-1]["vertex_count"]
@@ -1778,6 +1823,8 @@ class Xmd:
                 max_infl = max(max_infl, c["skin"]["max_influences"])
                 if c["bone_space"] == "palette":
                     paletted += 1
+                    map_groups.setdefault(c["skin"]["matrix_map_id"], []).append(
+                        tuple(c["skin"]["matrix_bones"]))
                     if c["palette_fully_used"] is False:
                         palette_unused += 1
                 else:
@@ -1803,6 +1850,15 @@ class Xmd:
             "reference_box_matched_clusters": box_ok,
             "reference_box_mismatch_clusters": box_bad,
             "reference_box_missing_clusters": box_missing,
+            "matrix_map_ids": {str(mid): len(v)
+                               for mid, v in sorted(
+                                   map_groups.items(),
+                                   key=lambda kv: (kv[0] is None,
+                                                   kv[0] or 0))},
+            "matrix_map_shared_id_groups": sum(
+                1 for v in map_groups.values() if len(v) > 1),
+            "matrix_map_palette_conflict_groups": sum(
+                1 for v in map_groups.values() if len(set(v)) > 1),
         }
 
 
@@ -1828,7 +1884,8 @@ def report_file(path: str, want_json: bool, with_strings: bool,
                 with_tree: bool, with_mesh: bool = False,
                 cluster: int | None = None,
                 with_skeleton: bool = False,
-                with_keys: bool = False) -> dict:
+                with_keys: bool = False,
+                with_matrix_map: bool = False) -> dict:
     x = Xmd(path)
     rec = {
         "path": path,
@@ -1852,6 +1909,8 @@ def report_file(path: str, want_json: bool, with_strings: bool,
         rec["skeleton"] = skel.as_dict(with_nodes=True) if skel else None
     if with_keys:
         rec["keys"] = [kv.as_dict() for kv in x.keys()]
+    if with_matrix_map:
+        rec["matrix_map_groups"] = x.matrix_map_groups()
     if cluster is not None:
         vf_nodes = [n for n in x.walk_linked() if n.name == "VERTEXFRAMES"]
         if not 0 <= cluster < len(vf_nodes):
@@ -1891,6 +1950,15 @@ def report_file(path: str, want_json: bool, with_strings: bool,
         print(f"   reference_box_clusters={g['reference_box_clusters']}  "
               f"mismatch={g['reference_box_mismatch_clusters']}  "
               f"missing={g['reference_box_missing_clusters']}")
+        print(f"   matrix_map_ids={g['matrix_map_ids']}  "
+              f"shared_id_groups={g['matrix_map_shared_id_groups']}  "
+              f"palette_conflicts={g['matrix_map_palette_conflict_groups']}")
+        if with_matrix_map:
+            for grp in rec.get("matrix_map_groups", []):
+                print(f"   matrix_map_id={grp['matrix_map_id']}  "
+                      f"clusters={grp['clusters']}  "
+                      f"palettes={grp['palette_count']}  "
+                      f"agree={grp['palettes_agree']}")
         if with_skeleton and skel is not None:
             print(f"   skeleton: nodes={len(skel.nodes)} "
                   f"used={len(skel.used_nodes())} "
@@ -2036,6 +2104,8 @@ def main(argv=None) -> int:
                     help="decode and print the SKELETON NODES/NODEINDICES tree")
     ap.add_argument("--keys", action="store_true",
                     help="decode and print the KEYS metadata map (not animation)")
+    ap.add_argument("--matrix-map", action="store_true",
+                    help="group paletted clusters by matrix_map_id (BONEMATRIXMAP)")
     args = ap.parse_args(argv)
 
     if args.check:
@@ -2069,7 +2139,8 @@ def main(argv=None) -> int:
         ap.error("provide a .xmd path or --inventory DIR")
     rec = report_file(args.path, args.json, args.strings, args.tree,
                       with_mesh=args.mesh, cluster=args.cluster,
-                      with_skeleton=args.skeleton, with_keys=args.keys)
+                      with_skeleton=args.skeleton, with_keys=args.keys,
+                      with_matrix_map=args.matrix_map)
     if args.json:
         print(json.dumps(rec, indent=2))
     return 0

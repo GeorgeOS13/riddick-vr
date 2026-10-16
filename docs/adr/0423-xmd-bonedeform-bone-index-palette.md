@@ -116,6 +116,13 @@ All of the above run inside `mos_xmd.py --check` (631/631 `ok`).
   (ADR-0422) plus the pose/base pairing. The `matrix_map_id` semantics and the
   `MATRIXMAP`-style shared-registry relationship remain uninterpreted.
 
+  **Update (ADR-0426):** the trailing block *is* the engine's `BONEMATRIXMAP`
+  (mesh `+0x24`, id `+0x28`), the loader stores the influence `bone` bytes
+  **verbatim** (no palette lookup), and `matrix_map_id` is a **per-cluster** id —
+  not a shared palette key (the `Riddick_B05` duplicate pairs carry identical
+  palettes with different ids). So the palette is the bone-index space, but the
+  id is not the per-cluster reference transform for GH #59.
+
 ## Reproduce
 ```
 python tools/mos_xmd.py <game>\Content\Models\Characters\Riddick\Riddick_B05.xmd --cluster 1

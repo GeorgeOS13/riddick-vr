@@ -2,6 +2,64 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 18 — 2026-10-16 06:17 (scheduled loop)
+- **Unit:** GH #59 → #46 — identify the mesh's `matrix_map` (`+0x24`) /
+  `matrix_map_id` (`+0x28`) and test the "`matrix_map_id` registry" candidate
+  queued by Wake 17.
+- Finding 1 (real evidence, read-only; Ghidra 12.1.4 via `rea`): the field *is*
+  the engine's **`BONEMATRIXMAP`**. `CTriangleMeshCore::Read` (`FUN_10080f50`,
+  `MXR.dll`) legacy path (model version ≤ `0x100`) reads three named sibling
+  chunks `BONEVERTEXINFO`→`+0x18`, `BONEINFLUENCE`→`+0x20`,
+  **`BONEMATRIXMAP`→`+0x24`** (via `FUN_1007b630` + raw read), then sets
+  `flags |= 0x4000` ("has bone deform" when vertex records non-empty) and
+  `flags |= 0x8000` ("has bone matrix map" when `+0x24` non-empty). The modern
+  path (shipped `0x102`) folds the same three roles into the embedded
+  `BONEDEFORM` (`FUN_1007d260`) which writes the id to `+0x28` and the palette to
+  `+0x24` — the *same* fields.
+- Finding 2: `FUN_1007c150` (influence pool, version `0x200`) expands
+  `{u8 bone; u8 weight_q}` → `{u16 bone; pad; f32 weight}` **verbatim**, no
+  palette lookup — so palette→node resolution is deferred to the runtime skinning
+  consumer, not done at load. `FUN_10081b10` (`"CreateMatrixIW"`) packs ≤ **4**
+  bone indices/vertex (one byte each) into a `u32` at mesh `+0x30` plus 3 weights
+  at `+0x34`, throwing `"Too many bones/vertex %d/4 (%s)"` above 4.
+- Finding 3 (decisive): `matrix_map_id` is a **per-cluster id**, not a shared
+  palette key. Corpus 631 models / 4662 clusters / 3103 skinned / **2411
+  paletted**: 488 within-model multi-cluster id groups, of which **462 have
+  differing palettes** (only 26 agree); 1007 within-model palette groups with
+  >1 cluster, **1006 have differing ids**; 8/11 ids vary in palette across
+  models. Decisive: `Riddick_B05` duplicate pairs c0/c3, c1/c4, c2/c5 have
+  **identical palettes but different ids** (`-2/0`, `-2/1`, `-2/2`) while id `-2`
+  alone spans legs + left arm + right arm (three different palettes).
+- Change:
+  - `tools/mos_xmd.py`: `Xmd.matrix_map_groups()` (per-id cluster groupings +
+    `palettes_agree`; empty-palette clusters excluded); `geometry_stats()`/
+    `geometry_summary()` add `matrix_map_ids` (id → paletted-cluster count),
+    `matrix_map_shared_id_groups`, `matrix_map_palette_conflict_groups`;
+    `report_file()`/`--matrix-map` prints groups; docstring documents the
+    `BONEMATRIXMAP` identity.
+  - `tools/test_mos_xmd.py`: **+3** tests (conflicting-palette id group,
+    agreeing-palette id group, direct clusters excluded) → **50** total, PASS.
+  - `docs/adr/0426-xmd-bonematrixmap-per-cluster-id.md` (new);
+    `docs/rea/reference/MXR_CreateMatrixIW.txt`,
+    `docs/rea/reference/MXR_ReadBoneInfluence.txt` (pseudocode evidence);
+    `docs/rea/reference/xmd_matrix_map_registry.json` (aggregate table +
+    `Riddick_B05` ids/palettes); ADR-0423 + ADR-0425 "still open" cross-refs;
+    `docs/rea/mos-xmd-format.md` `BONEDEFORM` section + Next steps.
+- Evidence: `mos_xmd.py --inventory <game>\Content\Models --check` → **631/631
+  `ok`, 0 FAIL**; `mos_xmd.py Riddick_B05.xmd --matrix-map` →
+  `matrix_map_id=-2 clusters=[0,1,2] palettes=3 agree=False`; `test_mos_xmd.py`
+  (50), `test_xmd_export.py`, `test_xmd_bake.py`, `test_xmd_pose.py`,
+  `test_xsa_anim.py`, `validate_addresses.py`, `verify_hook_init.py`,
+  `verify_reported_fixes.py`, `scenario_tests.py --check` all PASS. No C++
+  changed → no `build-all.ps1`/CTest rerun.
+- Blocker: none. **Next:** #59's only remaining candidate is a **runtime**
+  per-cluster matrix built by the model/skin class from the live skeleton
+  (bind-inverse × current bone matrix) — trace the draw-side consumer of the
+  packed indices at mesh `+0x30` and the
+  `CXR_Model_TriangleMesh::Cluster_TransformBones_V_N_TgU_TgV` transform
+  (RndrGL/MXR) to confirm, or bake a posed arm once a pose source is chosen.
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 17 — 2026-10-16 05:40 (scheduled loop)
 - **Unit:** GH #59 → #46 — rule out the "per-`CLUSTER`/`MISCELLANEOUS` matrix"
   candidate for the missing per-cluster reference/bind-inverse transform by

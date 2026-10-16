@@ -1,0 +1,145 @@
+# MXR_CreateMatrixIW
+# provider: ghidra 12.1.4
+# subject : MXR.dll sha256=06424f55f5a0f85eb09b5fbd69491c7f6a88de808c26c513e8dac180f3c2052d
+# evidence_id: ev_3398699357300c82d5a054fa7ce427d298eecf943813c740e9f9791e94fa9aba
+# NOTE: FUN_10081b10 = CTriangleMeshCore/CBoneDeform "CreateMatrixIW": packs <=4 bone indices/vertex into mesh+0x30 (u32) + 3 weights/vertex at mesh+0x34
+# Ghidra pseudocode, not original source. Read-only artefact of REA analysis.
+------------------------------------------------------------------------------
+
+void __fastcall FUN_10081b10(int *param_1)
+
+{
+  int iVar1;
+  int *piVar2;
+  int *piVar3;
+  char *pcVar4;
+  char *pcVar5;
+  byte bVar6;
+  byte *pbVar7;
+  int iVar8;
+  uint *puVar9;
+  undefined4 *puVar10;
+  undefined4 uVar11;
+  undefined1 local_438 [780];
+  int local_12c [64];
+  int local_2c;
+  int local_28;
+  undefined4 *local_24;
+  int local_20;
+  int local_1c;
+  undefined4 *local_18;
+  int local_14;
+  void *local_10;
+  undefined1 *puStack_c;
+  undefined4 local_8;
+  
+  local_8 = 0xffffffff;
+  puStack_c = &LAB_1013a533;
+  local_10 = ExceptionList;
+  if ((param_1[0x2b] & 0x4000U) != 0) {
+    ExceptionList = &local_10;
+    FUN_1007ed50((int)param_1);
+    if ((((param_1[0x2b] & 1U) != 0) &&
+        (((param_1[6] == 0 || (*(int *)(param_1[6] + 4) == 0)) && ((param_1[0x2b] & 0x4000U) != 0)))
+        ) && (param_1[0x25] != 0)) {
+      FUN_1007ecd0();
+    }
+    if (param_1[6] == 0) {
+      local_14 = 0;
+    }
+    else {
+      local_14 = *(int *)(param_1[6] + 0x18);
+    }
+    if ((((param_1[0x2b] & 1U) != 0) && ((param_1[6] == 0 || (*(int *)(param_1[6] + 4) == 0)))) &&
+       (((param_1[0x2b] & 0x4000U) != 0 && (param_1[0x25] != 0)))) {
+      FUN_1007ecd0();
+    }
+    if (param_1[8] == 0) {
+      local_20 = 0;
+    }
+    else {
+      local_20 = *(int *)(param_1[8] + 0x18);
+    }
+    iVar1 = FUN_1007e770((int)param_1);
+    bVar6 = 0;
+    if (0 < iVar1) {
+      pbVar7 = (byte *)(local_14 + 1);
+      iVar8 = iVar1;
+      do {
+        if (bVar6 <= *pbVar7) {
+          bVar6 = *pbVar7;
+        }
+        pbVar7 = pbVar7 + 4;
+        iVar8 = iVar8 + -1;
+      } while (iVar8 != 0);
+      if (4 < bVar6) {
+        piVar2 = FUN_10005990(&local_2c,"Too many bones/vertex %d/4 (%s)");
+        local_8 = 0;
+        piVar3 = FUN_10004ec0(local_12c);
+        uVar11 = 0;
+        local_8 = 1;
+        pcVar4 = (char *)(**(code **)(*piVar2 + 0x14))();
+        pcVar5 = (char *)(**(code **)(*piVar3 + 0x14))();
+        FUN_100060e0(local_438,param_1,"CreateMatrixIW",pcVar5,pcVar4,uVar11);
+                    /* WARNING: Subroutine does not return */
+        __CxxThrowException_8(local_438,&DAT_10159218);
+      }
+    }
+    FUN_1007b7b0(param_1 + 0xc,iVar1);
+    FUN_1000fcd0(param_1 + 0xd,iVar1 * 3);
+    iVar8 = param_1[0xc];
+    if (iVar8 == 0) {
+      puVar9 = (uint *)0x0;
+    }
+    else {
+      puVar9 = (uint *)(iVar8 + 4);
+    }
+    iVar8 = param_1[0xd];
+    if (iVar8 == 0) {
+      local_24 = (undefined4 *)0x0;
+    }
+    else {
+      local_24 = (undefined4 *)(iVar8 + 4);
+    }
+    if (0 < iVar1) {
+      local_1c = 0;
+      local_18 = local_24;
+      pbVar7 = (byte *)(local_14 + 1);
+      local_28 = iVar1;
+      do {
+        iVar1 = 0;
+        *puVar9 = 0;
+        if (*pbVar7 == 0) {
+LAB_10081d0b:
+          puVar10 = local_24 + local_1c + iVar1;
+          for (iVar8 = 3 - iVar1; iVar8 != 0; iVar8 = iVar8 + -1) {
+            *puVar10 = 0;
+            puVar10 = puVar10 + 1;
+          }
+        }
+        else {
+          puVar10 = local_18;
+          bVar6 = 0;
+          do {
+            *puVar9 = *puVar9 | (uint)*(ushort *)
+                                       (local_20 + ((uint)*(ushort *)(pbVar7 + 1) + iVar1) * 8) <<
+                                (bVar6 & 0x1f);
+            iVar8 = (uint)*(ushort *)(pbVar7 + 1) + iVar1;
+            iVar1 = iVar1 + 1;
+            *puVar10 = *(undefined4 *)(local_20 + 4 + iVar8 * 8);
+            puVar10 = puVar10 + 1;
+            bVar6 = bVar6 + 8;
+          } while (iVar1 < (int)(uint)*pbVar7);
+          if (iVar1 < 3) goto LAB_10081d0b;
+        }
+        local_18 = local_18 + 3;
+        local_1c = local_1c + 3;
+        pbVar7 = pbVar7 + 4;
+        puVar9 = puVar9 + 1;
+        local_28 = local_28 + -1;
+      } while (local_28 != 0);
+    }
+  }
+  ExceptionList = local_10;
+  return;
+}

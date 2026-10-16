@@ -1142,6 +1142,109 @@ def test_keys_decodes_latin1_binary_key(tmp_dir):
         os.remove(path)
 
 
+def _two_skin_container(vf1, bd1, vf2, bd2, bones):
+    """Two VERTEXFRAMES+BONEDEFORM clusters + a shared skeleton.
+
+    Nodes form a flat sibling chain so ``_skin_owner_map`` pairs cluster 0 with
+    ``bd1`` and cluster 1 with ``bd2`` (ADR-0426 matrix-map grouping tests)."""
+    stride = mos_xmd.NODE_RECORD_LEN
+
+    def at(i):
+        return stride * (i + 1)
+
+    np = _flat_nodes(bones)
+    idx = _node_indices(range(1, bones))
+    nodes = [
+        ("VERTEXFRAMES", at(1), 0, len(vf1), 1, 0),
+        ("BONEDEFORM", at(2), 0, len(bd1), 0, 0),
+        ("VERTEXFRAMES", at(3), 0, len(vf2), 1, 0),
+        ("BONEDEFORM", at(4), 0, len(bd2), 0, 0),
+        ("NODES", at(5), 0, len(np), bones, 0),
+        ("NODEINDICES", 0, 0, len(idx), len(idx) // 2, 0),
+    ]
+    return build_container(nodes, [vf1, bd1, vf2, bd2, np, idx])
+
+
+def test_matrix_map_groups_conflicting_palettes(tmp_dir):
+    # Two clusters share matrix_map_id 0 but carry different palettes: the id is
+    # NOT a shared bone-set registry key (ADR-0426).
+    verts = [(0, 0, 0), (1, 0, 0)]
+    normals = [(0, 0, 0)] * 2
+    vrecs = [(0, 1, 0), (0, 1, 1)]
+    bd1 = _bonedeform(vrecs, [(0, 255), (1, 255)],
+                      matrix_map_id=0, matrix_bones=b"\x01\x02")
+    bd2 = _bonedeform(vrecs, [(0, 255), (1, 255)],
+                      matrix_map_id=0, matrix_bones=b"\x01\x03")
+    vf = _vf204_frame(verts, normals)
+    blob = _two_skin_container(vf, bd1, vf, bd2, bones=8)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        assert x.validate() == [], x.validate()
+        st = x.geometry_stats()
+        assert st["matrix_map_ids"] == {"0": 2}, st["matrix_map_ids"]
+        assert st["matrix_map_shared_id_groups"] == 1, st
+        assert st["matrix_map_palette_conflict_groups"] == 1, st
+        groups = x.matrix_map_groups()
+        assert len(groups) == 1 and groups[0]["matrix_map_id"] == 0, groups
+        assert groups[0]["clusters"] == [0, 1], groups
+        assert groups[0]["palette_count"] == 2, groups
+        assert groups[0]["palettes_agree"] is False, groups
+    finally:
+        os.remove(path)
+
+
+def test_matrix_map_groups_agreeing_palettes(tmp_dir):
+    # Same id *and* same palette: agree, no conflict. Empty-palette clusters are
+    # ignored entirely.
+    verts = [(0, 0, 0), (1, 0, 0)]
+    normals = [(0, 0, 0)] * 2
+    vrecs = [(0, 1, 0), (0, 1, 1)]
+    pal = b"\x01\x02"
+    bd1 = _bonedeform(vrecs, [(0, 255), (1, 255)],
+                      matrix_map_id=3, matrix_bones=pal)
+    bd2 = _bonedeform(vrecs, [(0, 255), (1, 255)],
+                      matrix_map_id=3, matrix_bones=pal)
+    vf = _vf204_frame(verts, normals)
+    blob = _two_skin_container(vf, bd1, vf, bd2, bones=8)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        groups = x.matrix_map_groups()
+        assert len(groups) == 1 and groups[0]["palettes_agree"] is True, groups
+        st = x.geometry_stats()
+        assert st["matrix_map_shared_id_groups"] == 1, st
+        assert st["matrix_map_palette_conflict_groups"] == 0, st
+        assert st["matrix_map_ids"] == {"3": 2}, st["matrix_map_ids"]
+    finally:
+        os.remove(path)
+
+
+def test_matrix_map_groups_ignores_direct_clusters(tmp_dir):
+    # A direct-node cluster (empty palette) has no bone matrix map and must not
+    # contribute a group.
+    verts = [(0, 0, 0), (1, 0, 0)]
+    normals = [(0, 0, 0)] * 2
+    vrecs = [(0, 1, 0), (0, 1, 1)]
+    pal = b"\x01\x02"
+    bd1 = _bonedeform(vrecs, [(0, 255), (1, 255)],
+                      matrix_map_id=0, matrix_bones=pal)
+    bd2 = _bonedeform(vrecs, [(0, 255), (1, 255)],
+                      matrix_map_id=-1, matrix_bones=())
+    vf = _vf204_frame(verts, normals)
+    blob = _two_skin_container(vf, bd1, vf, bd2, bones=8)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        groups = x.matrix_map_groups()
+        assert len(groups) == 1 and groups[0]["clusters"] == [0], groups
+        st = x.geometry_stats()
+        assert st["matrix_map_shared_id_groups"] == 0, st
+        assert st["matrix_map_ids"] == {"0": 1}, st["matrix_map_ids"]
+    finally:
+        os.remove(path)
+
+
 def main() -> int:
     tests = (test_roundtrip, test_rejects_bad_magic,
              test_geometry_roundtrip, test_geometry_detects_index_out_of_range,
@@ -1178,7 +1281,10 @@ def main() -> int:
              test_keys_roundtrip, test_keys_absent_is_ok,
              test_keys_detects_bad_tiling, test_keys_detects_count_overrun,
              test_keys_detects_missing_terminator,
-             test_keys_decodes_latin1_binary_key)
+             test_keys_decodes_latin1_binary_key,
+             test_matrix_map_groups_conflicting_palettes,
+             test_matrix_map_groups_agreeing_palettes,
+             test_matrix_map_groups_ignores_direct_clusters)
     with tempfile.TemporaryDirectory() as d:
         for t in tests:
             t(d)
